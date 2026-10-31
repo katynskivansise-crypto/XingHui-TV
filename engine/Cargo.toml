@@ -24,7 +24,8 @@ jni = { version = "0.21", optional = true }
 # quickjs-ng 绑定：用于原样执行 CatVod 的 JS 爬虫规则（对应原 quickjs 模块）。
 # 需要 cc + cmake 编译 quickjs-ng 的 C 代码（沙盒已具备）。
 # loader 用于 ES module 加载（真实 drpy 规则是 module 格式，必须用 Module 模式）
-rquickjs = { version = "0.7", features = ["loader"] }
+# bindgen 用于自动生成安卓 arm64 平台的绑定文件，解决预生成绑定缺失问题
+rquickjs = { version = "0.7", features = ["loader", "bindgen"] }
 
 # pdfh/pdfa HTML 解析宿主：正则提取
 regex = "1"
