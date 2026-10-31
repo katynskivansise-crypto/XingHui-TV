@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@android:color/black">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="8dp"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:text="@string/app_name" />
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player"
+        android:layout_width="match_parent"
+        android:layout_height="240dp"
+        android:background="@android:color/black" />
+
+    <TextView
+        android:id="@+id/labelCat"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="6dp"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:text="分类（引擎 home）" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/catList"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:clipToPadding="false" />
+
+    <TextView
+        android:id="@+id/labelVod"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="6dp"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:text="列表（引擎 category）" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/vodList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false" />
+
+</LinearLayout>

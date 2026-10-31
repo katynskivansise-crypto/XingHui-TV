@@ -1,0 +1,40 @@
+[package]
+name = "tv-engine"
+version = "0.1.0"
+edition = "2021"
+description = "okcaptain/TV 重构方案A — Rust 引擎层(对应原 catvod 模块)"
+
+# 产物类型：cdylib 用于后续通过 cargo-ndk 交叉编译成 .so 集成进安卓
+#          rlib 用于在主机(cargo test/build)验证逻辑，不需要安卓 NDK
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# JSON 工具（对应原 catvod utils/Json.java，基于 gson）
+serde_json = "1"
+
+# 网络层（对应原 catvod net/OkHttp.java，基于 okhttp）。
+# 选 ureq 而非 reqwest：同步 API、依赖轻、编译快，对 4G 内存的云机更稳。
+ureq = { version = "2", features = ["tls"] }
+
+# JNI 桥（对应原 Java 侧调用 Rust 的接口层）。
+# 通过 feature "jni" 启用，默认关闭 —— 保证主机无 Android NDK 也能编译。
+jni = { version = "0.21", optional = true }
+
+# quickjs-ng 绑定：用于原样执行 CatVod 的 JS 爬虫规则（对应原 quickjs 模块）。
+# 需要 cc + cmake 编译 quickjs-ng 的 C 代码（沙盒已具备）。
+# loader 用于 ES module 加载（真实 drpy 规则是 module 格式，必须用 Module 模式）
+rquickjs = { version = "0.7", features = ["loader"] }
+
+# pdfh/pdfa HTML 解析宿主：正则提取
+regex = "1"
+scraper = "0.20"
+url = "2"
+
+[features]
+default = []
+# 启用后编译 JNI 桥（生成 .so 集成进安卓 App 时开启）
+jni = ["dep:jni"]
+
+[profile.release]
+opt-level = 2

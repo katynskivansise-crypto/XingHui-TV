@@ -1,0 +1,97 @@
+//! DrpySpider —— 把 `DrpyEngine`（原样执行真实 drpy 规则的执行器）适配进 Spider 契约。
+//!
+//! 与 fongmi 原版一致：quickjs 的 JS context 非线程安全，原版用 ThreadLocal 每线程一份引擎。
+//! 这里同样**不要求 Send/Sync**，由调度方（JNI thread_local）保证单线程访问，
+//! 引擎在首次调用时惰性初始化（init 等价于构造）。
+
+use std::cell::{Ref, RefCell};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::drpy_engine::{DrpyEngine, ReqImpl};
+use crate::net::Net;
+use crate::proxy::image_proxy;
+use crate::spider::{ProxyResp, Spider};
+
+/// 将 drpy 规则接入 Spider 契约的适配器。
+pub struct DrpySpider {
+    cell: RefCell<Option<DrpyEngine>>,
+    net: Net,
+    dir: String,
+    rule: String,
+    engine_script: String,
+}
+
+impl DrpySpider {
+    /// `dir`：引擎 import 依赖所在目录（如 drpy-core-lite.min.js）；
+    /// `rule`：drpy 规则脚本内容（如 drpy.js 的规则段，或完整 drpy.js）；
+    /// `engine_script`：drpy 引擎脚本内容（如 drpy2.min.js）。
+    pub fn new(dir: String, rule: String, engine_script: String) -> Self {
+        Self {
+            cell: RefCell::new(None),
+            net: Net::new(),
+            dir,
+            rule,
+            engine_script,
+        }
+    }
+
+    /// 惰性初始化引擎（首次调用时用 Net 作为请求后端）。
+    fn ensure(&self) -> Result<Ref<'_, DrpyEngine>, String> {
+        if self.cell.borrow().is_none() {
+            let net = Arc::new(self.net.clone());
+            let req: ReqImpl = Arc::new(move |url: &str| net.string(url));
+            let engine = DrpyEngine::new(&self.dir, &self.rule, &self.engine_script, req)?;
+            *self.cell.borrow_mut() = Some(engine);
+        }
+        Ok(Ref::map(self.cell.borrow(), |o| o.as_ref().unwrap()))
+    }
+}
+
+impl Spider for DrpySpider {
+    fn init(&self, _extend: Option<&str>) -> Result<(), String> {
+        self.ensure()?;
+        Ok(())
+    }
+
+    fn home_content(&self, _filter: bool) -> Result<String, String> {
+        self.ensure()?.home()
+    }
+
+    fn category_content(
+        &self,
+        tid: &str,
+        pg: &str,
+        _filter: bool,
+        extend: &HashMap<String, String>,
+    ) -> Result<String, String> {
+        // Spider 契约的 extend 是扁平 map；DrpyEngine 期望 filter 值 JSON（如 {"sort":"recommend"}）。
+        // 这里把 map 序列化成对象 JSON 传给引擎。
+        let ext = if extend.is_empty() {
+            String::new()
+        } else {
+            serde_json::json!(extend).to_string()
+        };
+        self.ensure()?.category(tid, pg, &ext)
+    }
+
+    fn detail_content(&self, ids: &[String]) -> Result<String, String> {
+        self.ensure()?.detail(&ids.join(","))
+    }
+
+    fn search_content(&self, key: &str, quick: bool, _pg: &str) -> Result<String, String> {
+        self.ensure()?.search(key, quick)
+    }
+
+    fn player_content(&self, flag: &str, id: &str, _vip_flags: &[String]) -> Result<String, String> {
+        self.ensure()?.play(flag, id)
+    }
+
+    fn proxy_local(&self, params: &HashMap<String, String>) -> Option<ProxyResp> {
+        image_proxy(&self.net, params)
+    }
+
+    fn destroy(&self) {
+        self.cell.borrow_mut().take();
+    }
+}
