@@ -1,13 +1,6 @@
 name: 星汇 TV Android 编译
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'engine/**'
-      - 'android/**'
-      - 'frontend/**'
-      - '.github/workflows/**'
   workflow_dispatch:
 
 env:
@@ -48,9 +41,9 @@ jobs:
           targets: aarch64-linux-android
 
       - name: 安装 cargo-ndk
-        run: cargo install cargo-ndk
+        run: cargo install cargo-ndk --version 3.6.0
 
-      # ====== 智能分层缓存 ======
+      # 智能分层缓存
       - name: 缓存 Rust 依赖包
         uses: actions/cache@v4
         with:
@@ -82,7 +75,6 @@ jobs:
           path: frontend/node_modules
           key: ${{ runner.os }}-frontend-node-${{ hashFiles('frontend/package-lock.json') }}
           restore-keys: ${{ runner.os }}-frontend-node-
-      # ==========================
 
       - name: 构建前端页面
         working-directory: frontend
@@ -99,6 +91,7 @@ jobs:
         working-directory: engine
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}/sysroot"
         run: cargo ndk -t arm64-v8a -o ../android/app/src/main/jniLibs build --release
 
       - name: 编译 Debug 安装包
