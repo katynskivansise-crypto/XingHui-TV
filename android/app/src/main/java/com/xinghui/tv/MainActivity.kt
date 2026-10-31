@@ -38,11 +38,13 @@ class MainActivity : AppCompatActivity() {
         val playerView = findViewById<PlayerView>(R.id.player)
         player = ExoPlayer.Builder(this).build().also { playerView.player = it }
 
-        catList = findViewById(R.id.catList).apply {
+        // 修复：显式指定泛型，明确是 RecyclerView
+        catList = findViewById<RecyclerView>(R.id.catList).apply {
             layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
             adapter = ListAdapter(categories) { tid -> onCategory(tid) }
         }
-        vodList = findViewById(R.id.vodList).apply {
+        // 修复：显式指定泛型，明确是 RecyclerView
+        vodList = findViewById<RecyclerView>(R.id.vodList).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = ListAdapter(vods) { id -> onVod(id) }
         }
