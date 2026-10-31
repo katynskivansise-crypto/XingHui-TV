@@ -41,7 +41,7 @@ jobs:
           targets: aarch64-linux-android
 
       - name: 安装 cargo-ndk
-        run: cargo install cargo-ndk --version 3.6.0
+        run: cargo install cargo-ndk
 
       # 智能分层缓存
       - name: 缓存 Rust 依赖包
