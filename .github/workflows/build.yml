@@ -1,0 +1,113 @@
+name: 星汇 TV Android 编译
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'engine/**'
+      - 'android/**'
+      - 'frontend/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: stable
+  JAVA_VERSION: 17
+  ANDROID_COMPILE_SDK: 34
+  ANDROID_BUILD_TOOLS: 34.0.0
+  ANDROID_NDK_VERSION: 26.1.10909125
+
+jobs:
+  build-debug-apk:
+    name: 编译 Debug 安装包 (arm64-v8a)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出项目代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      - name: 安装安卓 SDK / NDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          packages: >
+            platforms;android-${{ env.ANDROID_COMPILE_SDK }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+            ndk;${{ env.ANDROID_NDK_VERSION }}
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: 安装 cargo-ndk
+        run: cargo install cargo-ndk --version 3.5.5
+
+      # ====== 智能分层缓存 ======
+      - name: 缓存 Rust 依赖包
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('engine/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-deps-
+
+      - name: 缓存 Rust 编译中间产物
+        uses: actions/cache@v4
+        with:
+          path: engine/target
+          key: ${{ runner.os }}-rust-build-arm64-${{ hashFiles('engine/Cargo.lock', 'engine/**/*.rs') }}
+          restore-keys: ${{ runner.os }}-rust-build-arm64-
+
+      - name: 缓存 Gradle 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: 缓存前端依赖
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-frontend-node-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-frontend-node-
+      # ==========================
+
+      - name: 构建前端页面
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: 前端资源拷贝到安卓安装包
+        run: |
+          mkdir -p android/app/src/main/assets/web
+          cp -r frontend/dist/* android/app/src/main/assets/web/
+
+      - name: 编译 Rust 引擎 (arm64)
+        working-directory: engine
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: cargo ndk -t arm64-v8a -o ../android/app/src/main/jniLibs build --release
+
+      - name: 编译 Debug 安装包
+        working-directory: android
+        run: gradle :app:assembleDebug
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 星汇TV-debug-arm64
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
