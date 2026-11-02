@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 设置界面布局：仅用原生控件，兼容 API 21 起的旧 TV 盒子 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@android:color/black">
+    android:background="#000000"
+    android:padding="24dp">
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="16dp"
-        android:textColor="@android:color/white"
-        android:textSize="20sp"
+        android:paddingBottom="16dp"
+        android:textColor="#FFFFFF"
+        android:textSize="22sp"
         android:text="设置" />
 
     <!-- 播放内核 -->
@@ -22,23 +24,22 @@
         android:gravity="center_vertical"
         android:padding="16dp"
         android:focusable="true"
-        android:clickable="true"
-        android:background="@android:color/transparent">
+        android:clickable="true">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:textColor="@android:color/white"
-            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:textSize="17sp"
             android:text="播放内核" />
 
         <TextView
             android:id="@+id/valKernel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#80FFFFFF"
-            android:textSize="15sp"
+            android:textColor="#B0FFFFFF"
+            android:textSize="16sp"
             android:text="ExoPlayer（内置）" />
 
     </LinearLayout>
@@ -52,23 +53,22 @@
         android:gravity="center_vertical"
         android:padding="16dp"
         android:focusable="true"
-        android:clickable="true"
-        android:background="@android:color/transparent">
+        android:clickable="true">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:textColor="@android:color/white"
-            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:textSize="17sp"
             android:text="mpv 播放器" />
 
         <TextView
             android:id="@+id/valMpv"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#80FFFFFF"
-            android:textSize="15sp"
+            android:textColor="#B0FFFFFF"
+            android:textSize="16sp"
             android:text="未安装" />
 
     </LinearLayout>
@@ -85,19 +85,26 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:textColor="@android:color/white"
-            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:textSize="17sp"
             android:text="关于" />
 
         <TextView
             android:id="@+id/valAbout"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#80FFFFFF"
-            android:textSize="15sp"
+            android:textColor="#B0FFFFFF"
+            android:textSize="16sp"
             android:text="星汇TV v0.1.0" />
 
     </LinearLayout>
 
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="24dp"
+        android:textColor="#80FFFFFF"
+        android:textSize="14sp"
+        android:text="提示：播放内核选择 mpv 时，需先安装 mpv-android（包名 is.xyz.mpv）；未安装会自动回退内置播放器。" />
+
 </LinearLayout>
-<!-- （注：内容由AI生成） -->
