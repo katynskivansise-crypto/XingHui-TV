@@ -1,5 +1,6 @@
 package com.xinghui.tv
 
+import android.content.Intent
 import android.os.Bundle
 import android.widget.TextView
 import android.widget.Toast
@@ -13,10 +14,8 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * 最小可运行壳：加载 Rust 引擎 → init drpy 规则（assets）→ home/category →
- * 展示列表 → 点击用 ExoPlayer 播放（player 返回的 url）。
- *
- * 真实源若不可达，播放可能失败，但整条数据流（Rust 引擎执行 drpy 规则）已打通。
+ * 主界面：加载 Rust 引擎 → init drpy 规则（assets）→ home/category →
+ * 展示列表 → 点击播放。播放内核由设置决定（内置 ExoPlayer / 外部 mpv）。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -38,12 +37,15 @@ class MainActivity : AppCompatActivity() {
         val playerView = findViewById<PlayerView>(R.id.player)
         player = ExoPlayer.Builder(this).build().also { playerView.player = it }
 
-        // 修复：显式指定泛型，明确是 RecyclerView
+        // 设置入口
+        findViewById<TextView>(R.id.btnSettings).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+
         catList = findViewById<RecyclerView>(R.id.catList).apply {
             layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
             adapter = ListAdapter(categories) { tid -> onCategory(tid) }
         }
-        // 修复：显式指定泛型，明确是 RecyclerView
         vodList = findViewById<RecyclerView>(R.id.vodList).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = ListAdapter(vods) { id -> onVod(id) }
@@ -78,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onVod(vodId: String) {
+        val name = vods.firstOrNull { it.first == vodId }?.second
         Thread {
             val params = JSONObject().put("flag", "play").put("id", vodId).toString()
             val play = Engine.execute("player", KEY, params)
@@ -86,13 +89,24 @@ class MainActivity : AppCompatActivity() {
                 if (url.isNullOrBlank()) {
                     Toast.makeText(this, "未解析到播放地址：$play", Toast.LENGTH_LONG).show()
                 } else {
-                    playUrl(url)
+                    playUrl(url, name)
                 }
             }
         }.start()
     }
 
-    private fun playUrl(url: String) {
+    /**
+     * 统一播放入口：按设置选择内置 ExoPlayer 或外部 mpv。
+     */
+    private fun playUrl(url: String, title: String?) {
+        // mpv 内核且已安装 → 交给 mpv
+        if (PlayerManager.shouldUseMpv(this)) {
+            if (PlayerManager.launchMpv(this, url, title)) {
+                return // 已交给外部播放器
+            }
+            // 启动失败则回退内置
+        }
+        // 内置 ExoPlayer
         player?.apply {
             setMediaItem(MediaItem.fromUri(url))
             prepare()
