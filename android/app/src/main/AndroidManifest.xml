@@ -20,6 +20,12 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 设置界面：使用系统原生黑色主题，兼容旧 TV 盒子（斐讯T1 等） -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
     </application>
 
 </manifest>
