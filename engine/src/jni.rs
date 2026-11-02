@@ -15,9 +15,9 @@ use jni::sys::{jobject, jstring};
 use jni::JNIEnv;
 
 use crate::drpy_spider::DrpySpider;
+use crate::json;
 use crate::net::Net;
 use crate::spider::SpiderManager;
-use crate::json;
 
 // 每线程一份引擎状态（对齐原版 quickjs 的 ThreadLocal 语义）。
 thread_local! {
@@ -35,12 +35,16 @@ pub extern "system" fn Java_com_xinghui_tv_Engine_execute(
     key: JString,
     params: JString,
 ) -> jstring {
-    let action = env.get_string(&action).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let key = env.get_string(&key).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let params = env.get_string(&params).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // 修复点 2：jni 0.21 的 get_string 直接返回 String，
+    // 原 `.map(|s| s.to_string_lossy().into_owned())` 无法编译。
+    let action: String = env.get_string(&action).unwrap_or_default();
+    let key: String = env.get_string(&key).unwrap_or_default();
+    let params: String = env.get_string(&params).unwrap_or_default();
 
     let result = ENGINE.with(|cell| dispatch(&action, &key, &params, &mut cell.borrow_mut().1));
-    env.new_string(result).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+    env.new_string(result)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /// 分发器：`init` 注册 drpy 规则；其余按 action 路由到对应 Spider 方法，返回 JSON。
