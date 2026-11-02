@@ -37,9 +37,13 @@ class MainActivity : AppCompatActivity() {
         val playerView = findViewById<PlayerView>(R.id.player)
         player = ExoPlayer.Builder(this).build().also { playerView.player = it }
 
-        // 设置入口
+        // 设置入口：包 try/catch，跳转失败只提示不崩溃
         findViewById<TextView>(R.id.btnSettings).setOnClickListener {
-            startActivity(Intent(this, SettingsActivity::class.java))
+            runCatching {
+                startActivity(Intent(this, SettingsActivity::class.java))
+            }.onFailure { e ->
+                Toast.makeText(this, "无法打开设置：${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
 
         catList = findViewById<RecyclerView>(R.id.catList).apply {
