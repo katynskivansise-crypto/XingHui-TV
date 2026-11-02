@@ -43,39 +43,7 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk
 
-      # 智能分层缓存
-      - name: 缓存 Rust 依赖包
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('engine/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-deps-
-
-      - name: 缓存 Rust 编译中间产物
-        uses: actions/cache@v4
-        with:
-          path: engine/target
-          key: ${{ runner.os }}-rust-build-arm64-${{ hashFiles('engine/Cargo.lock', 'engine/**/*.rs') }}
-          restore-keys: ${{ runner.os }}-rust-build-arm64-
-
-      - name: 缓存 Gradle 依赖
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
-          restore-keys: ${{ runner.os }}-gradle-
-
-      - name: 缓存前端依赖
-        uses: actions/cache@v4
-        with:
-          path: frontend/node_modules
-          key: ${{ runner.os }}-frontend-node-${{ hashFiles('frontend/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-frontend-node-
-
+      # 构建前端页面
       - name: 构建前端页面
         working-directory: frontend
         run: |
@@ -87,9 +55,9 @@ jobs:
           mkdir -p android/app/src/main/assets/web
           cp -r frontend/dist/* android/app/src/main/assets/web/
 
-      # ============ 修复点 1：加上 --features jni ============
-      # 之前缺少该参数，jni 桥（#[cfg(feature="jni")]）没被编译进 .so，
-      # 导致 libtv_engine.so 没有导出 Java_com_xinghui_tv_Engine_execute 符号，
+      # ============ 关键：编译 Rust 引擎必须带 --features jni ============
+      # 缺少该参数时 jni 桥（#[cfg(feature="jni")]）不编译进 .so，
+      # libtv_engine.so 就没有导出 Java_com_xinghui_tv_Engine_execute 符号，
       # 运行时 UnsatisfiedLinkError。
       - name: 编译 Rust 引擎 (arm64)
         working-directory: engine
