@@ -198,19 +198,26 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 param_map.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect();
 
             match action {
-                "home" => spider.home_content(false).unwrap_or_default(),
-                "category" => spider
-                    .category_content(
-                        extend.get("tid").map(String::as_str).unwrap_or(""),
-                        extend.get("pg").map(String::as_str).unwrap_or("1"),
-                        false,
-                        &extend,
-                    )
-                    .unwrap_or_default(),
+                "home" => match spider.home_content(false) {
+                    Ok(s) => s,
+                    Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
+                },
+                "category" => match spider.category_content(
+                    extend.get("tid").map(String::as_str).unwrap_or(""),
+                    extend.get("pg").map(String::as_str).unwrap_or("1"),
+                    false,
+                    &extend,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
+                },
                 "detail" => {
                     let ids: Vec<String> =
                         extend.get("ids").map(|s| s.split(',').map(String::from).collect()).unwrap_or_default();
-                    let raw = spider.detail_content(&ids).unwrap_or_default();
+                    let raw = match spider.detail_content(&ids) {
+                        Ok(s) => s,
+                        Err(e) => return serde_json::json!({"code":-1,"msg":e}).to_string(),
+                    };
                     // 下沉多线路解析：vod_play_url → 结构化 vod_lines（壳直接透传，缺失时壳回退本地解析）
                     let parsed = json::parse(&raw);
                     if parsed.is_object() {
@@ -229,17 +236,21 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                         raw
                     }
                 }
-                "search" => spider
+                "search" => match spider
                     .search_content(extend.get("key").map(String::as_str).unwrap_or(""), false, "1")
-                    .unwrap_or_default(),
+                {
+                    Ok(s) => s,
+                    Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
+                },
                 "player" => {
-                    let raw = spider
-                        .player_content(
-                            extend.get("flag").map(String::as_str).unwrap_or(""),
-                            extend.get("id").map(String::as_str).unwrap_or(""),
-                            &[],
-                        )
-                        .unwrap_or_default();
+                    let raw = match spider.player_content(
+                        extend.get("flag").map(String::as_str).unwrap_or(""),
+                        extend.get("id").map(String::as_str).unwrap_or(""),
+                        &[],
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => return serde_json::json!({"code":-1,"msg":e}).to_string(),
+                    };
                     // 多清晰度（对齐原版 Url.values）：播放地址含 TVBox `#` 分隔多清晰度、
                     // `name$url` 命名时拆成 urls 数组，壳据此展示清晰度切换；否则原样透传。
                     let parsed = json::parse(&raw);
@@ -281,7 +292,10 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                         .unwrap_or("")
                         .to_string();
                     if url.is_empty() {
-                        spider.live_content().unwrap_or_default()
+                        match spider.live_content() {
+                            Ok(s) => s,
+                            Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
+                        }
                     } else {
                         let tid = pv
                             .get("tid")
