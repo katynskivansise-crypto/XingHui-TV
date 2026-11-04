@@ -26,6 +26,12 @@
             android:name=".SettingsActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 站点管理：添加订阅 / 切换站点 -->
+        <activity
+            android:name=".SitesActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
     </application>
 
 </manifest>
