@@ -27,11 +27,25 @@ impl DrpySpider {
     /// `rule`：drpy 规则脚本内容（如 drpy.js 的规则段，或完整 drpy.js）；
     /// `engine_script`：drpy 引擎脚本内容（如 drpy2.min.js）；
     /// `ua`：可选 UA（空则用引擎默认）；
-    /// `proxy`：可选代理地址 scheme://user:pass@host:port（空则关闭代理）。
-    pub fn new(dir: String, rule: String, engine_script: String, ua: &str, proxy: &str) -> Self {
+    /// `proxy`：可选代理地址 scheme://user:pass@host:port（空则关闭代理）；
+    /// `headers`：站点级 header JSON（对齐原项目 getHeaders，站点 header 优先覆盖全局）。
+    pub fn new(
+        dir: String,
+        rule: String,
+        engine_script: String,
+        ua: &str,
+        proxy: &str,
+        headers: &str,
+    ) -> Self {
         let mut net = Net::new();
         net.set_ua(ua);
         net.set_proxy(proxy);
+        let site_headers: HashMap<String, String> = if headers.is_empty() {
+            HashMap::new()
+        } else {
+            serde_json::from_str(headers).unwrap_or_default()
+        };
+        net.set_headers(&site_headers);
         Self {
             cell: RefCell::new(None),
             net,
@@ -45,7 +59,8 @@ impl DrpySpider {
     fn ensure(&self) -> Result<Ref<'_, DrpyEngine>, String> {
         if self.cell.borrow().is_none() {
             let net = Arc::new(self.net.clone());
-            let req: ReqImpl = Arc::new(move |url: &str| net.string(url));
+            // Latin-1 字节串传输：保留原始字节，JS 侧按规则"编码"字段解码（支持 gb2312/gbk）
+            let req: ReqImpl = Arc::new(move |url: &str| net.string_latin1(url));
             let engine = DrpyEngine::new(&self.dir, &self.rule, &self.engine_script, req)?;
             *self.cell.borrow_mut() = Some(engine);
         }

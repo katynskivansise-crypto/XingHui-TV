@@ -62,6 +62,13 @@ class SitesActivity : Activity() {
                         return@runOnUiThread
                     }
                     store.addAll(sites)
+                    // csp_ 源需要 spider.jar：解析订阅顶层 spider 字段并保存完整下载 URL
+                    val jarRaw = SubscriptionParser.parseJar(text)
+                    if (jarRaw.isNotBlank()) {
+                        store.setJar(SubscriptionParser.jarUrl(jarRaw, url))
+                    }
+                    // 保存订阅 URL：drpy2.js 规则源（./js/*.js / ./lib/*.js）相对路径要基于它解析
+                    store.setSubscribeUrl(url)
                     refresh(tvCurrent, labelSites)
                     Toast.makeText(this, "已添加 ${sites.size} 个站点：${sites.joinToString("、") { it.name }}", Toast.LENGTH_LONG).show()
                 }

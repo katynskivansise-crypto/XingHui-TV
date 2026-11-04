@@ -56,4 +56,35 @@ object SubscriptionParser {
         val ext = o.optString("ext", "")
         return Site(key = key, name = name, api = api, ext = ext, siteJson = o.toString())
     }
+
+    /**
+     * 解析订阅 JSON 顶层的 spider 字段（csp_ 源需要）。
+     * 返回形如 "./jar/spider.jar;md5;c6c7..." 的原文；无则返回空串。
+     */
+    fun parseJar(text: String): String {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return ""
+        return try {
+            JSONObject(trimmed).optString("spider", "")
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    /**
+     * 把订阅顶层 spider 字段转成可下载的完整 URL。
+     * - "./jar/spider.jar" 相对路径 → 基于订阅 URL 所在目录拼接
+     * - "http(s)://..." 直接使用
+     * - "assets://" 等其它形式原样返回（由调用方处理）
+     */
+    fun jarUrl(jarRaw: String, subscribeUrl: String): String {
+        if (jarRaw.isBlank()) return ""
+        val first = jarRaw.substringBefore(";").trim()
+        if (first.startsWith("http://") || first.startsWith("https://")) return first
+        if (first.startsWith("./") && subscribeUrl.contains("://")) {
+            val base = subscribeUrl.substringBeforeLast('/', missingDelimiterValue = subscribeUrl) + "/"
+            return base + first.removePrefix("./")
+        }
+        return first
+    }
 }

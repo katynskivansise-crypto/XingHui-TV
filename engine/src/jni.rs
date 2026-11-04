@@ -63,6 +63,12 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             let site_json = p.get("site_json").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // 站点级 header JSON（drpy2.js 规则源如"新闪雷/茶杯狐"配置了站点 header，对齐原项目 getHeaders）
+            let header = p
+                .get("header")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !site_json.is_empty() {
                 // 站点 JSON 含 api 字段 → TVBox 标准 api 接口源（对齐原项目 SiteViewModel）；
                 // 否则为纯静态 JSON 规则（type=3，数据写在 ext[].list）→ JsonSpider
@@ -73,7 +79,8 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
                 if has_api {
-                    match crate::api_spider::ApiSpider::new(&site_json) {
+                    // 传全局 UA/代理给 ApiSpider（站点 header 优先、全局兜底，对齐原项目 getHeaders）
+                    match crate::api_spider::ApiSpider::new(&site_json, &ua, &proxy) {
                         Ok(spider) => {
                             manager.register(key, Box::new(spider));
                             r#"{"code":0,"msg":"ok"}"#.to_string()
@@ -90,7 +97,7 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     }
                 }
             } else if !rule.is_empty() {
-                let spider = DrpySpider::new(dir, rule, engine_script, &ua, &proxy);
+                let spider = DrpySpider::new(dir, rule, engine_script, &ua, &proxy, &header);
                 manager.register(key, Box::new(spider));
                 r#"{"code":0,"msg":"ok"}"#.to_string()
             } else {

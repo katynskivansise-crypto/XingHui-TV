@@ -62,9 +62,25 @@ class SubscriptionStore(context: Context) {
         return sites().firstOrNull { it.key == k }
     }
 
+    /** csp_ 源用的 spider.jar 完整下载 URL（订阅顶层 spider 字段解析而来） */
+    fun jar(): String = prefs.getString(KEY_JAR, "") ?: ""
+
+    fun setJar(url: String) {
+        prefs.edit().putString(KEY_JAR, url).apply()
+    }
+
+    /** 订阅来源 URL（用于把订阅内相对路径 ./js/xx.js 解析为完整下载地址） */
+    fun subscribeUrl(): String = prefs.getString(KEY_SUB_URL, "") ?: ""
+
+    fun setSubscribeUrl(url: String) {
+        prefs.edit().putString(KEY_SUB_URL, url).apply()
+    }
+
     companion object {
         private const val PREFS = "xinghui_subscriptions"
         private const val KEY_SITES = "sites"
         private const val KEY_CURRENT = "current_key"
+        private const val KEY_JAR = "spider_jar"
+        private const val KEY_SUB_URL = "subscribe_url"
     }
 }

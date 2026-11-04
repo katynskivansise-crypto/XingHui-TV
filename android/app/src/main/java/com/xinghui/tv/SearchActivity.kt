@@ -109,7 +109,10 @@ class SearchActivity : Activity() {
             // 聚合搜索：遍历全部已注册源，引擎合并结果（对齐原项目聚合搜索）
             val params = JSONObject().put("key", keyword).toString()
             val json = Engine.execute("searchAll", "", params)
-            val found = Vod.parseList(json)
+            val found = Vod.parseList(json).toMutableList()
+            // csp_ 源不在 Rust 引擎内，由壳侧 CspLoader 搜索并合并
+            val cspJson = CspLoader.searchAll(this, SubscriptionStore(this), keyword)
+            found.addAll(Vod.parseList(cspJson))
             runOnUiThread {
                 results.clear()
                 results.addAll(found)

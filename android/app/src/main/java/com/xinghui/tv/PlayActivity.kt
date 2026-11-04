@@ -9,7 +9,9 @@ import android.widget.Toast
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.xinghui.tv.dialog.EpisodeDialog
@@ -115,27 +117,41 @@ class PlayActivity : Activity() {
     /** 拉详情（取线路列表）→ 解析指定线路/集播放 */
     private fun fetchAndPlay(vid: String, fl: String, ep: String) {
         runCatching {
-            val detail = Engine.execute("detail", siteKey, JSONObject().put("ids", vid).toString())
+            val store = SubscriptionStore(this)
+            val site = store.sites().firstOrNull { it.key == siteKey }
+            val detail = if (site?.isCsp() == true) {
+                CspLoader.detail(this, site, vid)
+            } else {
+                Engine.execute("detail", siteKey, JSONObject().put("ids", vid).toString())
+            }
             val v = Vod.parseList(detail).firstOrNull()
             v?.let { vodLines = it.lines() }
         }
         resolvePlay(fl, ep)
     }
 
-    /** 调用引擎 player 接口解析出播放地址；失败进入自动换源重试链 */
+    /** 调用引擎 player 接口解析出播放地址；csp_ 源走壳侧并带 header；失败进入自动换源重试链 */
     private fun resolvePlay(fl: String, ep: String) {
         var url = ""
         var err = ""
+        var headers: Map<String, String> = emptyMap()
         qualities.clear()
         qualityIdx = 0
         runCatching {
-            val params = JSONObject()
-                .put("flag", fl)
-                .put("id", if (ep.isNotBlank()) ep else vodId)
-                .toString()
-            val play = Engine.execute("player", siteKey, params)
+            val store = SubscriptionStore(this)
+            val site = store.sites().firstOrNull { it.key == siteKey }
+            val play = if (site?.isCsp() == true) {
+                CspLoader.player(this, site, fl, if (ep.isNotBlank()) ep else vodId)
+            } else {
+                val params = JSONObject()
+                    .put("flag", fl)
+                    .put("id", if (ep.isNotBlank()) ep else vodId)
+                    .toString()
+                Engine.execute("player", siteKey, params)
+            }
             val obj = JSONObject(play)
             url = obj.optString("url", "")
+            if (site?.isCsp() == true) headers = CspLoader.playerHeaders(play)
             // 多清晰度（引擎已把 TVBox `#` 分隔拆成 urls）
             val urls = obj.optJSONArray("urls")
             if (urls != null && urls.length() > 1) {
@@ -154,7 +170,7 @@ class PlayActivity : Activity() {
             return
         }
         runOnUiThread {
-            playUrl(url)
+            playUrl(url, headers)
             updateQualityBtn()
             recordHistory()
         }
@@ -232,7 +248,10 @@ class PlayActivity : Activity() {
         }
     }
 
-    private fun playUrl(url: String) {
+    /** 播放地址；csp_ 源播放需按接口返回的 header（UA/Referer）构建请求 */
+    private var activeHeaders: Map<String, String> = emptyMap()
+
+    private fun playUrl(url: String, headers: Map<String, String> = emptyMap()) {
         if (url.isBlank()) {
             Toast.makeText(this, "未解析到播放地址", Toast.LENGTH_LONG).show()
             return
@@ -244,12 +263,36 @@ class PlayActivity : Activity() {
                 return
             }
         }
-        // 内置 ExoPlayer
+        // header 与当前播放器不一致时重建（csp_ 源播放地址需带 UA/Referer）
+        if (headers != activeHeaders) {
+            rebuildPlayer(headers)
+        }
         player?.apply {
             setMediaItem(MediaItem.fromUri(url))
             prepare()
             playWhenReady = true
         }
+    }
+
+    /** 重建播放器；headers 为空时用默认（普通源），非空时注入请求头（csp_ 源） */
+    private fun rebuildPlayer(headers: Map<String, String>) {
+        player?.release()
+        activeHeaders = headers
+        val builder = ExoPlayer.Builder(this)
+        if (headers.isNotEmpty()) {
+            val dataSourceFactory =
+                DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers)
+            builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+        }
+        player = builder.build().also { playerView?.player = it }
+        // 播放出错 → 自动换源重试（对齐原项目 onErrorEvent→startFlow→checkFlag 线路轮换）
+        player?.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                if (directUrl.isNotBlank()) return // 直播直链不自动换线路
+                onPlayFail("播放出错：${error.errorCodeName}")
+            }
+        })
+        player?.setPlaybackSpeed(speedList[speedIdx])
     }
 
     private fun recordHistory() {

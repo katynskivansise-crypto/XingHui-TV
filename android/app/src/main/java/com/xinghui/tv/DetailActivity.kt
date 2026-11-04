@@ -46,9 +46,15 @@ class DetailActivity : Activity() {
         findViewById<View>(R.id.btnDesc).setOnClickListener { showDescDialog() }
 
         Thread {
-            val key = SubscriptionStore(this).currentKey() ?: MainActivity.DEFAULT_KEY
-            val params = JSONObject().put("ids", vodId).toString()
-            val detail = Engine.execute("detail", key, params)
+            val store = SubscriptionStore(this)
+            val key = store.currentKey() ?: MainActivity.DEFAULT_KEY
+            val site = store.sites().firstOrNull { it.key == key }
+            val detail = if (site?.isCsp() == true) {
+                CspLoader.detail(this, site, vodId)
+            } else {
+                val params = JSONObject().put("ids", vodId).toString()
+                Engine.execute("detail", key, params)
+            }
             val first = Vod.parseList(detail).firstOrNull()
             runOnUiThread {
                 if (first == null) {

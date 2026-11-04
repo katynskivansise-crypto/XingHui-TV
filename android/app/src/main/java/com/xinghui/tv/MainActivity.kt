@@ -187,6 +187,11 @@ class MainActivity : Activity() {
             val ua = Settings(this).ua
             val proxy = Settings(this).proxy
 
+            // csp_ 源准备：订阅里只要有 csp_ 站点，就先下载并加载 spider.jar
+            if (store.sites().any { it.isCsp() } && store.jar().isNotBlank()) {
+                CspLoader.prepare(this, store.jar())
+            }
+
             // 1) 当前站点：注册并作为主界面浏览源
             val registered = mutableListOf<String>()
             val homeKey: String
@@ -215,18 +220,40 @@ class MainActivity : Activity() {
             }
 
             // 3) 主界面用当前站点数据
-            val home = Engine.execute("home", homeKey, "")
+            val home = if (current?.isCsp() == true) {
+                CspLoader.home(this, current)
+            } else {
+                Engine.execute("home", homeKey, "")
+            }
             runOnUiThread { parseHome(home) }
         }.start()
     }
 
     /** 注册单个站点到引擎；返回是否成功。不改变全局当前站 key。 */
     private fun registerSite(site: Site, key: String, dir: String, ua: String, proxy: String): Boolean {
+        // csp_ 源是 spider.jar 内 Java 类，由壳侧 CspLoader 执行，不注册引擎
+        if (site.isCsp()) return true
         val params = JSONObject().put("dir", dir)
         if (ua.isNotBlank()) params.put("ua", ua)
         if (proxy.isNotBlank()) params.put("proxy", proxy)
         return try {
             when {
+                // drpy2.js 规则源（api=./lib/drpy2.min.js 引擎库、ext=./js/*.js 规则脚本，均为订阅内相对路径）
+                site.api.startsWith("./") && site.ext.startsWith("./") -> {
+                    val base = SubscriptionStore(this).subscribeUrl()
+                    val engineUrl = SubscriptionParser.jarUrl(site.api, base)
+                    val ruleUrl = SubscriptionParser.jarUrl(site.ext, base)
+                    val ruleText = JsonFetcher.get(ruleUrl)
+                    val engineText = JsonFetcher.get(engineUrl)
+                    if (ruleText.isNullOrBlank() || engineText.isNullOrBlank()) return false
+                    params.put("rule", ruleText)
+                    params.put("engine", engineText)
+                    // 站点级 header（如"新闪雷/茶杯狐"配置了 UA，对齐原项目 getHeaders）
+                    try {
+                        val h = JSONObject(site.siteJson).optJSONObject("header")
+                        if (h != null && h.length() > 0) params.put("header", h.toString())
+                    } catch (_: Exception) {}
+                }
                 site.ext.startsWith("http") -> {
                     val ruleText = JsonFetcher.get(site.ext)
                     if (ruleText.isNullOrBlank()) return false
@@ -257,8 +284,13 @@ class MainActivity : Activity() {
 
     private fun onCategory(tid: String) {
         Thread {
-            val params = JSONObject().put("tid", tid).put("pg", "1").toString()
-            val cat = Engine.execute("category", siteKey, params)
+            val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
+            val cat = if (site?.isCsp() == true) {
+                CspLoader.category(this, site, tid, "1")
+            } else {
+                val params = JSONObject().put("tid", tid).put("pg", "1").toString()
+                Engine.execute("category", siteKey, params)
+            }
             runOnUiThread { parseCategory(cat) }
         }.start()
     }

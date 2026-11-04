@@ -65,6 +65,19 @@ impl Net {
         }
     }
 
+    /// 合并站点级 header（对齐原项目 getHeaders：站点 header 优先，覆盖全局 UA 等）。
+    /// 空 map 忽略。
+    pub fn set_headers(&mut self, headers: &HashMap<String, String>) {
+        if headers.is_empty() {
+            return;
+        }
+        let mut m = (*self.headers).clone();
+        for (k, v) in headers {
+            m.insert(k.clone(), v.clone());
+        }
+        self.headers = Arc::new(m);
+    }
+
     /// GET 请求并返回字符串 body（原 `OkHttp.string(url)`）。失败返回空串。
     pub fn string(&self, url: &str) -> String {
         String::from_utf8_lossy(&self.fetch("GET", url, None)).into_owned()
@@ -82,6 +95,13 @@ impl Net {
     /// GET 返回字节 body（图片/资源代理用）。
     pub fn bytes(&self, url: &str) -> Vec<u8> {
         self.fetch("GET", url, None)
+    }
+
+    /// GET 返回原始字节按 Latin-1 映射成 String（每个字节 → U+00xx 字符）。
+    /// 用于 drpy 规则按"编码"字段解码：Rust 侧不先做 UTF-8 lossy，保留原始字节，
+    /// JS 侧 `__decodeBytes` 再按 gb2312/gbk/utf-8 等还原文本（对齐原 drpy 编码处理）。
+    pub fn string_latin1(&self, url: &str) -> String {
+        self.bytes(url).iter().map(|&b| b as char).collect()
     }
 
     /// GET + 自定义 header 返回字节 body。

@@ -17,6 +17,9 @@ data class Site(
     val ext: String = "",
     val siteJson: String = "",
 ) {
+    /** csp_ 源（CatVod 内置 Java 爬虫类，走 spider.jar 壳侧执行，对齐原项目 JarLoader） */
+    fun isCsp(): Boolean = api.startsWith("csp_")
+
     fun toJson(): String = JSONObject().apply {
         put("key", key)
         put("name", name)

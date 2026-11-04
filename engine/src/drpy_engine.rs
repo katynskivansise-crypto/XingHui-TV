@@ -79,9 +79,24 @@ impl DrpyEngine {
             let _ = ctx.globals().set(k, g.clone());
         }
 
-        // 原生 `_net(url, obj)` → body 字符串
+        // 原生 `_net(url, obj)` → body 按 Latin-1 映射的字节串（原始字节，供 JS 侧按编码解码）
         let net_fn = Function::new(ctx.clone(), move |url: String| req(&url)).map_err(|e| format!("_net: {e}"))?;
         let _ = ctx.globals().set("_net", net_fn);
+
+        // 原生字符集解码：drpy2 规则"编码: gb2312/gbk/utf-8"支持（对齐原 TextDecoder 语义）。
+        // 输入为 Latin-1 字节串 + 编码 label → 输出解码文本。
+        let decode_fn = Function::new(ctx.clone(), |s: String, label: String| -> String {
+            let bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
+            match encoding_rs::Encoding::for_label(label.as_bytes()) {
+                Some(enc) => {
+                    let (decoded, _, _) = enc.decode(&bytes);
+                    decoded.into_owned()
+                }
+                None => String::from_utf8_lossy(&bytes).into_owned(),
+            }
+        })
+        .map_err(|e| format!("_decodeNative: {e}"))?;
+        let _ = ctx.globals().set("_decodeNative", decode_fn);
 
         // pdfh/pdfa/pd：HTML 解析宿主（完整实现另见 pdfh.rs；当前基础实现）
         let pdfh = Function::new(ctx.clone(), |html: String, rule: String| super::pdfh::pdfh(&html, &rule))
@@ -98,7 +113,8 @@ impl DrpyEngine {
             let _ = ctx.globals().set(alias, v);
         }
 
-        // JS 包装层：req 返回 {content, headers}，buildUrl/joinUrl 等
+        // JS 包装层：req 返回 {content, headers}，buildUrl/joinUrl 等。
+        // 网络字节统一按规则"编码"字段解码（默认 utf-8），支持 gb2312/gbk 中文站。
         let js = r#"
 globalThis.console = { log: globalThis.print, error: globalThis.log, warn: globalThis.log };
 globalThis.oheaders = {};
@@ -106,9 +122,10 @@ globalThis.fetch_params = {};
 globalThis.stringify = JSON.stringify;
 globalThis.buildUrl = function(base, query) { var q = []; for (var k in query) q.push(k + "=" + encodeURIComponent(query[k])); return base + "?" + q.join("&"); };
 globalThis.joinUrl = function(parent, child) { if (!child) return parent; if (child.indexOf("http") >= 0) return child; return parent.replace(/\/+$/, "") + "/" + child.replace(/^\/+/, ""); };
-globalThis.req = function(url, obj) { return { content: _net(url, obj), headers: {} }; };
-globalThis.http = function(url, obj) { return _net(url, obj); };
-globalThis.fetch = function(url, obj) { return _net(url, obj); };
+globalThis.__decode = function(s) { try { var r = globalThis.rule; var enc = (r && r["编码"]) || "utf-8"; return _decodeNative(s, enc); } catch(e) { return _decodeNative(s, "utf-8"); } };
+globalThis.req = function(url, obj) { return { content: __decode(_net(url, obj)), headers: {} }; };
+globalThis.http = function(url, obj) { return __decode(_net(url, obj)); };
+globalThis.fetch = function(url, obj) { return __decode(_net(url, obj)); };
 "#;
         let _: Value = ctx.eval(js).map_err(|e| format!("eval host js: {e}"))?;
 
