@@ -16,6 +16,7 @@ use jni::JNIEnv;
 
 use crate::drpy_spider::DrpySpider;
 use crate::json;
+use crate::json_spider::JsonSpider;
 use crate::net::Net;
 use crate::spider::SpiderManager;
 
@@ -50,14 +51,29 @@ pub extern "system" fn Java_com_xinghui_tv_Engine_execute(
 fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) -> String {
     match action {
         "init" => {
-            // params: {key, dir, rule, engine}
+            // params: {key, dir, rule, engine, site_json}
+            //   - drpy 源：Android 侧下载 ext 规则脚本 → rule/engine → DrpySpider
+            //   - JSON 规则源：整个站点 JSON（含 ext 数组）→ site_json → JsonSpider
             let p = json::safe_object(&json::parse(params));
             let dir = p.get("dir").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let rule = p.get("rule").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let engine_script = p.get("engine").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let spider = DrpySpider::new(dir, rule, engine_script);
-            manager.register(key, Box::new(spider));
-            r#"{"code":0,"msg":"ok"}"#.to_string()
+            let site_json = p.get("site_json").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !site_json.is_empty() {
+                match JsonSpider::new(&site_json) {
+                    Ok(spider) => {
+                        manager.register(key, Box::new(spider));
+                        r#"{"code":0,"msg":"ok"}"#.to_string()
+                    }
+                    Err(e) => format!(r#"{{"code":-1,"msg":"{}"}}"#, e),
+                }
+            } else if !rule.is_empty() {
+                let spider = DrpySpider::new(dir, rule, engine_script);
+                manager.register(key, Box::new(spider));
+                r#"{"code":0,"msg":"ok"}"#.to_string()
+            } else {
+                r#"{"code":-1,"msg":"no rule"}"#.to_string()
+            }
         }
         _ => {
             let Some(spider) = manager.get(key) else {
