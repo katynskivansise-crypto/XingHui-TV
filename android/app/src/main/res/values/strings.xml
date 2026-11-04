@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">星汇 TV</string>
+    <!-- 播放缩放档位（对齐原项目 setScale：等比/拉伸/裁剪） -->
+    <string-array name="select_scale">
+        <item>等比</item>
+        <item>拉伸</item>
+        <item>裁剪</item>
+    </string-array>
 </resources>

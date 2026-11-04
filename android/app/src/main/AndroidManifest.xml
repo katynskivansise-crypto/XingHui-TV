@@ -21,15 +21,52 @@
             </intent-filter>
         </activity>
 
-        <!-- 设置界面：使用系统原生黑色主题，兼容旧 TV 盒子（斐讯T1 等） -->
+        <!-- 站点管理 -->
+        <activity
+            android:name=".SitesActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 设置 -->
         <activity
             android:name=".SettingsActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Black.NoTitleBar" />
 
-        <!-- 站点管理：添加订阅 / 切换站点 -->
+        <!-- 详情 -->
         <activity
-            android:name=".SitesActivity"
+            android:name=".DetailActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 播放 -->
+        <activity
+            android:name=".PlayActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 搜索 -->
+        <activity
+            android:name=".SearchActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 直播 -->
+        <activity
+            android:name=".LiveActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 历史记录 -->
+        <activity
+            android:name=".HistoryActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <!-- 收藏 -->
+        <activity
+            android:name=".CollectActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Black.NoTitleBar" />
     </application>

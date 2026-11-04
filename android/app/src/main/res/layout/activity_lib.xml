@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 历史/收藏共用页：标题 + 返回 + 清空 + 卡片网格 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#000000"
+    android:padding="24dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="10dp"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="#66000000"
+            android:text="← 返回" />
+
+        <TextView
+            android:id="@+id/libTitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingLeft="16dp"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:text="资料库" />
+
+        <TextView
+            android:id="@+id/btnClear"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="10dp"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="#663333"
+            android:text="清空" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/libCount"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:paddingBottom="8dp"
+        android:textColor="#B0FFFFFF"
+        android:textSize="14sp"
+        android:text="共 0 条" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/libList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false" />
+
+</LinearLayout>

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV 软键盘（对齐原项目 KeyboardAdapter：A-Z + 0-9，全键 focusable，OK 键输入） -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <!-- 数字行 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_gravity="center_horizontal">
+
+        <TextView android:id="@+id/k_0" style="@style/TvKey" android:text="0" />
+        <TextView android:id="@+id/k_1" style="@style/TvKey" android:text="1" />
+        <TextView android:id="@+id/k_2" style="@style/TvKey" android:text="2" />
+        <TextView android:id="@+id/k_3" style="@style/TvKey" android:text="3" />
+        <TextView android:id="@+id/k_4" style="@style/TvKey" android:text="4" />
+        <TextView android:id="@+id/k_5" style="@style/TvKey" android:text="5" />
+        <TextView android:id="@+id/k_6" style="@style/TvKey" android:text="6" />
+        <TextView android:id="@+id/k_7" style="@style/TvKey" android:text="7" />
+        <TextView android:id="@+id/k_8" style="@style/TvKey" android:text="8" />
+        <TextView android:id="@+id/k_9" style="@style/TvKey" android:text="9" />
+    </LinearLayout>
+
+    <!-- 字母行 1 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_gravity="center_horizontal">
+
+        <TextView android:id="@+id/k_a" style="@style/TvKey" android:text="A" />
+        <TextView android:id="@+id/k_b" style="@style/TvKey" android:text="B" />
+        <TextView android:id="@+id/k_c" style="@style/TvKey" android:text="C" />
+        <TextView android:id="@+id/k_d" style="@style/TvKey" android:text="D" />
+        <TextView android:id="@+id/k_e" style="@style/TvKey" android:text="E" />
+        <TextView android:id="@+id/k_f" style="@style/TvKey" android:text="F" />
+        <TextView android:id="@+id/k_g" style="@style/TvKey" android:text="G" />
+        <TextView android:id="@+id/k_h" style="@style/TvKey" android:text="H" />
+        <TextView android:id="@+id/k_i" style="@style/TvKey" android:text="I" />
+        <TextView android:id="@+id/k_j" style="@style/TvKey" android:text="J" />
+    </LinearLayout>
+
+    <!-- 字母行 2 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_gravity="center_horizontal">
+
+        <TextView android:id="@+id/k_k" style="@style/TvKey" android:text="K" />
+        <TextView android:id="@+id/k_l" style="@style/TvKey" android:text="L" />
+        <TextView android:id="@+id/k_m" style="@style/TvKey" android:text="M" />
+        <TextView android:id="@+id/k_n" style="@style/TvKey" android:text="N" />
+        <TextView android:id="@+id/k_o" style="@style/TvKey" android:text="O" />
+        <TextView android:id="@+id/k_p" style="@style/TvKey" android:text="P" />
+        <TextView android:id="@+id/k_q" style="@style/TvKey" android:text="Q" />
+        <TextView android:id="@+id/k_r" style="@style/TvKey" android:text="R" />
+        <TextView android:id="@+id/k_s" style="@style/TvKey" android:text="S" />
+        <TextView android:id="@+id/k_t" style="@style/TvKey" android:text="T" />
+    </LinearLayout>
+
+    <!-- 字母行 3 + 删除/确认 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_gravity="center_horizontal">
+
+        <TextView android:id="@+id/k_u" style="@style/TvKey" android:text="U" />
+        <TextView android:id="@+id/k_v" style="@style/TvKey" android:text="V" />
+        <TextView android:id="@+id/k_w" style="@style/TvKey" android:text="W" />
+        <TextView android:id="@+id/k_x" style="@style/TvKey" android:text="X" />
+        <TextView android:id="@+id/k_y" style="@style/TvKey" android:text="Y" />
+        <TextView android:id="@+id/k_z" style="@style/TvKey" android:text="Z" />
+        <TextView android:id="@+id/k_del" style="@style/TvKey" android:text="删" />
+        <TextView android:id="@+id/k_ok" style="@style/TvKey" android:text="确定" />
+    </LinearLayout>
+
+</LinearLayout>

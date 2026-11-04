@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 选集/线路弹窗：上标题，左线路列表，右集数列表 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="#E6000000"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/epTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="10dp"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:text="线路 / 选集" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="300dp"
+        android:orientation="horizontal">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvLine"
+            android:layout_width="150dp"
+            android:layout_height="match_parent"
+            android:clipToPadding="false" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvEpisode"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:clipToPadding="false" />
+
+    </LinearLayout>
+
+</LinearLayout>

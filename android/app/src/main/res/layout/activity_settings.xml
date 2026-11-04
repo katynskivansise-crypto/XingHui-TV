@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 设置界面布局：仅用原生控件，兼容 API 21 起的旧 TV 盒子 -->
+<!-- 设置界面布局（分组式）：仅原生控件，兼容 API 21 起的旧 TV 盒子 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -15,14 +15,23 @@
         android:textSize="22sp"
         android:text="设置" />
 
-    <!-- 播放内核 -->
+    <!-- 播放 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="6dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FFCC00"
+        android:textSize="14sp"
+        android:text="播放" />
+
     <LinearLayout
         android:id="@+id/rowKernel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:padding="16dp"
+        android:padding="14dp"
         android:focusable="true"
         android:clickable="true">
 
@@ -31,7 +40,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="#FFFFFF"
-            android:textSize="17sp"
+            android:textSize="16sp"
             android:text="播放内核" />
 
         <TextView
@@ -39,19 +48,28 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="#B0FFFFFF"
-            android:textSize="16sp"
+            android:textSize="15sp"
             android:text="ExoPlayer（内置）" />
 
     </LinearLayout>
 
-    <!-- mpv 状态 -->
+    <!-- 网络 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FFCC00"
+        android:textSize="14sp"
+        android:text="网络" />
+
     <LinearLayout
-        android:id="@+id/rowMpv"
+        android:id="@+id/rowTimeout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:padding="16dp"
+        android:padding="14dp"
         android:focusable="true"
         android:clickable="true">
 
@@ -60,51 +78,334 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="#FFFFFF"
-            android:textSize="17sp"
-            android:text="mpv 播放器" />
+            android:textSize="16sp"
+            android:text="网络超时" />
 
         <TextView
-            android:id="@+id/valMpv"
+            android:id="@+id/valTimeout"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="#B0FFFFFF"
-            android:textSize="16sp"
-            android:text="未安装" />
+            android:textSize="15sp"
+            android:text="15 秒" />
 
     </LinearLayout>
 
-    <!-- 关于 -->
     <LinearLayout
+        android:id="@+id/rowUa"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:padding="16dp">
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="#FFFFFF"
-            android:textSize="17sp"
-            android:text="关于" />
+            android:textSize="16sp"
+            android:text="User-Agent" />
+
+        <TextView
+            android:id="@+id/valUa"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="默认" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rowProxy"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="代理" />
+
+        <TextView
+            android:id="@+id/valProxy"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="14sp"
+            android:text="关闭" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rowEpg"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="直播 EPG 源" />
+
+        <TextView
+            android:id="@+id/valEpg"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="14sp"
+            android:text="未配置" />
+
+    </LinearLayout>
+
+    <!-- 界面 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FFCC00"
+        android:textSize="14sp"
+        android:text="界面" />
+
+    <LinearLayout
+        android:id="@+id/rowPoster"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="显示海报" />
+
+        <TextView
+            android:id="@+id/valPoster"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="开" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rowHomeHistory"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="首页显示历史" />
+
+        <TextView
+            android:id="@+id/valHomeHistory"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="开" />
+
+    </LinearLayout>
+
+    <!-- 资料库 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FFCC00"
+        android:textSize="14sp"
+        android:text="资料库" />
+
+    <LinearLayout
+        android:id="@+id/rowHistory"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="历史记录" />
+
+        <TextView
+            android:id="@+id/valHistory"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="0 条（点击清空）" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rowFav"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="收藏" />
+
+        <TextView
+            android:id="@+id/valFav"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="0 条（点击清空）" />
+
+    </LinearLayout>
+
+    <!-- 备份与恢复（对应原项目 BackupDialog） -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FFCC00"
+        android:textSize="14sp"
+        android:text="备份与恢复" />
+
+    <LinearLayout
+        android:id="@+id/rowBackup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="备份数据" />
+
+        <TextView
+            android:id="@+id/valBackup"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="导出到本地" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rowRestore"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp"
+        android:focusable="true"
+        android:clickable="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="恢复数据" />
+
+        <TextView
+            android:id="@+id/valRestore"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#B0FFFFFF"
+            android:textSize="15sp"
+            android:text="从本地导入" />
+
+    </LinearLayout>
+
+    <!-- 关于 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FFCC00"
+        android:textSize="14sp"
+        android:text="关于" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="14dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:text="版本" />
 
         <TextView
             android:id="@+id/valAbout"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="#B0FFFFFF"
-            android:textSize="16sp"
+            android:textSize="15sp"
             android:text="星汇TV v0.1.0" />
 
     </LinearLayout>
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="24dp"
-        android:textColor="#80FFFFFF"
-        android:textSize="14sp"
-        android:text="提示：播放内核选择 mpv 时，需先安装 mpv-android（包名 is.xyz.mpv）；未安装会自动回退内置播放器。" />
 
 </LinearLayout>

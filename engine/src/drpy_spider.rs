@@ -25,11 +25,16 @@ pub struct DrpySpider {
 impl DrpySpider {
     /// `dir`：引擎 import 依赖所在目录（如 drpy-core-lite.min.js）；
     /// `rule`：drpy 规则脚本内容（如 drpy.js 的规则段，或完整 drpy.js）；
-    /// `engine_script`：drpy 引擎脚本内容（如 drpy2.min.js）。
-    pub fn new(dir: String, rule: String, engine_script: String) -> Self {
+    /// `engine_script`：drpy 引擎脚本内容（如 drpy2.min.js）；
+    /// `ua`：可选 UA（空则用引擎默认）；
+    /// `proxy`：可选代理地址 scheme://user:pass@host:port（空则关闭代理）。
+    pub fn new(dir: String, rule: String, engine_script: String, ua: &str, proxy: &str) -> Self {
+        let mut net = Net::new();
+        net.set_ua(ua);
+        net.set_proxy(proxy);
         Self {
             cell: RefCell::new(None),
-            net: Net::new(),
+            net,
             dir,
             rule,
             engine_script,

@@ -43,6 +43,28 @@ impl Net {
         }
     }
 
+    /// 设置全局 UA（对齐原 RequestInterceptor 注入 User-Agent）。空值忽略。
+    pub fn set_ua(&mut self, ua: &str) {
+        if ua.is_empty() {
+            return;
+        }
+        let mut m = (*self.headers).clone();
+        m.insert("User-Agent".to_string(), ua.to_string());
+        self.headers = Arc::new(m);
+    }
+
+    /// 设置代理（对齐原 OkProxySelector）。空值关闭代理。
+    /// 格式：scheme://user:pass@host:port，如 http://user:pass@127.0.0.1:7890
+    pub fn set_proxy(&mut self, proxy_url: &str) {
+        if proxy_url.is_empty() {
+            self.proxy = false;
+            self.proxy_url = Arc::new(None);
+        } else {
+            self.proxy = true;
+            self.proxy_url = Arc::new(Some(proxy_url.to_string()));
+        }
+    }
+
     /// GET 请求并返回字符串 body（原 `OkHttp.string(url)`）。失败返回空串。
     pub fn string(&self, url: &str) -> String {
         String::from_utf8_lossy(&self.fetch("GET", url, None)).into_owned()
@@ -89,6 +111,10 @@ impl Net {
         let agent = builder.build();
 
         let mut req = agent.request(method, url);
+        // 全局 header 注入（对齐原 RequestInterceptor）：所有请求默认携带 self.headers
+        for (k, v) in (*self.headers).iter() {
+            req = req.set(k, v);
+        }
         if let Some(hdrs) = headers {
             for (k, v) in hdrs {
                 req = req.set(k, v);

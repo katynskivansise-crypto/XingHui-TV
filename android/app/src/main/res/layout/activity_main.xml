@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 主界面（TVBox 风格）：顶部标题栏+功能按钮，左侧分类，右侧影片网格 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@android:color/black">
 
+    <!-- 顶部标题栏 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:gravity="center_vertical"
+        android:padding="6dp">
 
         <TextView
             android:id="@+id/title"
@@ -19,6 +22,8 @@
             android:padding="8dp"
             android:textColor="@android:color/white"
             android:textSize="18sp"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:text="@string/app_name" />
 
         <TextView
@@ -34,6 +39,63 @@
             android:text="站点" />
 
         <TextView
+            android:id="@+id/btnSearch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:text="搜索" />
+
+        <TextView
+            android:id="@+id/btnLive"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:text="直播" />
+
+        <TextView
+            android:id="@+id/btnHistory"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:text="历史" />
+
+        <TextView
+            android:id="@+id/btnCollect"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:text="收藏" />
+
+        <TextView
+            android:id="@+id/clock"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:textColor="#B0FFFFFF"
+            android:textSize="16sp"
+            android:text="--:--" />
+
+        <TextView
             android:id="@+id/btnSettings"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -47,42 +109,85 @@
 
     </LinearLayout>
 
-    <androidx.media3.ui.PlayerView
-        android:id="@+id/player"
-        android:layout_width="match_parent"
-        android:layout_height="240dp"
-        android:background="@android:color/black" />
-
-    <TextView
-        android:id="@+id/labelCat"
+    <!-- 首页历史记录横排行（对齐原项目 HomeFragment 首页历史行） -->
+    <LinearLayout
+        android:id="@+id/quickRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="6dp"
-        android:textColor="@android:color/white"
-        android:textSize="14sp"
-        android:text="分类（引擎 home）" />
+        android:orientation="vertical"
+        android:visibility="gone">
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/catList"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:clipToPadding="false" />
+        <TextView
+            android:id="@+id/quickLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:text="历史记录 · 点击续播" />
 
-    <TextView
-        android:id="@+id/labelVod"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:padding="6dp"
-        android:textColor="@android:color/white"
-        android:textSize="14sp"
-        android:text="列表（引擎 category）" />
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/quickList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clipToPadding="false" />
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/vodList"
+    </LinearLayout>
+
+    <!-- 主体：左分类 + 右影片 -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:clipToPadding="false" />
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:layout_width="250dp"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/labelCat"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="6dp"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:text="分类" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/catList"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/labelVod"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="6dp"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:text="影片" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/vodList"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false" />
+
+        </LinearLayout>
+
+    </LinearLayout>
 
 </LinearLayout>

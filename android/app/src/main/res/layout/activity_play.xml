@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 播放页：全屏播放器 + 返回 + 片名 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/playView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <TextView
+        android:id="@+id/btnBack"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:padding="14dp"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:focusable="true"
+        android:clickable="true"
+        android:background="#66000000"
+        android:text="← 返回" />
+
+    <!-- 顶部控制：倍速 + 缩放（对齐原项目 setScale/onScale） -->
+    <LinearLayout
+        android:id="@+id/controlPanel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:orientation="vertical"
+        android:padding="6dp"
+        android:background="#66000000">
+
+        <TextView
+            android:id="@+id/btnSpeed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="10dp"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:text="倍速 1.0x" />
+
+        <TextView
+            android:id="@+id/btnScale"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="10dp"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:text="缩放 等比" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/playTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:padding="12dp"
+        android:textColor="#FFFFFF"
+        android:textSize="15sp"
+        android:background="#66000000"
+        android:text="播放中" />
+
+</FrameLayout>
