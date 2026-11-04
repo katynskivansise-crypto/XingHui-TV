@@ -1,5 +1,6 @@
 package com.xinghui.tv
 
+import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -7,7 +8,6 @@ import android.os.Looper
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -22,7 +22,7 @@ import java.util.Locale
  * 主界面（TVBox 风格）：顶部标题栏 + 功能按钮，左侧分类，右侧影片网格。
  * 点影片进详情/播放页。播放内核由设置决定（ExoPlayer / mpv）。
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
 
     companion object {
         const val DEFAULT_KEY = "demo"
