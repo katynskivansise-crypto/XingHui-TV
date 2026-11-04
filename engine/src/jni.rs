@@ -88,15 +88,14 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             for k in manager.keys() {
                 if let Some(s) = manager.get(&k) {
                     if let Ok(res) = s.search_content(&keyword, false, "1") {
-                        if let Ok(v) = json::parse(&res) {
-                            if let Some(arr) = v.get("list").and_then(|x| x.as_array()) {
-                                for item in arr {
-                                    let mut it = item.clone();
-                                    if let Some(obj) = it.as_object_mut() {
-                                        obj.insert("source".to_string(), serde_json::json!(k));
-                                    }
-                                    out.push(it);
+                        let v = json::parse(&res);
+                        if let Some(arr) = v.get("list").and_then(|x| x.as_array()) {
+                            for item in arr {
+                                let mut it = item.clone();
+                                if let Some(obj) = it.as_object_mut() {
+                                    obj.insert("source".to_string(), serde_json::json!(k));
                                 }
+                                out.push(it);
                             }
                         }
                     }
@@ -155,7 +154,9 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                         extend.get("ids").map(|s| s.split(',').map(String::from).collect()).unwrap_or_default();
                     let raw = spider.detail_content(&ids).unwrap_or_default();
                     // 下沉多线路解析：vod_play_url → 结构化 vod_lines（壳直接透传，缺失时壳回退本地解析）
-                    if let Ok(mut v) = json::parse(&raw) {
+                    let parsed = json::parse(&raw);
+                    if parsed.is_object() {
+                        let mut v = parsed;
                         if let Some(arr) = v.get_mut("list").and_then(|x| x.as_array_mut()) {
                             for item in arr.iter_mut() {
                                 if let Some(obj) = item.as_object_mut() {

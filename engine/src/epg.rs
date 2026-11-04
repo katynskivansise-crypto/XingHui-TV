@@ -22,13 +22,13 @@ pub fn fetch_epg(net: &Net, xmltv_url: &str, channel_name: &str) -> String {
         return r#"{"list":[]}"#.to_string();
     }
 
-    // 1) 按 display-name 找到频道 id
+    // 1) 按 display-name 找到频道 id（cid 转 owned，避免借用捕获组临时值）
     let re_chan = Regex::new(r#"<channel\s+id="([^"]+)"[^>]*>\s*<display-name[^>]*>\s*([^<]+)"#)
         .expect("invalid channel regex");
-    let mut cid = "";
+    let mut cid = String::new();
     for cap in re_chan.captures_iter(&xml) {
         if cap[2].trim() == channel_name {
-            cid = &cap[1];
+            cid = cap[1].to_string();
             break;
         }
     }
@@ -39,7 +39,7 @@ pub fn fetch_epg(net: &Net, xmltv_url: &str, channel_name: &str) -> String {
     // 2) 匹配该频道节目，提取 start/stop/title
     let pat = format!(
         r#"<programme\s+channel="{}"[^>]*start="([^"]+)"[^>]*stop="([^"]+)"[^>]*>\s*<title[^>]*>\s*([^<]+)"#,
-        regex::escape(cid)
+        regex::escape(&cid)
     );
     let re_prog = Regex::new(&pat).expect("invalid programme regex");
     let mut list: Vec<serde_json::Value> = Vec::new();

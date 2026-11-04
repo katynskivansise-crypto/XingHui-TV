@@ -131,9 +131,9 @@ impl Net {
             Ok(resp) => read_all(resp),
             // 对齐原 OkHttp：非 2xx（如 403/404）也返回 body，而非视为失败
             Err(ureq::Error::Status(_code, resp)) => read_all(resp),
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[net] request failed for {url}: {e}");
+                eprintln!("[net] request failed for {url}: {_e}");
                 Vec::new()
             }
         }
