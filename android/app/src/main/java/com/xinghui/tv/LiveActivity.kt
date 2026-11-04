@@ -46,8 +46,8 @@ class LiveActivity : Activity() {
         }
         channelAdapter = ListAdapter(
             channels,
-            { id -> playChannel(id) },
-            { id -> toggleKeep(id) },
+            onClick = { id -> playChannel(id) },
+            onLongClick = { id -> toggleKeep(id) },
         )
         findViewById<RecyclerView>(R.id.liveChannels).apply {
             layoutManager = LinearLayoutManager(this@LiveActivity)

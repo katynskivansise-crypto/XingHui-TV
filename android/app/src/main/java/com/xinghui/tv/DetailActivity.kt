@@ -140,7 +140,7 @@ class DetailActivity : Activity() {
         tv.text = v.vodContent.ifBlank { "暂无简介" }
         tv.setTextColor(Color.WHITE)
         tv.textSize = 15f
-        tv.lineSpacingExtra = 4f
+        tv.setLineSpacingExtra(4f)
         tv.setPadding(48, 40, 48, 40)
         tv.movementMethod = LinkMovementMethod.getInstance()
         dlg.setContentView(tv)

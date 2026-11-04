@@ -22,6 +22,16 @@ class SettingsActivity : Activity() {
 
     private lateinit var settings: Settings
     private lateinit var store: HistoryStore
+    private lateinit var tvKernel: TextView
+    private lateinit var tvTimeout: TextView
+    private lateinit var tvUa: TextView
+    private lateinit var tvProxy: TextView
+    private lateinit var tvEpg: TextView
+    private lateinit var tvPoster: TextView
+    private lateinit var tvHomeHistory: TextView
+    private lateinit var tvHistory: TextView
+    private lateinit var tvFav: TextView
+    private lateinit var tvAbout: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,29 +40,18 @@ class SettingsActivity : Activity() {
         settings = Settings(this)
         store = HistoryStore(this)
 
-        val tvKernel = findViewById<TextView>(R.id.valKernel)
-        val tvTimeout = findViewById<TextView>(R.id.valTimeout)
-        val tvUa = findViewById<TextView>(R.id.valUa)
-        val tvProxy = findViewById<TextView>(R.id.valProxy)
-        val tvEpg = findViewById<TextView>(R.id.valEpg)
-        val tvPoster = findViewById<TextView>(R.id.valPoster)
-        val tvHomeHistory = findViewById<TextView>(R.id.valHomeHistory)
-        val tvHistory = findViewById<TextView>(R.id.valHistory)
-        val tvFav = findViewById<TextView>(R.id.valFav)
-        val tvAbout = findViewById<TextView>(R.id.valAbout)
+        tvKernel = findViewById<TextView>(R.id.valKernel)
+        tvTimeout = findViewById<TextView>(R.id.valTimeout)
+        tvUa = findViewById<TextView>(R.id.valUa)
+        tvProxy = findViewById<TextView>(R.id.valProxy)
+        tvEpg = findViewById<TextView>(R.id.valEpg)
+        tvPoster = findViewById<TextView>(R.id.valPoster)
+        tvHomeHistory = findViewById<TextView>(R.id.valHomeHistory)
+        tvHistory = findViewById<TextView>(R.id.valHistory)
+        tvFav = findViewById<TextView>(R.id.valFav)
+        tvAbout = findViewById<TextView>(R.id.valAbout)
 
-        fun refresh() {
-            tvKernel.text = settings.kernelLabel()
-            tvTimeout.text = "${settings.networkTimeoutSec} 秒"
-            tvUa.text = settings.uaLabel()
-            tvProxy.text = if (settings.proxy.isBlank()) "关闭" else "已启用"
-            tvEpg.text = if (settings.epgUrl.isBlank()) "未配置" else "已配置"
-            tvPoster.text = if (settings.showPoster) "开" else "关"
-            tvHomeHistory.text = if (settings.isHomeHistory) "开" else "关"
-            tvHistory.text = "${store.history().size} 条（点击清空）"
-            tvFav.text = "${store.favorites().size} 条（点击清空）"
-            tvAbout.text = "星汇TV v0.1.0（debug）"
-        }
+        refresh()
 
         // 播放内核：ExoPlayer <-> mpv 切换
         findViewById<View>(R.id.rowKernel).setOnClickListener {
@@ -223,3 +222,18 @@ class SettingsActivity : Activity() {
             Toast.makeText(this, "恢复失败：${e.message}", Toast.LENGTH_LONG).show()
         }
     }
+
+    /** 刷新设置值显示 */
+    private fun refresh() {
+        tvKernel.text = settings.kernelLabel()
+        tvTimeout.text = "${settings.networkTimeoutSec} 秒"
+        tvUa.text = settings.uaLabel()
+        tvProxy.text = if (settings.proxy.isBlank()) "关闭" else "已启用"
+        tvEpg.text = if (settings.epgUrl.isBlank()) "未配置" else "已配置"
+        tvPoster.text = if (settings.showPoster) "开" else "关"
+        tvHomeHistory.text = if (settings.isHomeHistory) "开" else "关"
+        tvHistory.text = "${store.history().size} 条（点击清空）"
+        tvFav.text = "${store.favorites().size} 条（点击清空）"
+        tvAbout.text = "星汇TV v0.1.0（debug）"
+    }
+}

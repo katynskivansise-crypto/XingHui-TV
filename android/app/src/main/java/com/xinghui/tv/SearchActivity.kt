@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.xinghui.tv.adapter.SearchWordAdapter
 import com.xinghui.tv.view.TvSoftKeyboard
+import org.json.JSONObject
 
 /**
  * 搜索页：

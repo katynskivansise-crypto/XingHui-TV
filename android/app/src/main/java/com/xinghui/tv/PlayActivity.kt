@@ -8,6 +8,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.xinghui.tv.dialog.EpisodeDialog
 import org.json.JSONObject
@@ -42,9 +43,9 @@ class PlayActivity : Activity() {
     private var playerView: PlayerView? = null
     private var scaleIdx = 0
     private val scaleModes = intArrayOf(
-        PlayerView.RESIZE_MODE_FIT,
-        PlayerView.RESIZE_MODE_FILL,
-        PlayerView.RESIZE_MODE_ZOOM,
+        AspectRatioFrameLayout.RESIZE_MODE_FIT,
+        AspectRatioFrameLayout.RESIZE_MODE_FILL,
+        AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
     )
     private val scaleNames = arrayOf("等比", "拉伸", "裁剪")
 
@@ -74,7 +75,7 @@ class PlayActivity : Activity() {
             fastForwarding = true
             savedSpeedIdx = speedIdx
             speedBtn.text = "快进 3x（松开恢复）"
-            player?.playbackSpeed = 3f
+            player?.setPlaybackSpeed(3f)
             true
         }
         // 缩放档位循环（对齐原项目 onScale/setScale）
@@ -162,7 +163,7 @@ class PlayActivity : Activity() {
         findViewById<TextView>(R.id.btnSpeed).text = "倍速 ${s}x"
         // mpv 内核交给外部，倍速由外部播放器控制
         if (PlayerManager.shouldUseMpv(this)) return
-        player?.playbackSpeed = s
+        player?.setPlaybackSpeed(s)
     }
 
     /** 松开 OK 键 → 若处于长按快进，恢复原速（对齐原项目 onSpeedEnd） */
@@ -184,7 +185,7 @@ class PlayActivity : Activity() {
                 val clIdx = if (cl >= 0) cl else 0
                 val ce = runCatching {
                     vodLines.getOrNull(clIdx)?.episodes?.indexOfFirst { it.second == epUrl }
-                }.getOrDefault(-1)
+                }.getOrDefault(-1) ?: -1
                 EpisodeDialog(this, vodLines, { li, ei ->
                     val line = vodLines[li]
                     val ep = line.episodes[ei].second

@@ -37,11 +37,13 @@ data class Vod(
         )
 
         /** 从引擎返回的 {list:[...]} 解析影片列表 */
-        fun parseList(json: String): List<Vod> = try {
-            val arr = JSONObject(json).optJSONArray("list") ?: return emptyList()
-            (0 until arr.length()).mapNotNull { fromJson(arr.getJSONObject(it)) }
-        } catch (_: Exception) {
-            emptyList()
+        fun parseList(json: String): List<Vod> {
+            return try {
+                val arr = JSONObject(json).optJSONArray("list") ?: return emptyList()
+                (0 until arr.length()).mapNotNull { fromJson(arr.getJSONObject(it)) }
+            } catch (_: Exception) {
+                emptyList()
+            }
         }
     }
 

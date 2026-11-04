@@ -12,8 +12,8 @@ import androidx.recyclerview.widget.RecyclerView
  */
 class ListAdapter(
     private val items: List<Pair<String, String>>,
-    private val onClick: (String) -> Unit,
     private val onLongClick: ((String) -> Unit)? = null,
+    private val onClick: (String) -> Unit,
 ) : RecyclerView.Adapter<ListAdapter.VH>() {
 
     class VH(val text: TextView) : RecyclerView.ViewHolder(text)
