@@ -27,10 +27,13 @@ class SettingsActivity : Activity() {
     private lateinit var tvUa: TextView
     private lateinit var tvProxy: TextView
     private lateinit var tvEpg: TextView
+    private lateinit var tvLive: TextView
     private lateinit var tvPoster: TextView
     private lateinit var tvHomeHistory: TextView
     private lateinit var tvHistory: TextView
     private lateinit var tvFav: TextView
+    private lateinit var tvBackup: TextView
+    private lateinit var tvRestore: TextView
     private lateinit var tvAbout: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,10 +48,13 @@ class SettingsActivity : Activity() {
         tvUa = findViewById<TextView>(R.id.valUa)
         tvProxy = findViewById<TextView>(R.id.valProxy)
         tvEpg = findViewById<TextView>(R.id.valEpg)
+        tvLive = findViewById<TextView>(R.id.valLive)
         tvPoster = findViewById<TextView>(R.id.valPoster)
         tvHomeHistory = findViewById<TextView>(R.id.valHomeHistory)
         tvHistory = findViewById<TextView>(R.id.valHistory)
         tvFav = findViewById<TextView>(R.id.valFav)
+        tvBackup = findViewById<TextView>(R.id.valBackup)
+        tvRestore = findViewById<TextView>(R.id.valRestore)
         tvAbout = findViewById<TextView>(R.id.valAbout)
 
         refresh()
@@ -84,6 +90,9 @@ class SettingsActivity : Activity() {
 
         // 直播 EPG 源：弹出输入框配置 XMLTV 地址（留空清除）
         findViewById<View>(R.id.rowEpg).setOnClickListener { showEpgDialog() }
+
+        // 直播源：弹出输入框配置 diyp/txt/m3u 地址（留空清除）
+        findViewById<View>(R.id.rowLive).setOnClickListener { showLiveDialog() }
 
         // 显示海报开关
         findViewById<View>(R.id.rowPoster).setOnClickListener {
@@ -131,7 +140,8 @@ class SettingsActivity : Activity() {
     }
 
     /** 代理设置对话框（对齐原项目 ProxyDialog）：输入地址保存；留空保存即关闭代理 */
-    private fun showProxyDialog() {        val input = EditText(this)
+    private fun showProxyDialog() {
+        val input = EditText(this)
         input.setText(settings.proxy)
         input.setSingleLine(true)
         input.setHint("http://user:pass@host:port")
@@ -177,6 +187,30 @@ class SettingsActivity : Activity() {
             .show()
     }
 
+    /** 直播源设置对话框：输入 diyp/txt/m3u 地址保存；留空保存即清除 */
+    private fun showLiveDialog() {
+        val input = EditText(this)
+        input.setText(settings.liveUrl)
+        input.setSingleLine(true)
+        input.setHint("https://xxx/live.txt")
+        input.requestFocus()
+        AlertDialog.Builder(this)
+            .setTitle("直播源")
+            .setMessage("填直播源地址（diyp JSON / txt / m3u，如直播源文本）；留空清除。配置后直播页显示分组与频道")
+            .setView(input)
+            .setPositiveButton("保存") { _, _ ->
+                settings.liveUrl = input.text.toString().trim()
+                refresh()
+                Toast.makeText(
+                    this,
+                    if (settings.liveUrl.isBlank()) "直播源已清除" else "直播源已配置",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     /** 备份：将 shared_prefs 全部 xml 打包成 zip，存到可访问目录 */
     private fun doBackup() {
         runCatching {
@@ -191,6 +225,7 @@ class SettingsActivity : Activity() {
                 }
             }
             Toast.makeText(this, "已备份到：${out.absolutePath}", Toast.LENGTH_LONG).show()
+            refresh()
         }.onFailure { e ->
             Toast.makeText(this, "备份失败：${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -218,6 +253,7 @@ class SettingsActivity : Activity() {
                 }
             }
             Toast.makeText(this, "已恢复，请重启应用生效", Toast.LENGTH_LONG).show()
+            refresh()
         }.onFailure { e ->
             Toast.makeText(this, "恢复失败：${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -230,10 +266,17 @@ class SettingsActivity : Activity() {
         tvUa.text = settings.uaLabel()
         tvProxy.text = if (settings.proxy.isBlank()) "关闭" else "已启用"
         tvEpg.text = if (settings.epgUrl.isBlank()) "未配置" else "已配置"
+        tvLive.text = if (settings.liveUrl.isBlank()) "未配置" else "已配置"
         tvPoster.text = if (settings.showPoster) "开" else "关"
         tvHomeHistory.text = if (settings.isHomeHistory) "开" else "关"
         tvHistory.text = "${store.history().size} 条（点击清空）"
         tvFav.text = "${store.favorites().size} 条（点击清空）"
+        val backup = backupFile()
+        tvBackup.text = if (backup != null && backup.exists()) "已备份（${java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(backup.lastModified()))}）" else "未备份（点击导出）"
+        tvRestore.text = if (backup != null && backup.exists()) "点击从备份恢复" else "暂无备份文件"
         tvAbout.text = "星汇TV v0.1.0（debug）"
     }
+
+    /** 备份文件路径（与 doBackup/doRestore 一致） */
+    private fun backupFile(): File? = getExternalFilesDir(null)?.let { File(it, "xinghui_backup.zip") }
 }

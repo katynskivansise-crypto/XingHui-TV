@@ -38,6 +38,7 @@ class MainActivity : Activity() {
 
     private val categories = mutableListOf<Pair<String, String>>() // (type_id, type_name)
     private val vods = mutableListOf<Vod>()
+    private val recommends = mutableListOf<Vod>() // 首页更新推荐（引擎 home 的 list）
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +61,18 @@ class MainActivity : Activity() {
         vodList = findViewById<RecyclerView>(R.id.vodList).apply {
             layoutManager = GridLayoutManager(this@MainActivity, 4)
             adapter = vodAdapter
+        }
+
+        // 首页更新推荐横排（home 返回的推荐影片，点击进详情）
+        findViewById<RecyclerView>(R.id.recommendList).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
+            adapter = LibAdapter(recommends, { vod ->
+                runCatching {
+                    startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
+                }.onFailure { e ->
+                    Toast.makeText(this@MainActivity, "无法打开详情：${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }, { _ -> /* 推荐横排无删除模式 */ })
         }
 
         // 顶部功能按钮（全部 try/catch，失败只提示不崩溃）
@@ -253,6 +266,7 @@ class MainActivity : Activity() {
     private fun parseHome(json: String) {
         categories.clear()
         vods.clear()
+        recommends.clear()
         runCatching {
             val root = JSONObject(json)
             val classes = root.getJSONArray("class")
@@ -260,12 +274,22 @@ class MainActivity : Activity() {
                 val c = classes.getJSONObject(i)
                 categories.add(c.getString("type_id") to c.getString("type_name"))
             }
+            // 更新推荐（原项目首页推荐行）：home 的 list
+            recommends.addAll(Vod.parseList(json))
         }
         (catList.adapter as ListAdapter).notifyDataSetChanged()
         vodAdapter.notifyDataSetChanged()
+        (findViewById<RecyclerView>(R.id.recommendList).adapter as LibAdapter).notifyDataSetChanged()
 
         val siteName = SubscriptionStore(this).currentSite()?.name ?: "内置默认"
         findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + siteName
+
+        // 推荐横排：有数据才显示
+        findViewById<View>(R.id.recommendRow).visibility =
+            if (recommends.isNotEmpty()) View.VISIBLE else View.GONE
+        if (recommends.isNotEmpty()) {
+            findViewById<TextView>(R.id.recommendLabel).text = "更新推荐 · 共 ${recommends.size} 部"
+        }
 
         // 自动加载第一个分类
         categories.firstOrNull()?.let { onCategory(it.first) }

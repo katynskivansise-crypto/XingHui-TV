@@ -19,6 +19,7 @@ data class Vod(
     val vodFlag: String = "",   // 上次播放线路（历史续播用）
     val vodEpUrl: String = "",  // 上次播放集地址（历史续播用）
     val vodLinesJson: String = "", // 引擎解析的结构化线路（下沉多线路解析，缺失时壳回退）
+    val source: String = "",    // 所属站点 key（聚合搜索/自动换站用，引擎 searchAll 填充）
 ) {
     companion object {
         fun fromJson(o: JSONObject): Vod = Vod(
@@ -34,6 +35,7 @@ data class Vod(
             vodFlag = o.optString("vod_flag"),
             vodEpUrl = o.optString("vod_ep_url"),
             vodLinesJson = o.optString("vod_lines"),
+            source = o.optString("source"),
         )
 
         /** 从引擎返回的 {list:[...]} 解析影片列表 */

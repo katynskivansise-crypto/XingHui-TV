@@ -3,7 +3,10 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="200dp"
     android:layout_height="wrap_content"
-    android:padding="6dp">
+    android:padding="6dp"
+    android:focusable="true"
+    android:clickable="true"
+    android:background="@drawable/item_focus">
 
     <LinearLayout
         android:layout_width="match_parent"

@@ -16,7 +16,7 @@
         android:textSize="16sp"
         android:focusable="true"
         android:clickable="true"
-        android:background="#66000000"
+        android:background="@drawable/selector_tv_btn"
         android:text="← 返回" />
 
     <TextView

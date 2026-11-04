@@ -52,6 +52,11 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_EPG_URL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_EPG_URL, value).apply()
 
+    /** 直播源（diyp JSON / txt / m3u 地址），空=直播页仅显示收藏（对齐原项目 LiveConfig） */
+    var liveUrl: String
+        get() = prefs.getString(KEY_LIVE_URL, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LIVE_URL, value).apply()
+
     /** UA 当前档位中文名，用于设置界面展示 */
     fun uaLabel(): String = when (ua) {
         "" -> "默认"
@@ -84,5 +89,6 @@ class Settings(context: Context) {
         private const val KEY_UA = "ua"
         private const val KEY_PROXY = "proxy"
         private const val KEY_EPG_URL = "epg_url"
+        private const val KEY_LIVE_URL = "live_url"
     }
 }

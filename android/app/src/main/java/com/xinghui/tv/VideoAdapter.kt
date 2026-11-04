@@ -1,6 +1,5 @@
 package com.xinghui.tv
 
-import android.graphics.Color
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -40,9 +39,6 @@ class VideoAdapter(
             holder.image.setImageDrawable(android.graphics.drawable.ColorDrawable(0xFF1A1A1A.toInt()))
         }
         holder.root.setOnClickListener { onClick(vod) }
-        holder.root.setOnFocusChangeListener { v, has ->
-            v.setBackgroundColor(if (has) 0xFF335588.toInt() else Color.TRANSPARENT)
-        }
     }
 
     override fun getItemCount(): Int = items.size

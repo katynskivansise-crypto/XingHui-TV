@@ -1,6 +1,5 @@
 package com.xinghui.tv.adapter
 
-import android.graphics.Color
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -59,9 +58,6 @@ class LibAdapter(
         holder.root.setOnLongClickListener {
             if (!deleteMode) onLongClick?.invoke()
             true
-        }
-        holder.root.setOnFocusChangeListener { v, has ->
-            v.setBackgroundColor(if (has) 0xFF335588.toInt() else Color.TRANSPARENT)
         }
     }
 

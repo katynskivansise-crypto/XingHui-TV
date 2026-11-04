@@ -67,11 +67,20 @@ class LiveActivity : Activity() {
         loadGroups()
     }
 
-    /** 引擎 live → 频道分组；顶部固定插入"我的收藏" */
+    /** 独立直播源（设置 → 直播源）→ 引擎 live 解析分组；未配置时仅显示收藏并提示 */
     private fun loadGroups() {
+        val liveUrl = Settings(this).liveUrl
+        if (liveUrl.isBlank()) {
+            groups.clear()
+            groups.add(KEEP_TID to "我的收藏")
+            groupAdapter.notifyDataSetChanged()
+            findViewById<TextView>(R.id.liveLabel).text = "未配置直播源（设置 → 直播源）· 可长按收藏频道"
+            currentTid = ""
+            Toast.makeText(this, "请先在设置中配置直播源", Toast.LENGTH_LONG).show()
+            return
+        }
         Thread {
-            val siteKey = SubscriptionStore(this).currentKey() ?: MainActivity.DEFAULT_KEY
-            val json = Engine.execute("live", siteKey, "")
+            val json = Engine.execute("live", "", JSONObject().put("url", liveUrl).toString())
             val list = runCatching {
                 val arr = JSONObject(json).optJSONArray("class") ?: JSONObject(json).optJSONArray("list")
                 (0 until arr!!.length()).mapNotNull { i ->
@@ -104,13 +113,13 @@ class LiveActivity : Activity() {
         findViewById<TextView>(R.id.liveLabel).text = "我的收藏 ${channels.size} 个（长按取消收藏）"
     }
 
-    /** 引擎 category → 频道列表 */
+    /** 引擎 live（url+tid）→ 该分组频道列表 */
     private fun loadChannels(tid: String) {
         currentTid = tid
         Thread {
-            val siteKey = SubscriptionStore(this).currentKey() ?: MainActivity.DEFAULT_KEY
-            val params = JSONObject().put("tid", tid).put("pg", "1").toString()
-            val json = Engine.execute("category", siteKey, params)
+            val liveUrl = Settings(this).liveUrl
+            val params = JSONObject().put("url", liveUrl).put("tid", tid).toString()
+            val json = Engine.execute("live", "", params)
             val list = runCatching {
                 val arr = JSONObject(json).optJSONArray("list") ?: return@runCatching emptyList()
                 (0 until arr.length()).mapNotNull { i ->
@@ -135,42 +144,15 @@ class LiveActivity : Activity() {
         if (currentTid == KEEP_TID) loadKeeps()
     }
 
-    /** 点频道：取频道地址直链播放；无地址则用 id 让引擎解析 */
+    /** 点频道：引擎 live 返回的 vod_id 即播放地址，直链播放 */
     private fun playChannel(id: String) {
         val name = channels.firstOrNull { it.first == id }?.second ?: id
         currentChannel = name
-        Thread {
-            val siteKey = SubscriptionStore(this).currentKey() ?: MainActivity.DEFAULT_KEY
-            val params = JSONObject().put("tid", currentTid).put("pg", "1").toString()
-            val json = Engine.execute("category", siteKey, params)
-            var directUrl = ""
-            runCatching {
-                val arr = JSONObject(json).optJSONArray("list") ?: return@runCatching
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i)
-                    if (o?.optString("vod_id") == id) {
-                        directUrl = o.optString("vod_play_url")
-                            .ifBlank { o.optString("url") }
-                        break
-                    }
-                }
-            }
-            runOnUiThread {
-                if (directUrl.isNotBlank()) {
-                    startActivity(Intent(this, PlayActivity::class.java).apply {
-                        putExtra("vod_id", id)
-                        putExtra("vod_name", name)
-                        putExtra("direct_url", directUrl)
-                    })
-                } else {
-                    startActivity(Intent(this, PlayActivity::class.java).apply {
-                        putExtra("vod_id", id)
-                        putExtra("vod_name", name)
-                        putExtra("flag", "live")
-                    })
-                }
-            }
-        }.start()
+        startActivity(Intent(this, PlayActivity::class.java).apply {
+            putExtra("vod_id", id)
+            putExtra("vod_name", name)
+            putExtra("direct_url", id)
+        })
     }
 
     /** 节目单：用配置的 EPG 源查当前频道节目（引擎 epg 接口，XMLTV 解析） */

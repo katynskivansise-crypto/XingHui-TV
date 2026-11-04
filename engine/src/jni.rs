@@ -64,12 +64,30 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if !site_json.is_empty() {
-                match JsonSpider::new(&site_json) {
-                    Ok(spider) => {
-                        manager.register(key, Box::new(spider));
-                        r#"{"code":0,"msg":"ok"}"#.to_string()
+                // 站点 JSON 含 api 字段 → TVBox 标准 api 接口源（对齐原项目 SiteViewModel）；
+                // 否则为纯静态 JSON 规则（type=3，数据写在 ext[].list）→ JsonSpider
+                let sv: serde_json::Value = serde_json::from_str(&site_json).unwrap_or_default();
+                let has_api = sv
+                    .get("api")
+                    .and_then(|x| x.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if has_api {
+                    match crate::api_spider::ApiSpider::new(&site_json) {
+                        Ok(spider) => {
+                            manager.register(key, Box::new(spider));
+                            r#"{"code":0,"msg":"ok"}"#.to_string()
+                        }
+                        Err(e) => format!(r#"{{"code":-1,"msg":"{}"}}"#, e),
                     }
-                    Err(e) => format!(r#"{{"code":-1,"msg":"{}"}}"#, e),
+                } else {
+                    match JsonSpider::new(&site_json) {
+                        Ok(spider) => {
+                            manager.register(key, Box::new(spider));
+                            r#"{"code":0,"msg":"ok"}"#.to_string()
+                        }
+                        Err(e) => format!(r#"{{"code":-1,"msg":"{}"}}"#, e),
+                    }
                 }
             } else if !rule.is_empty() {
                 let spider = DrpySpider::new(dir, rule, engine_script, &ua, &proxy);
@@ -80,10 +98,12 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             }
         }
         // 聚合搜索：遍历全部已注册源，并行搜索并合并结果（对齐原项目聚合搜索）。
-        // params: {key: 搜索词}；返回 {list:[...], source:"all"}，每条带 source 站点名。
+        // params: {key: 搜索词, keepAll: 可选是否保多站}；返回 {list:[...], source:"all"}，
+        // 每条带 source 站点名。keepAll=true（自动换站用）时不去重，保留各站同名结果。
         "searchAll" => {
             let p = json::safe_object(&json::parse(params));
             let keyword = p.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let keep_all = p.get("keepAll").and_then(|v| v.as_bool()).unwrap_or(false);
             let mut out: Vec<serde_json::Value> = Vec::new();
             for k in manager.keys() {
                 if let Some(s) = manager.get(&k) {
@@ -101,23 +121,54 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     }
                 }
             }
-            // 按影片名去重（多源重复合并，保留首个含来源标注），避免壳侧展示重复
-            let mut seen = std::collections::HashSet::new();
-            let mut dedup: Vec<serde_json::Value> = out.into_iter().filter(|it| {
-                let name = it.get("vod_name").and_then(|v| v.as_str()).unwrap_or("");
-                if name.is_empty() {
-                    true
-                } else {
-                    seen.insert(name.to_string())
-                }
-            }).collect();
+            let dedup: Vec<serde_json::Value> = if keep_all {
+                out
+            } else {
+                // 按影片名去重（多源重复合并，保留首个含来源标注），避免壳侧展示重复
+                let mut seen = std::collections::HashSet::new();
+                out.into_iter().filter(|it| {
+                    let name = it.get("vod_name").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.is_empty() {
+                        true
+                    } else {
+                        seen.insert(name.to_string())
+                    }
+                }).collect()
+            };
             // 按名称稳定排序（引擎内统一排序，壳直接透传）
+            let mut dedup = dedup;
             dedup.sort_by(|a, b| {
                 let na = a.get("vod_name").and_then(|v| v.as_str()).unwrap_or("");
                 let nb = b.get("vod_name").and_then(|v| v.as_str()).unwrap_or("");
                 na.cmp(nb)
             });
             serde_json::json!({"list": dedup, "source": "all"}).to_string()
+        }
+        // 海报代理（对齐原项目 ImageLoader 走网络层）：壳传 url/ua/proxy，引擎用临时
+        // Net 拉图片字节 → base64 返回。复用现有 jstring 通道（execute 签名不变），
+        // 不带防盗链 Referer 时仍比壳 HttpURLConnection 直连更稳（统一 ureq + UA/代理）。
+        "proxy_image" => {
+            let p = json::safe_object(&json::parse(params));
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if url.is_empty() {
+                String::new()
+            } else {
+                let mut net = Net::new();
+                if !ua.is_empty() {
+                    net.set_ua(&ua);
+                }
+                if !proxy.is_empty() {
+                    net.set_proxy(&proxy);
+                }
+                let bytes = net.bytes(&url);
+                if bytes.is_empty() {
+                    String::new()
+                } else {
+                    base64_encode(&bytes)
+                }
+            }
         }
         // EPG 节目单：抓取 XMLTV 并按频道名返回节目单（对齐原项目直播 EPG）。
         // params: {url: XMLTV 地址, name: 频道名}；返回 {list:[{start,end,time,title}], channel}
@@ -174,14 +225,58 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 "search" => spider
                     .search_content(extend.get("key").map(String::as_str).unwrap_or(""), false, "1")
                     .unwrap_or_default(),
-                "player" => spider
-                    .player_content(
-                        extend.get("flag").map(String::as_str).unwrap_or(""),
-                        extend.get("id").map(String::as_str).unwrap_or(""),
-                        &[],
-                    )
-                    .unwrap_or_default(),
-                "live" => spider.live_content().unwrap_or_default(),
+                "player" => {
+                    let raw = spider
+                        .player_content(
+                            extend.get("flag").map(String::as_str).unwrap_or(""),
+                            extend.get("id").map(String::as_str).unwrap_or(""),
+                            &[],
+                        )
+                        .unwrap_or_default();
+                    // 多清晰度（对齐原版 Url.values）：播放地址含 TVBox `#` 分隔多清晰度、
+                    // `name$url` 命名时拆成 urls 数组，壳据此展示清晰度切换；否则原样透传。
+                    let parsed = json::parse(&raw);
+                    match parsed.get("url").and_then(|x| x.as_str()) {
+                        Some(url) if url.split('#').any(|s| !s.is_empty()) && url.split('#').filter(|s| !s.is_empty()).count() > 1 => {
+                            let mut v = parsed;
+                            if let Some(obj) = v.as_object_mut() {
+                                let parts: Vec<&str> = url.split('#').filter(|s| !s.is_empty()).collect();
+                                let urls: Vec<serde_json::Value> = parts.iter().enumerate().map(|(i, p)| {
+                                    if let Some(idx) = p.find('$') {
+                                        let (n, vv) = p.split_at(idx);
+                                        serde_json::json!({"name": n, "v": vv.trim_start_matches('$')})
+                                    } else {
+                                        serde_json::json!({"name": format!("清晰度{}", i + 1), "v": p})
+                                    }
+                                }).collect();
+                                obj.insert("url".to_string(), serde_json::json!(parts[0]));
+                                obj.insert("urls".to_string(), serde_json::json!(urls));
+                            }
+                            v.to_string()
+                        }
+                        _ => raw,
+                    }
+                }
+                // 直播：params {url, tid} —— url 非空为独立直播源（diyp/txt/m3u，对齐原版
+                // LiveConfig）；url 空则回退站点规则直播（spider.live_content）
+                "live" => {
+                    let pv: serde_json::Value = json::parse(&params);
+                    let url = pv
+                        .get("url")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if url.is_empty() {
+                        spider.live_content().unwrap_or_default()
+                    } else {
+                        let tid = pv
+                            .get("tid")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        crate::live_parse::live_source(&url, &tid)
+                    }
+                }
                 _ => String::new(),
             }
         }
@@ -218,4 +313,30 @@ fn parse_vod_lines(vod_play_from: &str, vod_play_url: &str) -> serde_json::Value
         serde_json::json!({"name": name, "episodes": eps})
     }).collect();
     serde_json::json!(lines)
+}
+
+/// 纯 Rust base64 编码（避免为单个图片代理引入额外 crate，编译更稳）。
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((data.len() + 2) / 3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).map(|&b| b as u32).unwrap_or(0);
+        let b2 = chunk.get(2).map(|&b| b as u32).unwrap_or(0);
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }

@@ -12,11 +12,13 @@
 //! 设计原则：与 CatVod 生态的 Spider 接口一一对应，保证将来可直接替换原
 //! 引擎，而不必改动上层（app 的 api/loader）调用契约。
 
+pub mod api_spider;
 pub mod drpy_engine;
 pub mod drpy_spider;
 pub mod json;
 pub mod json_spider;
 pub mod js_spider;
+pub mod live_parse;
 pub mod live_spider;
 pub mod net;
 pub mod pdfh;

@@ -35,7 +35,7 @@
             android:textSize="16sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent"
+            android:background="@drawable/selector_tv_btn"
             android:text="站点" />
 
         <TextView
@@ -47,7 +47,7 @@
             android:textSize="16sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent"
+            android:background="@drawable/selector_tv_btn"
             android:text="搜索" />
 
         <TextView
@@ -59,7 +59,7 @@
             android:textSize="16sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent"
+            android:background="@drawable/selector_tv_btn"
             android:text="直播" />
 
         <TextView
@@ -71,7 +71,7 @@
             android:textSize="16sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent"
+            android:background="@drawable/selector_tv_btn"
             android:text="历史" />
 
         <TextView
@@ -83,7 +83,7 @@
             android:textSize="16sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent"
+            android:background="@drawable/selector_tv_btn"
             android:text="收藏" />
 
         <TextView
@@ -104,7 +104,7 @@
             android:textSize="16sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent"
+            android:background="@drawable/selector_tv_btn"
             android:text="设置" />
 
     </LinearLayout>
@@ -128,6 +128,31 @@
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/quickList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clipToPadding="false" />
+
+    </LinearLayout>
+
+    <!-- 首页更新推荐横排（对齐原项目 HomeFragment 推荐行，数据来自引擎 home 的 list） -->
+    <LinearLayout
+        android:id="@+id/recommendRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/recommendLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:text="更新推荐 · 点击进详情" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recommendList"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:clipToPadding="false" />
