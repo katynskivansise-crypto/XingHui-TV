@@ -1,6 +1,7 @@
 package com.xinghui.tv
 
 import android.content.Context
+import android.util.Log
 import dalvik.system.DexClassLoader
 import org.json.JSONArray
 import org.json.JSONObject
@@ -56,8 +57,12 @@ object CspLoader {
                 runCatching {
                     val initClz = dl.loadClass("com.github.catvod.spider.Init")
                     initClz.getMethod("init", Context::class.java).invoke(initClz, context)
+                }.onFailure { e ->
+                    Log.e("XingHuiTV", "[csp.prepare] Init.init 失败", e)
                 }
-            } catch (_: Exception) {
+                Log.e("XingHuiTV", "[csp.prepare] spider.jar 加载成功，jar=${file.absolutePath} len=${file.length()}")
+            } catch (e: Exception) {
+                Log.e("XingHuiTV", "[csp.prepare] 下载/加载失败 jarUrl=$jarUrl", e)
                 loader = null
             }
         }
@@ -75,10 +80,13 @@ object CspLoader {
             runCatching {
                 clz.getMethod("init", Context::class.java, String::class.java)
                     .invoke(inst, context, site.ext)
+            }.onFailure { e ->
+                Log.e("XingHuiTV", "[csp.spider] init 失败 ${site.key} ext=${site.ext.take(100)}", e)
             }
             spiders[site.key] = inst
             inst
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("XingHuiTV", "[csp.spider] 实例化失败 ${site.key}", e)
             null
         }
     }
@@ -95,7 +103,8 @@ object CspLoader {
                 }
             }.toTypedArray()
             obj.javaClass.getMethod(name, *types).invoke(obj, *args)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("XingHuiTV", "[csp.invoke] $name 失败", e)
             null
         }
     }

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -225,6 +226,7 @@ class MainActivity : Activity() {
             } else {
                 Engine.execute("home", homeKey, "")
             }
+            Log.e("XingHuiTV", "[home] homeKey=$homeKey 返回前800: ${home.take(800)}")
             runOnUiThread { parseHome(home) }
         }.start()
     }
@@ -266,8 +268,11 @@ class MainActivity : Activity() {
                     params.put("engine", readAsset("drpy2.min.js"))
                 }
             }
-            Engine.execute("init", key, params.toString()).contains("\"code\":0")
-        } catch (_: Exception) {
+            val initRes = Engine.execute("init", key, params.toString())
+            Log.e("XingHuiTV", "[init] key=$key 返回前500: ${initRes.take(500)}")
+            initRes.contains("\"code\":0")
+        } catch (e: Exception) {
+            Log.e("XingHuiTV", "[init] key=$key 异常", e)
             false
         }
     }
@@ -308,6 +313,8 @@ class MainActivity : Activity() {
             }
             // 更新推荐（原项目首页推荐行）：home 的 list
             recommends.addAll(Vod.parseList(json))
+        }.onFailure { e ->
+            Log.e("XingHuiTV", "[parseHome] 解析失败 json前300: ${json.take(300)}", e)
         }
         (catList.adapter as ListAdapter).notifyDataSetChanged()
         vodAdapter.notifyDataSetChanged()
