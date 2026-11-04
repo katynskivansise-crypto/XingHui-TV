@@ -236,25 +236,32 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     // 多清晰度（对齐原版 Url.values）：播放地址含 TVBox `#` 分隔多清晰度、
                     // `name$url` 命名时拆成 urls 数组，壳据此展示清晰度切换；否则原样透传。
                     let parsed = json::parse(&raw);
-                    match parsed.get("url").and_then(|x| x.as_str()) {
-                        Some(url) if url.split('#').any(|s| !s.is_empty()) && url.split('#').filter(|s| !s.is_empty()).count() > 1 => {
-                            let mut v = parsed;
-                            if let Some(obj) = v.as_object_mut() {
-                                let parts: Vec<&str> = url.split('#').filter(|s| !s.is_empty()).collect();
-                                let urls: Vec<serde_json::Value> = parts.iter().enumerate().map(|(i, p)| {
-                                    if let Some(idx) = p.find('$') {
-                                        let (n, vv) = p.split_at(idx);
-                                        serde_json::json!({"name": n, "v": vv.trim_start_matches('$')})
-                                    } else {
-                                        serde_json::json!({"name": format!("清晰度{}", i + 1), "v": p})
-                                    }
-                                }).collect();
-                                obj.insert("url".to_string(), serde_json::json!(parts[0]));
-                                obj.insert("urls".to_string(), serde_json::json!(urls));
-                            }
-                            v.to_string()
+                    // 先提取为 owned String 再 move parsed，避免 E0505 借用冲突
+                    let url_owned = parsed
+                        .get("url")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !url_owned.is_empty()
+                        && url_owned.split('#').filter(|s| !s.is_empty()).count() > 1
+                    {
+                        let mut v = parsed;
+                        if let Some(obj) = v.as_object_mut() {
+                            let parts: Vec<&str> = url_owned.split('#').filter(|s| !s.is_empty()).collect();
+                            let urls: Vec<serde_json::Value> = parts.iter().enumerate().map(|(i, p)| {
+                                if let Some(idx) = p.find('$') {
+                                    let (n, vv) = p.split_at(idx);
+                                    serde_json::json!({"name": n, "v": vv.trim_start_matches('$')})
+                                } else {
+                                    serde_json::json!({"name": format!("清晰度{}", i + 1), "v": p})
+                                }
+                            }).collect();
+                            obj.insert("url".to_string(), serde_json::json!(parts[0]));
+                            obj.insert("urls".to_string(), serde_json::json!(urls));
                         }
-                        _ => raw,
+                        v.to_string()
+                    } else {
+                        raw
                     }
                 }
                 // 直播：params {url, tid} —— url 非空为独立直播源（diyp/txt/m3u，对齐原版
