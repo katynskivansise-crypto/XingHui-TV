@@ -292,7 +292,7 @@ class PlayActivity : Activity() {
                 onPlayFail("播放出错：${error.errorCodeName}")
             }
         })
-        player?.setPlaybackSpeed(speedList[speedIdx])
+        player?.setPlaybackSpeed(speedSteps[speedIdx])
     }
 
     private fun recordHistory() {
