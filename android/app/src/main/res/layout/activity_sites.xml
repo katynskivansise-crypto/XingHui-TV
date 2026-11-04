@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 站点管理布局：仅原生控件，兼容 API 21 起的旧 TV 盒子 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#000000"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="12dp"
+        android:textColor="#FFFFFF"
+        android:textSize="22sp"
+        android:text="站点管理" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="6dp"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:text="当前站点" />
+
+    <TextView
+        android:id="@+id/valCurrent"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="16dp"
+        android:textColor="#B0FFFFFF"
+        android:textSize="15sp"
+        android:text="未选择" />
+
+    <EditText
+        android:id="@+id/inputUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="粘贴订阅地址（JSON 订阅源 URL）"
+        android:textColor="#FFFFFF"
+        android:textColorHint="#80FFFFFF"
+        android:textSize="15sp"
+        android:inputType="textUri" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp">
+
+        <TextView
+            android:id="@+id/btnAdd"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:padding="12dp"
+            android:gravity="center"
+            android:textColor="#000000"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="#FFCC00"
+            android:text="添加订阅" />
+
+        <TextView
+            android:id="@+id/btnRemove"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:padding="12dp"
+            android:gravity="center"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="#663333"
+            android:text="删除当前站点" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/labelSites"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:text="已订阅 0 个站点" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/siteList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:textColor="#80FFFFFF"
+        android:textSize="13sp"
+        android:text="提示：按返回键回到主页；添加后自动设为当前站点，也可用方向键选择切换。" />
+
+</LinearLayout>
