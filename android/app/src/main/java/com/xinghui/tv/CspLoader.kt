@@ -177,58 +177,65 @@ object CspLoader {
             val initClz = runCatching { dl.loadClass("com.github.catvod.spider.Init") }.getOrNull()
             fun forceInitContext(tag: String) {
                 val clz = initClz ?: return
+                // ★最小化写入：只写反汇编确认过的实例字段 c，且只写 Context 本体。
+                // 这里曾出现过两件必须避免的危险操作（会直接 native 崩，且无 FATAL 无 signal）：
+                //   1) 往字段里塞 WeakReference —— R8 把 Init 的 9 个实例字段声明类型全抹成 Init 自身，
+                //      运行时没有 check-cast，读出来当 Context 调方法就会段错误；
+                //   2) 遍历所有非静态字段逐个覆盖 —— 会把 host / publicKey 等字段一并写脏，
+                //      后续 Init.init 读到类型不符的对象同样会崩。
+                // 结论：只写 c；写不进就放弃，宁可 csp 站空白，也不能让进程消失。
                 runCatching {
-                    // Init.get() 只做 sget-object（静态字段 a）然后 return；
-                    // 若 <clinit> 没执行成功，a 为 null，则 Init.context() 会在 null 实例上
-                    // iget-object 直接 NPE（而不是返回 null）。这里先补建单例并写回静态字段 a。
-                    var inst = clz.getDeclaredMethod("get").apply { isAccessible = true }.invoke(null)
+                    val inst = clz.getMethod("get").invoke(null)
                     if (inst == null) {
-                        inst = clz.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
-                        runCatching {
-                            clz.getDeclaredField("a").apply { isAccessible = true }.set(null, inst)
-                            Log.e(TAG, "[csp.prepare] $tag Init 单例为 null，已补建并写回静态字段 a")
-                        }.onFailure { e ->
-                            Log.e(TAG, "[csp.prepare] $tag 补填 Init 静态单例 a 失败", e)
-                        }
+                        lastJarError = "Init 单例为 null（<clinit> 未完成）"
+                        Log.e(TAG, "[csp.prepare] $tag Init.get() 为 null，放弃写入")
+                        return@runCatching
                     }
-                    if (inst == null) return@runCatching
-                    // 反汇编确认 context 写在实例字段 c；静态字段 a 是单例本身，不能当实例字段写
-                    fun put(name: String): Boolean {
-                        val f = runCatching { clz.getDeclaredField(name) }.getOrNull() ?: return false
-                        if (java.lang.reflect.Modifier.isStatic(f.modifiers)) return false
-                        f.isAccessible = true
-                        if (runCatching { f.set(inst, actx) }.isSuccess) return true
-                        return runCatching { f.set(inst, java.lang.ref.WeakReference<Context>(actx)) }.isSuccess
+                    val f = runCatching { clz.getDeclaredField("c") }.getOrNull()
+                    if (f == null) {
+                        lastJarError = "Init 无字段 c"
+                        Log.e(TAG, "[csp.prepare] $tag 未找到字段 c")
+                        return@runCatching
                     }
-                    var ok = if (put("c")) 1 else 0
-                    var back = runCatching { clz.getMethod("context").invoke(null) as? Context }.getOrNull()
-                    if (back == null) {
-                        // 兜底：c 写不进（字段名被混淆改掉）时，遍历所有非静态字段逐个尝试
-                        clz.declaredFields.forEach { f ->
-                            if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) {
-                                f.isAccessible = true
-                                val done = runCatching { f.set(inst, actx) }.isSuccess ||
-                                    runCatching { f.set(inst, java.lang.ref.WeakReference<Context>(actx)) }.isSuccess
-                                if (done) ok++
-                            }
-                        }
-                        back = runCatching { clz.getMethod("context").invoke(null) as? Context }.getOrNull()
+                    if (java.lang.reflect.Modifier.isStatic(f.modifiers)) {
+                        Log.e(TAG, "[csp.prepare] $tag 字段 c 是静态字段，跳过")
+                        return@runCatching
                     }
-                    Log.e(TAG, "[csp.prepare] $tag 强制设 Init.context 字段数=$ok 回读=${back != null}")
-                    if (back == null) lastJarError = "Init.context 仍为 null（已写 $ok 个字段）"
+                    f.isAccessible = true
+                    f.set(inst, actx)
+                    val back = runCatching { clz.getMethod("context").invoke(null) as? Context }.getOrNull()
+                    Log.e(TAG, "[csp.prepare] $tag 写 Init.c 完成 回读=${back != null}")
+                    if (back == null) lastJarError = "Init.context 写 c 后仍为 null"
                 }.onFailure { e ->
-                    Log.e(TAG, "[csp.prepare] $tag 强制设 Init.context 失败", e)
+                    Log.e(TAG, "[csp.prepare] $tag 写 Init.c 失败", e)
                 }
             }
             forceInitContext("预设")
-            // 原版 invokeInit：com.github.catvod.spider.Init.init(Context)
-            runCatching {
-                initClz?.getMethod("init", Context::class.java)?.invoke(initClz, actx)
-            }.onFailure { e ->
-                val real = if (e is java.lang.reflect.InvocationTargetException) (e.targetException ?: e) else e
-                Log.e(TAG, "[csp.prepare] Init.init 失败", real)
+            // ★不再默认执行 spider.Init.init。
+            // 反汇编确认：com.github.catvod.spider.Init.init 是 spider.jar 的防二次打包校验器——
+            // 校验包名（白名单仅 com.fongmi.android.tv / com.hisen.android.tv / com.layaboxhmhz.gameh）、
+            // App 名（白名单仅 影视/影視/OK影视/OK影視/OK影视Pro/OK影視Pro/影视+）、
+            // 签名 DN 黑名单（含 CN=Android,OU=Android,O=Android，恰好命中我们的 debug 签名）。
+            // 校验本身只打日志，但它会起 4 个后台线程做"网络任务"，命中后延迟执行并直接结束进程——
+            // 现象就是 logcat 无 FATAL、无 signal，几秒后 has died，日志在某个站点后突然截断。
+            // AppDrama 真正需要的只是 Init.context()，已由 forceInitContext 手动写入实例字段 c，
+            // 所以正常路径只写字段、不跑 init；仅当回读仍为 null 时才退回原版调用兜底。
+            val ctxReady = runCatching {
+                initClz?.getMethod("context").invoke(null) as? Context
+            }.getOrNull() != null
+            if (!ctxReady) {
+                Log.e(TAG, "[csp.prepare] Init.context 手写未生效，兜底调用 Init.init（可能触发防二次打包校验）")
+                runCatching {
+                    initClz?.getMethod("init", Context::class.java)?.invoke(initClz, actx)
+                }.onFailure { e ->
+                    val real =
+                        if (e is java.lang.reflect.InvocationTargetException) (e.targetException ?: e) else e
+                    Log.e(TAG, "[csp.prepare] Init.init 兜底调用失败", real)
+                }
+                forceInitContext("后补")
+            } else {
+                Log.e(TAG, "[csp.prepare] Init.context 已就绪，跳过 Init.init（避开防二次打包校验）")
             }
-            forceInitContext("后补")
             // 原版 putProxy：Proxy.proxy(Map) 按 jar 存 Method
             runCatching {
                 val proxyClz = dl.loadClass("com.github.catvod.spider.Proxy")
