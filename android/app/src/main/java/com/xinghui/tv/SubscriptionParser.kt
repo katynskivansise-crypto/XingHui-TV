@@ -85,13 +85,20 @@ object SubscriptionParser {
     fun jarUrl(jarRaw: String, subscribeUrl: String): String {
         if (jarRaw.isBlank()) return ""
         val first = jarRaw.substringBefore(";").trim()
-        if (first.startsWith("http://") || first.startsWith("https://")) return first
-        if (first.startsWith("./") && subscribeUrl.contains("://")) {
-            val base = subscribeUrl.substringBeforeLast('/', missingDelimiterValue = subscribeUrl) + "/"
-            return base + first.removePrefix("./")
+        // 订阅里写成 "./jar/spider.jar;md5;356ad46e…"：路径要按订阅目录补成绝对地址，
+        // 而 ;md5; 必须**保留**——它是"本地缓存的 jar 是否还需要重下"的唯一依据。
+        // 之前这里只取 substringBefore(";") 把 md5 丢了，导致 expectMd5 恒为空、
+        // cacheOk 恒 false，每次启动都重下 1.9MB（对齐原版 JarLoader.parseJar 的语义）
+        val md5Part = jarRaw.substringAfter(";md5;", "").trim()
+        val url = when {
+            first.startsWith("http://") || first.startsWith("https://") -> first
+            first.startsWith("./") && subscribeUrl.contains("://") ->
+                subscribeUrl.substringBeforeLast('/', missingDelimiterValue = subscribeUrl) + "/" + first.removePrefix("./")
+            // 相对路径但拿不到订阅 base：无法拼成可下载地址，返回空让上层走兜底，
+            // 避免拼出 "./jar/spider.jar" 这种必然下载失败的地址（csp 站全空的主要成因之一）
+            else -> ""
         }
-        // 相对路径但拿不到订阅 base：无法拼成可下载地址，返回空让上层走兜底，
-        // 避免拼出 "./jar/spider.jar" 这种必然下载失败的地址（csp 站全空的主要成因之一）
-        return ""
+        if (url.isBlank()) return ""
+        return if (md5Part.isBlank()) url else "$url;md5;$md5Part"
     }
 }
