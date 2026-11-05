@@ -72,9 +72,10 @@ class MainActivity : Activity() {
             adapter = vodAdapter
         }
 
-        // 首页更新推荐横排（home 返回的推荐影片，点击进详情）
+        // 首页更新推荐：对齐原版的多行海报网格（原版整个首页是一个竖向滚动的 VerticalGridView，
+        // 区块竖向堆叠、可以继续往下浏览）。之前是横向单行 LinearLayout，只显示一排、下方大片空白。
         findViewById<RecyclerView>(R.id.recommendList).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
+            layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
             adapter = LibAdapter(recommends, { vod ->
                 runCatching {
                     startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
@@ -268,13 +269,7 @@ class MainActivity : Activity() {
             }
             siteKey = homeKey
 
-            // 2) 额外注册其余站点（聚合搜索用；逐个容错）
-            for (site in store.sites()) {
-                if (site.key == homeKey || registered.contains(site.key)) continue
-                if (registerSite(site, site.key, dir, ua, proxy)) registered.add(site.key)
-            }
-
-            // 3) 主界面用当前站点数据
+            // 2) 立即拉当前站点首页并上屏：先让用户看到内容，不被后面的批量注册阻塞
             val home = if (current?.isCsp() == true) {
                 CspLoader.home(this, current)
             } else {
@@ -282,7 +277,29 @@ class MainActivity : Activity() {
             }
             Log.e("XingHuiTV", "[home] homeKey=$homeKey 返回前800: ${home.take(800)}")
             runOnUiThread { parseHome(home) }
+
+            // 3) 首屏已经上屏后，再补注册其余站点（聚合搜索用；逐个容错）
+            // drpy 源每站都要下载一次规则脚本，并把整份 drpy2.min.js（109KB）作为 JNI 参数传进引擎；
+            // 157 站全量预注册会让电视耗时与内存尖峰过大（实测跑到约 30 站进程即被杀，或首屏等待 30 秒以上）。
+            // 这里只补注册轻量 json/api 源，drpy 源留到搜索页真正需要时再懒注册。
+            for (site in store.sites()) {
+                if (site.key == homeKey || registered.contains(site.key)) continue
+                if (site.isDrpy() || site.ext.startsWith("http")) continue
+                if (registerSite(site, site.key, dir, ua, proxy)) registered.add(site.key)
+            }
         }.start()
+    }
+
+    /** drpy2.min.js 全文缓存：同一订阅下所有 drpy 源共用一份，只下载一次 */
+    private var drpyEngineCache: String? = null
+
+    /** 取 drpy 引擎脚本：首次下载，之后复用；下载失败回退内置 assets */
+    private fun engineScript(engineUrl: String): String {
+        drpyEngineCache?.let { return it }
+        val downloaded = JsonFetcher.get(engineUrl)
+        val text = if (downloaded.isNullOrBlank()) readAsset("drpy2.min.js") else downloaded
+        drpyEngineCache = text
+        return text
     }
 
     /** 注册单个站点到引擎；返回是否成功。不改变全局当前站 key。 */
@@ -302,9 +319,8 @@ class MainActivity : Activity() {
                     val ruleUrl = SubscriptionParser.jarUrl(site.ext, base)
                     val ruleText = JsonFetcher.get(ruleUrl)
                     if (ruleText.isNullOrBlank()) return false
-                    val engineText = JsonFetcher.get(engineUrl)
                     params.put("rule", ruleText)
-                    params.put("engine", if (engineText.isNullOrBlank()) readAsset("drpy2.min.js") else engineText)
+                    params.put("engine", engineScript(engineUrl))
                     // 站点级 header（如"新闪雷/茶杯狐"配置了 UA，对齐原项目 getHeaders）
                     try {
                         val h = JSONObject(site.siteJson).optJSONObject("header")

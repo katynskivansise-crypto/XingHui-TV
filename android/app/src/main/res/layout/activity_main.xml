@@ -260,7 +260,8 @@
     <LinearLayout
         android:id="@+id/recommendRow"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:orientation="vertical"
         android:visibility="gone">
 
@@ -280,7 +281,8 @@
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recommendList"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="0dp"
+            android:layout_weight="1"
             android:clipToPadding="false" />
 
     </LinearLayout>

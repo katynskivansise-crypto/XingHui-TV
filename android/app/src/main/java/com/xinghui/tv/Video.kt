@@ -25,7 +25,15 @@ data class Vod(
         fun fromJson(o: JSONObject): Vod = Vod(
             vodId = o.optString("vod_id"),
             vodName = o.optString("vod_name"),
-            vodPic = o.optString("vod_pic"),
+            // 封面字段兜底：jar 源（AppDrama 等）返回的字段名并不统一
+            // —— 首页 converUrl、推荐 coverImage、部分站点 pic/cover，
+            // 只认 vod_pic 会让海报区整片空白（标题与角标却有值）。
+            vodPic = o.optString("vod_pic")
+                .ifBlank { o.optString("pic") }
+                .ifBlank { o.optString("coverImage") }
+                .ifBlank { o.optString("converUrl") }
+                .ifBlank { o.optString("cover") }
+                .ifBlank { o.optString("vod_pic_url") },
             vodRemarks = o.optString("vod_remarks"),
             vodYear = o.optString("vod_year"),
             vodArea = o.optString("vod_area"),

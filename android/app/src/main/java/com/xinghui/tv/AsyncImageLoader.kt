@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.ColorDrawable
 import android.util.Base64
+import android.util.Log
 import android.util.LruCache
 import android.widget.ImageView
 import org.json.JSONObject
@@ -82,7 +83,7 @@ object AsyncImageLoader {
         }
     }
 
-    /** 走引擎海报代理拿原始字节（带设置里的 UA / 代理） */
+    /** 走引擎海报代理拿原始字节（带设置里的 UA / 代理）；引擎失败时回退系统栈直连 */
     private fun fetch(context: Context, url: String): ByteArray? {
         val s = Settings(context)
         val params = JSONObject()
@@ -91,8 +92,31 @@ object AsyncImageLoader {
             .put("proxy", s.proxy)
             .toString()
         val b64 = Engine.execute("proxy_image", "", params)
-        if (b64.isBlank()) return null
-        return runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+        if (b64.isNotBlank()) {
+            val bytes = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+            if (bytes != null && bytes.isNotEmpty()) return bytes
+            Log.e("XingHuiTV", "[image] 引擎返回内容解不出来 len=${b64.length} url=$url")
+        } else {
+            Log.e("XingHuiTV", "[image] 引擎取图返回空，回退直连 url=$url")
+        }
+        // 兜底：部分图片 CDN 对引擎侧 TLS 指纹/HTTP 版本不友好，用系统栈再试一次。
+        // 原版走 okhttp 直连能出图，这里用 HttpURLConnection 等价于原版那条路径。
+        return runCatching {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 15000
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", s.ua.ifBlank { "okhttp/4.12.0" })
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.use { it.readBytes() }
+            conn.disconnect()
+            if (code !in 200..299) {
+                Log.e("XingHuiTV", "[image] 直连 HTTP $code url=$url")
+                null
+            } else body
+        }.onFailure { e ->
+            Log.e("XingHuiTV", "[image] 直连也失败 url=$url", e)
+        }.getOrNull()
     }
 
     // ---------------- 磁盘缓存 ----------------
