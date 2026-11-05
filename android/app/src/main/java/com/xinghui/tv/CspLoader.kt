@@ -221,7 +221,7 @@ object CspLoader {
             // AppDrama 真正需要的只是 Init.context()，已由 forceInitContext 手动写入实例字段 c，
             // 所以正常路径只写字段、不跑 init；仅当回读仍为 null 时才退回原版调用兜底。
             val ctxReady = runCatching {
-                initClz?.getMethod("context").invoke(null) as? Context
+                initClz?.getMethod("context")?.invoke(null) as? Context
             }.getOrNull() != null
             if (!ctxReady) {
                 Log.e(TAG, "[csp.prepare] Init.context 手写未生效，兜底调用 Init.init（可能触发防二次打包校验）")
