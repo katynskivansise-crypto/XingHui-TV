@@ -30,8 +30,15 @@ object UrlConvert {
             lower.startsWith("local://") -> BASE + "/" + url.substring(8)
             lower.startsWith("assets://") -> BASE + "/" + url.substring(9)
             lower.startsWith("file://") -> BASE + "/file/" + url.substring(7)
-            lower.startsWith("clan://") -> convert(("file://" + url.substring(7)))
+            lower.startsWith("clan://") -> convert(fixUrl("file://" + url.substring(7)))
             else -> url
         }
+    }
+
+    /** 对齐原版 UrlUtil.fixUrl：clan 站的路径常带 /localhost/ 前缀，需先抹掉再当文件路径用 */
+    private fun fixUrl(url: String): String {
+        var u = url
+        if (u.contains("/localhost/")) u = u.replace("/localhost/", "/")
+        return u
     }
 }

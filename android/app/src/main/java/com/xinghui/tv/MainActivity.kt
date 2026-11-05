@@ -649,7 +649,10 @@ class MainActivity : Activity() {
 
     private fun updateTitle() {
         val siteName = SubscriptionStore(this).currentSite()?.name ?: "未配置站点"
-        findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + siteName
+        // 对齐原版 activity_home.xml：顶栏标题就是当前站点名（原版显示「瓜子·影视」）。
+        // 之前把 app 名拼在前面（「星汇 TV · 苹果·APP」），长度翻倍把顶栏撑得很宽，
+        // 与红圈标出的原版比例对不上；品牌由左侧 logo 承担。
+        findViewById<TextView>(R.id.title).text = siteName
     }
 
     private fun parseCategory(json: String) {

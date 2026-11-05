@@ -30,7 +30,9 @@ object AsyncImageLoader {
 
     private val placeHolder = ColorDrawable(0xFF1A1A1A.toInt())
 
-    private val pool = Executors.newFixedThreadPool(4)
+    // 并发要够：一屏 20+ 张海报，4 线程时每张都得等前面排队，
+    // 表现为"从左到右慢慢填、大部分长时间空白"。8 线程配合下面的短超时后基本秒出。
+    private val pool = Executors.newFixedThreadPool(8)
 
     /** 内存缓存：取可用堆的 1/8，按 KB 计量 */
     private val cache = object : LruCache<String, Bitmap>(
@@ -50,9 +52,27 @@ object AsyncImageLoader {
         view.setImageDrawable(placeHolder)
         view.tag = url
         if (url.isBlank()) return
+        // TVBox 站的封面地址会把 header 内嵌在 URL 尾巴上（对齐原版 ImgUtil.getUrl 的四类后缀）：
+        //   https://x.jpg@Referer=https://y/@User-Agent=Mozilla...
+        //   不拆出来的话，@Referer=... 会被当成路径的一部分 → 服务器 404 → 海报永远空白。
+        //   这是"部分图能显示、大部分空白"的真正原因（能显示的那些恰好没带后缀）。
+        val (cleanUrl, extraHeaders) = splitHeaders(url)
+        // data: 内嵌 base64 图，无需下载（原版同样在 getUrl 里直接返回）
+        if (cleanUrl.startsWith("data:")) {
+            val comma = cleanUrl.indexOf(',')
+            if (comma > 0) {
+                val raw = runCatching { Base64.decode(cleanUrl.substring(comma + 1), Base64.DEFAULT) }.getOrNull()
+                val bmp = raw?.let { decodeSampled(it, 0, 0) }
+                if (bmp != null) {
+                    cache.put(url, bmp)
+                    view.setImageBitmap(bmp)
+                }
+            }
+            return
+        }
         // 海报地址可能是 file:// / proxy:// / assets://，统一重写成本地 HTTP 地址再下载；
         // 原版 UrlUtil.convert 也是在这个位置做的（图片走 OkHttp 而非 file loader）
-        val realUrl = UrlConvert.convert(url).ifBlank { url }
+        val realUrl = UrlConvert.convert(cleanUrl).ifBlank { cleanUrl }
 
         cache.get(url)?.let { bmp ->
             view.setImageBitmap(bmp)
@@ -68,10 +88,22 @@ object AsyncImageLoader {
         pool.execute {
             try {
                 // 1) 先查磁盘
-                // 磁盘/内存缓存 key 用原始 url（同一张图不因 scheme 差异重复缓存），下载用重写后的地址
-                val bytes = readDisk(ctx, url) ?: fetch(ctx, realUrl)?.also { writeDisk(ctx, url, it) }
+                // 磁盘/内存缓存 key 用原始 url（同一张图不因 scheme 差异重复缓存）
+                // 取值顺序：磁盘 → 本地文件/assets 直读 → 网络。
+                // 本地资源必须直读：UrlConvert 会把 file://、local://、assets:// 改写成本地 HTTP，
+                // 而 ProxyServer 只实现了 /proxy，/file/ 等路径一律 404（原版 Server 才有那套路由）。
+                val bytes = readDisk(ctx, url)
+                    ?: localBytes(ctx, cleanUrl)?.also { writeDisk(ctx, url, it) }
+                    ?: fetch(ctx, realUrl, extraHeaders)?.also { writeDisk(ctx, url, it) }
                 if (bytes == null || bytes.isEmpty()) return@execute
-                val bmp = decodeSampled(bytes, reqW, reqH) ?: return@execute
+                val bmp = decodeSampled(bytes, reqW, reqH)
+                if (bmp == null) {
+                    // 磁盘里存的可能是错误页/半截数据（例如 CDN 返回的 HTML），
+                    // 不清掉的话这张海报会永久空白——删掉让下次重新下载
+                    runCatching { diskFile(ctx, url).delete() }
+                    Log.e("XingHuiTV", "[image] 解码失败，已清除缓存 len=${bytes.size} url=$url")
+                    return@execute
+                }
                 cache.put(url, bmp)
                 view.post {
                     // 控件已被复用绑定到别的 url 时，丢弃这次结果
@@ -83,9 +115,71 @@ object AsyncImageLoader {
         }
     }
 
-    /** 走引擎海报代理拿原始字节（带设置里的 UA / 代理）；引擎失败时回退系统栈直连 */
-    private fun fetch(context: Context, url: String): ByteArray? {
+    /**
+     * 本地资源直读。file:// / local:// 走文件系统，assets:// 走 APK assets。
+     * 必须直读而不是交给 UrlConvert 改写成 http://127.0.0.1:9978/...：
+     * 本地服务只实现了 /proxy，其余路径返回 404（原版是 Server/process 那一套才有 /file/）。
+     */
+    private fun localBytes(ctx: Context, url: String): ByteArray? = runCatching {
+        when {
+            url.startsWith("file://") ->
+                File(url.removePrefix("file://")).takeIf { it.isFile }?.readBytes()
+            url.startsWith("local://") ->
+                File(url.removePrefix("local://")).takeIf { it.isFile }?.readBytes()
+            url.startsWith("assets://") ->
+                ctx.assets.open(url.removePrefix("assets://")).use { it.readBytes() }
+            else -> null
+        }
+    }.onFailure { Log.e("XingHuiTV", "[image] 本地资源读取失败 $url", it) }.getOrNull()
+
+    /**
+     * 拆出 TVBox 图片地址尾部的内嵌 header（逐条对齐原版 ImgUtil.getUrl）：
+     *   @Headers={"Referer":"https://x/"}  @Cookie=xxx  @Referer=https://x/  @User-Agent=Mozilla...
+     * 返回 (干净 URL, header 表)。原版用 `url.split("@")[0]` 截断，这里用正则截掉对应片段，
+     * 效果一致但不会把 URL 本身里的 `@`（如用户名密码）误切。
+     */
+    private fun splitHeaders(raw: String): Pair<String, Map<String, String>> {
+        var url = raw.trim()
+        val headers = mutableMapOf<String, String>()
+
+        // @Headers={json} —— 值里可能含 "@"（URL），所以吃到下一个" @" 或行尾为止
+        Regex("@Headers=(\\{.*?\\})(@|$)").find(url)?.let { m ->
+            runCatching {
+                val o = JSONObject(m.groupValues[1])
+                val it = o.keys()
+                while (it.hasNext()) {
+                    val k = it.next()
+                    headers[k] = o.optString(k)
+                }
+            }
+            url = url.removeRange(m.range).trim()
+        }
+        // 三个单值后缀，值同样可能是 URL（含 @）
+        for (key in arrayOf("Cookie", "Referer", "User-Agent")) {
+            Regex("@$key=(.*?)(?:@(?:Cookie|Referer|User-Agent|Headers)=|$)").find(url)?.let { m ->
+                headers[key] = m.groupValues[1].trim()
+                url = url.removeRange(m.range).trim()
+            }
+        }
+        return url.trimEnd('@') to headers
+    }
+
+    /**
+     * 取图字节。顺序经过调整：
+     *  - 没配代理时先走系统栈直连（等价原版 okhttp 那条路径，实测能出图），
+     *    失败再交给引擎——避免引擎侧的长超时把线程池全部占死。
+     *  - 配了代理时反过来：代理只在引擎侧生效，先走引擎。
+     * 注意：内嵌 header（@Referer= 等）只有直连能带，proxy_image 不支持 header 参数，
+     * 所以带 header 的图直连优先，无论是否配代理。
+     */
+    private fun fetch(context: Context, url: String, extraHeaders: Map<String, String>): ByteArray? {
         val s = Settings(context)
+        val hasProxy = s.proxy.isNotBlank()
+
+        if (!hasProxy || extraHeaders.isNotEmpty()) {
+            directFetch(s, url, extraHeaders)?.let { return it }
+        }
+
         val params = JSONObject()
             .put("url", url)
             .put("ua", s.ua)
@@ -97,27 +191,36 @@ object AsyncImageLoader {
             if (bytes != null && bytes.isNotEmpty()) return bytes
             Log.e("XingHuiTV", "[image] 引擎返回内容解不出来 len=${b64.length} url=$url")
         } else {
-            Log.e("XingHuiTV", "[image] 引擎取图返回空，回退直连 url=$url")
+            Log.e("XingHuiTV", "[image] 引擎取图返回空 url=$url")
         }
-        // 兜底：部分图片 CDN 对引擎侧 TLS 指纹/HTTP 版本不友好，用系统栈再试一次。
-        // 原版走 okhttp 直连能出图，这里用 HttpURLConnection 等价于原版那条路径。
-        return runCatching {
-            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 8000
-            conn.readTimeout = 15000
-            conn.instanceFollowRedirects = true
-            conn.setRequestProperty("User-Agent", s.ua.ifBlank { "okhttp/4.12.0" })
-            val code = conn.responseCode
-            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.use { it.readBytes() }
-            conn.disconnect()
-            if (code !in 200..299) {
-                Log.e("XingHuiTV", "[image] 直连 HTTP $code url=$url")
-                null
-            } else body
-        }.onFailure { e ->
-            Log.e("XingHuiTV", "[image] 直连也失败 url=$url", e)
-        }.getOrNull()
+
+        if (hasProxy) directFetch(s, url, extraHeaders)?.let { return it }
+        return null
     }
+
+    /** 系统栈直连（等价原版 Glide→okhttp 直连出图的那条路径）；超时取短，失败快放弃 */
+    private fun directFetch(s: Settings, url: String, extraHeaders: Map<String, String> = emptyMap()): ByteArray? = runCatching {
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 5000
+        conn.readTimeout = 8000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", extraHeaders["User-Agent"] ?: s.ua.ifBlank { "okhttp/4.12.0" })
+        conn.setRequestProperty("Accept", "image/*,*/*;q=0.8")
+        // 原版从 URL 拆出来的防盗链 header 原样带上（Referer / Cookie 是出图的关键）
+        extraHeaders["Referer"]?.let { conn.setRequestProperty("Referer", it) }
+        extraHeaders["Cookie"]?.let { conn.setRequestProperty("Cookie", it) }
+        extraHeaders.filterKeys { it != "Referer" && it != "Cookie" && it != "User-Agent" }
+            .forEach { (k, v) -> runCatching { conn.setRequestProperty(k, v) } }
+        val code = conn.responseCode
+        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.use { it.readBytes() }
+        conn.disconnect()
+        if (code !in 200..299) {
+            Log.e("XingHuiTV", "[image] 直连 HTTP $code url=$url")
+            null
+        } else body
+    }.onFailure { e ->
+        Log.e("XingHuiTV", "[image] 直连失败 ${e.javaClass.simpleName}: ${e.message} url=$url")
+    }.getOrNull()
 
     // ---------------- 磁盘缓存 ----------------
 
@@ -167,7 +270,11 @@ object AsyncImageLoader {
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
         var sample = 1
-        while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) sample *= 2
+        // reqW/reqH <= 0 表示"按原尺寸解"；不设这个保护的话下面的循环条件恒为真，
+        // 采样率会一路翻倍直到解出 1 像素（data: 内嵌图那条路径会踩到）。
+        if (reqW > 0 && reqH > 0) {
+            while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) sample *= 2
+        }
 
         val opts = BitmapFactory.Options().apply {
             inSampleSize = sample
