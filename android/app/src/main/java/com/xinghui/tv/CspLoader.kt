@@ -37,6 +37,10 @@ object CspLoader {
     @Volatile
     private var defaultJar: String = ""
 
+    /** 最近一次 jar 加载失败的具体原因，透传到首页提示，免去没有 logcat 时盲猜 */
+    @Volatile
+    private var lastJarError: String = ""
+
     /** 最近一次访问的站点所用 jar 的 md5，/proxy 分发按它取 Proxy 方法 */
     @Volatile
     private var recentJarKey: String = ""
@@ -88,22 +92,41 @@ object CspLoader {
             if (url.isBlank()) return null
             // 原版 Path.jar(url)：本地文件按 jar 地址区分，避免多 jar 互相覆盖
             val file = File(context.filesDir, "spider_" + md5Of(url) + ".jar")
-            val cacheOk = expectMd5.isNotEmpty() && file.exists() && file.length() > 1024 &&
-                md5OfFile(file) == expectMd5
-            if (!cacheOk) {
-                if (file.exists()) Log.e(TAG, "[csp.prepare] 缓存 md5 不符或缺失，重新下载 url=$url")
-                runCatching { JsonFetcher.download(url, file) }.onFailure { e ->
-                    Log.e(TAG, "[csp.prepare] 下载失败 url=$url", e)
+            val fileOk = file.exists() && file.length() > 1024
+            // 注意：这里**不再**用订阅里的 md5 做"必须匹配才复用"的判定。
+            // 实测 qist/tvbox 的 spider.jar 内容会更新而 jsm.json 里的 md5 不跟着改
+            // （现场校验：实际 356ad46e… ≠ 订阅 c6c7cbd1…），若按原版严格 md5 校验，
+            // 每次启动都会重下 1.9MB，电视上极易超时 → jar 永远拿不到 → csp 永远未就绪。
+            if (!fileOk && file.exists()) {
+                Log.e(TAG, "[csp.prepare] 缓存文件不完整 len=${file.length()}，删除重下")
+                file.delete()
+            }
+            if (!fileOk) {
+                var downloaded = false
+                for (attempt in 0..1) {
+                    val ok = runCatching {
+                        JsonFetcher.download(url, file, if (attempt == 0) 30000 else 45000)
+                    }.getOrElse { e ->
+                        lastJarError = "下载异常：${e.message}"
+                        Log.e(TAG, "[csp.prepare] 第${attempt + 1}次下载失败 url=$url", e)
+                        false
+                    }
+                    if (ok && file.exists() && file.length() > 1024) {
+                        downloaded = true
+                        break
+                    }
+                    runCatching { file.delete() }
                 }
-            }
-            if (!file.exists() || file.length() < 1024) {
-                Log.e(TAG, "[csp.prepare] jar 不可用 url=$url exists=${file.exists()} len=${file.length()}")
-                return null
-            }
-            if (expectMd5.isNotEmpty()) {
+                if (!downloaded) {
+                    lastJarError = lastJarError.ifBlank { "jar 下载失败（网络不可达或超时）" }
+                    Log.e(TAG, "[csp.prepare] jar 不可用 url=$url")
+                    return null
+                }
+                Log.e(TAG, "[csp.prepare] jar 下载完成 len=${file.length()}")
+            } else if (expectMd5.isNotEmpty()) {
                 val real = md5OfFile(file)
                 if (real != expectMd5) {
-                    Log.e(TAG, "[csp.prepare] md5 校验不一致 期望=$expectMd5 实际=$real（仍尝试加载）")
+                    Log.e(TAG, "[csp.prepare] 缓存 md5 与订阅不符（订阅侧可能过期），直接复用：期望=$expectMd5 实际=$real")
                 }
             }
             val dl = DexClassLoader(
@@ -221,7 +244,10 @@ object CspLoader {
 
     private fun spider(context: Context, site: Site): Any? {
         val jar = jarOf(site)
-        val dl = loadJar(context, jar) ?: return null
+        val dl = loadJar(context, jar) ?: run {
+            if (lastJarError.isBlank()) lastJarError = "jar 未加载（${jar.take(60)}）"
+            return null
+        }
         val jarKey = md5Of(jar)
         recentJarKey = jarKey
         val spKey = jarKey + site.key // 原版 spKey = md5(jar) + key
@@ -241,10 +267,15 @@ object CspLoader {
             inst
         } catch (e: Throwable) {
             // 对齐原版 catch Throwable：NoClassDefFoundError / ExceptionInInitializerError 也要接住
+            lastJarError = "类加载失败：${clsNameOf(site)} → ${e.javaClass.simpleName}: ${e.message}"
             Log.e(TAG, "[csp.spider] 实例化失败 ${site.key}", e)
             null
         }
     }
+
+    /** csp_AppDrama → com.github.catvod.spider.AppDrama，仅用于日志/提示 */
+    private fun clsNameOf(site: Site): String =
+        "com.github.catvod.spider." + site.api.removePrefix("csp_")
 
     @Suppress("UNCHECKED_CAST")
     private fun invoke(obj: Any, name: String, vararg args: Any?): Any? {
@@ -273,7 +304,10 @@ object CspLoader {
         // 失败不返回空串：带上原因，壳侧可直接显示给用户（便于定位 jar/init/接口问题）
         val s = spider(context, site)
             ?: return JSONObject().put("code", -1)
-                .put("msg", "csp 未就绪（jar=${jarOf(site).take(60)}；为空或非 URL 说明 jar 没加载成功）").toString()
+                .put(
+                    "msg",
+                    "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}，原因未记录" }}）"
+                ).toString()
         val r1 = str(invoke(s, "homeContent", true))
         val hasList = runCatching {
             JSONObject(r1).optJSONArray("list")?.length() ?: 0
