@@ -73,6 +73,22 @@ impl DrpyEngine {
         let _ = ctx.globals().set("print", Function::new(ctx.clone(), |s: String| eprintln!("[drpy.print] {s}")));
         let _ = ctx.globals().set("log", Function::new(ctx.clone(), |s: String| eprintln!("[drpy.log] {s}")));
 
+        // 规则侧 KV 宿主：JS 的 local.get/set/delete 落到进程全局（跨线程）并持久化。
+        // 不能再用 `globalThis.__LOCAL = {}` —— 引擎上下文是 thread_local 每线程一份，
+        // 主线程 set 的 token，海报/搜索线程读不到，规则会反复重新取。
+        let _ = ctx.globals().set(
+            "_kvGet",
+            Function::new(ctx.clone(), |k: String| crate::kv::get(&k)),
+        );
+        let _ = ctx.globals().set(
+            "_kvSet",
+            Function::new(ctx.clone(), |k: String, v: String| crate::kv::set(&k, &v)),
+        );
+        let _ = ctx.globals().set(
+            "_kvDel",
+            Function::new(ctx.clone(), |k: String| crate::kv::del(&k)),
+        );
+
         // 浏览器/webpack 全局垫片
         let g = ctx.globals().clone();
         for k in ["self", "window", "global"] {
@@ -156,13 +172,15 @@ globalThis.http = function(url, obj) {
 };
 globalThis.fetch = function(url, obj) { return __decode(_net(url, JSON.stringify(obj || {}))); };
 // 本地存储对象（对齐原版 com.fongmi.quickjs.method.Local）：
-// drpy2 的 getItem/setItem/clearItem 内部调用 local.get/set/delete(rule,key)，缺了必抛错
-globalThis.__LOCAL = {};
+// drpy2 的 getItem/setItem/clearItem 内部调用 local.get/set/delete(rule,key)，缺了必抛错。
+// 存储落到 Rust 侧全局 KV（_kvGet/_kvSet/_kvDel），不再用 JS 内存对象：
+//   ① 引擎上下文是 thread_local 每线程一份，JS 对象无法跨线程共享；
+//   ② 全局 KV 会写成 filesDir/rule_kv.json，重启后仍能命中（对齐原版 SharedPreferences）。
 globalThis.local = {
-  _k: function(rule, key) { return "cache_" + (rule || "") + "_" + key; },
-  get: function(rule, key) { var v = globalThis.__LOCAL[this._k(rule, key)]; return v === undefined ? "" : v; },
-  set: function(rule, key, value) { globalThis.__LOCAL[this._k(rule, key)] = String(value); },
-  "delete": function(rule, key) { delete globalThis.__LOCAL[this._k(rule, key)]; }
+  _k: function(rule, key) { return "cache_" + (rule ? rule + "_" : "") + key; },
+  get: function(rule, key) { var v = globalThis._kvGet(this._k(rule, key)); return v === undefined || v === null ? "" : v; },
+  set: function(rule, key, value) { globalThis._kvSet(this._k(rule, key), String(value)); },
+  "delete": function(rule, key) { globalThis._kvDel(this._k(rule, key)); }
 };
 // 列表解析宿主：drpy2 只在 typeof pdfl === "function" 时调用（取元素后按 name/url 规则再解析）
 globalThis.pdfl = function(html, p1, list_text, list_url, urlKey) {

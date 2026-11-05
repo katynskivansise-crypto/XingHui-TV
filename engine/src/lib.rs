@@ -18,6 +18,7 @@ pub mod drpy_spider;
 pub mod json;
 pub mod json_spider;
 pub mod js_spider;
+pub mod kv;
 pub mod live_parse;
 pub mod live_spider;
 pub mod net;

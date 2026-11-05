@@ -69,6 +69,10 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // 规则侧 key-value 缓存落盘位置（对齐原版 quickjs Local → Prefers）。
+            // dir 是壳侧 filesDir.absolutePath，缓存写成 <dir>/rule_kv.json。
+            // 不设的话 local.get/set 只在进程内有效，重启即丢。
+            crate::kv::init_dir(&dir);
             if !site_json.is_empty() {
                 // 站点 JSON 含 api 字段 → TVBox 标准 api 接口源（对齐原项目 SiteViewModel）；
                 // 否则为纯静态 JSON 规则（type=3，数据写在 ext[].list）→ JsonSpider
