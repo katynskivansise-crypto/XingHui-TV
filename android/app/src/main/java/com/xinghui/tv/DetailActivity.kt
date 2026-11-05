@@ -47,7 +47,12 @@ class DetailActivity : Activity() {
 
         Thread {
             val store = SubscriptionStore(this)
-            val key = store.currentKey() ?: MainActivity.DEFAULT_KEY
+            // 无当前站点：直接退出，不回退任何内置内容
+            val key = store.currentKey() ?: ""
+            if (key.isBlank()) {
+                runOnUiThread { Toast.makeText(this, "未配置站点，请先在站点管理中导入订阅源", Toast.LENGTH_LONG).show() }
+                return@Thread
+            }
             val site = store.sites().firstOrNull { it.key == key }
             val detail = if (site?.isCsp() == true) {
                 CspLoader.detail(this, site, vodId)

@@ -169,6 +169,7 @@ object CspLoader {
         // 对齐原版 JsLoader.proxyInvoke：params 带 siteKey 时按该站取，否则用"最近站点"（currentKey）
         val key = params["siteKey"]?.takeIf { it.isNotBlank() }
             ?: SubscriptionStore(ctx).currentKey()
+            ?: ""
         if (key.isBlank()) {
             Log.e(TAG, "[csp.proxy] do=js 无站点 key，跳过")
             return null
@@ -192,7 +193,8 @@ object CspLoader {
             val headers = HashMap<String, String>()
             o.optJSONObject("headers")?.let { h -> h.keys().forEach { k -> headers[k] = h.optString(k) } }
             Log.e(TAG, "[csp.proxy] do=js key=$key code=$code type=$type len=${bytes.size}")
-            arrayOf(code, type, ByteArrayInputStream(bytes), headers)
+            // 显式 <Any?>：Array 为不变型，避免 arrayOf 元素类型推断歧义
+            arrayOf<Any?>(code, type, ByteArrayInputStream(bytes), headers)
         } catch (t: Throwable) {
             Log.e(TAG, "[csp.proxy] do=js 解析失败", t)
             null

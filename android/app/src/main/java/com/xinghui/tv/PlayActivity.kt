@@ -71,7 +71,7 @@ class PlayActivity : Activity() {
         flag = intent.getStringExtra("flag") ?: ""
         epUrl = intent.getStringExtra("ep_url") ?: ""
         directUrl = intent.getStringExtra("direct_url") ?: ""
-        siteKey = SubscriptionStore(this).currentKey() ?: MainActivity.DEFAULT_KEY
+        siteKey = SubscriptionStore(this).currentKey() ?: ""
 
         playerView = findViewById<PlayerView>(R.id.playView)
         player = ExoPlayer.Builder(this).build().also { playerView?.player = it }
