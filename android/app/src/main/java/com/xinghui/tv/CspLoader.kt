@@ -336,7 +336,9 @@ object CspLoader {
         val r2 = str(invoke(s, "homeVideoContent"))
         if (r2.isBlank()) {
             return if (r1.isBlank())
-                JSONObject().put("code", -1).put("msg", "homeContent/homeVideoContent 均返回空（该站点可能不提供首页接口）").toString()
+                JSONObject().put("code", -1)
+                    .put("msg", "首页接口返回空" + okhttp3.internal.Bridge.diag() + " r1=" + (if (r1.isBlank()) "空" else r1.take(80)))
+                    .toString()
             else r1
         }
         return try {

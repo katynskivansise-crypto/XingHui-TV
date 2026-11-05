@@ -31,12 +31,30 @@ public final class Bridge {
     public static String globalUa = "";
     public static String globalProxy = "";
 
+    /**
+     * 诊断：最后一次 HTTP 请求的轨迹与失败原因。
+     * 电视上没有 adb / logcat，只能把这条信息拼进首页提示显示到屏幕上。
+     */
+    public static volatile String lastTrace = "";
+    public static volatile String lastFail = "";
+
     private Bridge() {
+    }
+
+    public static String diag() {
+        String t = lastTrace == null ? "" : lastTrace;
+        String f = lastFail == null ? "" : lastFail;
+        if (t.length() > 140) t = t.substring(0, 140) + "…";
+        if (f.length() > 140) f = f.substring(0, 140) + "…";
+        if (t.isEmpty() && f.isEmpty()) return " [http: 未发出任何请求]";
+        return " [http: " + (t.isEmpty() ? "-" : t) + (f.isEmpty() ? "" : " | fail: " + f) + "]";
     }
 
     public static Response execute(Request request, OkHttpClient client) throws IOException {
         String url = request.url().toString();
         if (url == null || url.isEmpty()) throw new IOException("empty url");
+        lastTrace = request.method() + " " + url;
+        lastFail = "";
 
         JSONObject p = new JSONObject();
         try {
@@ -76,18 +94,26 @@ public final class Bridge {
         } catch (Throwable t) {
             // so 没加载 / JNI 异常都在这里兜住，统一按网络错误处理，
             // 不能让 ExceptionInInitializerError 把 spider 整条链路打崩
+            lastFail = "engine: " + t;
             throw new IOException("engine error: " + t);
         }
-        if (out == null || out.isEmpty()) throw new IOException("engine empty response");
+        if (out == null || out.isEmpty()) {
+            lastFail = "engine empty response";
+            throw new IOException("engine empty response");
+        }
 
         JSONObject r;
         try {
             r = new JSONObject(out);
         } catch (JSONException e) {
+            lastFail = "bad response: " + out;
             throw new IOException("bad engine response: " + out);
         }
         int code = r.optInt("code", 0);
-        if (code == 0) throw new IOException("http failed: " + r.optString("error", "network error"));
+        if (code == 0) {
+            lastFail = "code0 " + r.optString("error", "");
+            throw new IOException("http failed: " + r.optString("error", "network error"));
+        }
 
         String b64 = r.optString("body", "");
         byte[] data = b64.isEmpty() ? new byte[0] : Base64.decode(b64, Base64.DEFAULT);
@@ -103,6 +129,7 @@ public final class Bridge {
         }
         String ct = hb.get("Content-Type");
         MediaType mt = ct == null ? null : MediaType.get(ct);
+        lastTrace = request.method() + " " + url + " → " + code + " len=" + data.length;
 
         return new Response.Builder()
                 .code(code)
