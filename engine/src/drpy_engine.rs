@@ -191,7 +191,7 @@ globalThis.setTimeout = function(fn, ms) { try { if (typeof fn === "function") f
 
     /// 调用引擎导出的方法，参数为 JSON 字面量（在 ctx 里 eval 成 JS 值）。
     /// 注意：对象字面量必须用 `({...})` 包裹，避免 `{}` 被解析为空语句块。
-    fn call(&self, name: &str, json_args: Vec<String>) -> Result<String, String> {
+    pub(crate) fn call(&self, name: &str, json_args: Vec<String>) -> Result<String, String> {
         self.ctx.with(|ctx| -> Result<String, String> {
             let globals = ctx.globals();
             let engine: Value = globals.get("__drpy").map_err(|e| format!("__drpy: {e}"))?;

@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn parse_proxy_array_text_body() {
-        let r = parse_proxy_array(r#"[200,"application/vnd.apple.mpegurl","#EXTM3U\n#EXT-X-VERSION:3"]"#).unwrap();
+        let r = parse_proxy_array(r##"[200,"application/vnd.apple.mpegurl","#EXTM3U\n#EXT-X-VERSION:3"]"##).unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "application/vnd.apple.mpegurl");
         assert_eq!(r.body, b"#EXTM3U\n#EXT-X-VERSION:3".to_vec());
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn parse_proxy_array_with_headers_and_base64() {
-        let r = parse_proxy_array(r#"[200,"image/png","aGVsbG8=",{"Referer":"https://a.com"},1]"#).unwrap();
+        let r = parse_proxy_array(r##"[200,"image/png","aGVsbG8=",{"Referer":"https://a.com"},1]"##).unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.body, b"hello".to_vec());
         assert_eq!(r.headers.get("Referer").map(|s| s.as_str()), Some("https://a.com"));
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn parse_proxy_array_not_found() {
-        let r = parse_proxy_array(r#"[404,"text/plain","Not Found"]"#).unwrap();
+        let r = parse_proxy_array(r##"[404,"text/plain","Not Found"]"##).unwrap();
         assert_eq!(r.status, 404);
         assert_eq!(r.content_type, "text/plain");
     }
