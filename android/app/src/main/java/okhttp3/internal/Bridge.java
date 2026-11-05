@@ -4,6 +4,7 @@ import android.util.Base64;
 
 import com.xinghui.tv.Engine;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
@@ -38,32 +39,36 @@ public final class Bridge {
         if (url == null || url.isEmpty()) throw new IOException("empty url");
 
         JSONObject p = new JSONObject();
-        p.put("url", url);
-        p.put("method", request.method());
+        try {
+            p.put("url", url);
+            p.put("method", request.method());
 
-        JSONObject headers = new JSONObject();
-        for (String name : request.headers().names()) {
-            String v = request.headers().get(name);
-            if (v != null) headers.put(name, v);
-        }
-        p.put("headers", headers);
-
-        // 一律走 base64：表单是 ASCII 无所谓，但 multipart/文件上传里是二进制，
-        // 用 text() 解码再编码会直接损坏内容。
-        RequestBody body = request.body();
-        if (body != null) {
-            byte[] raw = body.bytes();
-            if (raw != null && raw.length > 0) {
-                p.put("body_b64", Base64.encodeToString(raw, Base64.NO_WRAP));
+            JSONObject headers = new JSONObject();
+            for (String name : request.headers().names()) {
+                String v = request.headers().get(name);
+                if (v != null) headers.put(name, v);
             }
-        }
+            p.put("headers", headers);
 
-        p.put("timeout", client.readTimeoutMillis());
-        // 对齐 okhttp：noRedirect 的 client 必须真的不跟随 302，
-        // 部分站点靠拿 Location 拼真实地址。
-        p.put("follow_redirects", client.followRedirects());
-        if (!globalUa.isEmpty()) p.put("ua", globalUa);
-        if (!globalProxy.isEmpty()) p.put("proxy", globalProxy);
+            // 一律走 base64：表单是 ASCII 无所谓，但 multipart/文件上传里是二进制，
+            // 用 text() 解码再编码会直接损坏内容。
+            RequestBody body = request.body();
+            if (body != null) {
+                byte[] raw = body.bytes();
+                if (raw != null && raw.length > 0) {
+                    p.put("body_b64", Base64.encodeToString(raw, Base64.NO_WRAP));
+                }
+            }
+
+            p.put("timeout", client.readTimeoutMillis());
+            // 对齐 okhttp：noRedirect 的 client 必须真的不跟随 302，
+            // 部分站点靠拿 Location 拼真实地址。
+            p.put("follow_redirects", client.followRedirects());
+            if (!globalUa.isEmpty()) p.put("ua", globalUa);
+            if (!globalProxy.isEmpty()) p.put("proxy", globalProxy);
+        } catch (JSONException e) {
+            throw new IOException("build params failed: " + e);
+        }
 
         String out;
         try {
@@ -75,7 +80,12 @@ public final class Bridge {
         }
         if (out == null || out.isEmpty()) throw new IOException("engine empty response");
 
-        JSONObject r = new JSONObject(out);
+        JSONObject r;
+        try {
+            r = new JSONObject(out);
+        } catch (JSONException e) {
+            throw new IOException("bad engine response: " + out);
+        }
         int code = r.optInt("code", 0);
         if (code == 0) throw new IOException("http failed: " + r.optString("error", "network error"));
 
