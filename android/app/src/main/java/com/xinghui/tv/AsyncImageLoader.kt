@@ -49,6 +49,9 @@ object AsyncImageLoader {
         view.setImageDrawable(placeHolder)
         view.tag = url
         if (url.isBlank()) return
+        // 海报地址可能是 file:// / proxy:// / assets://，统一重写成本地 HTTP 地址再下载；
+        // 原版 UrlUtil.convert 也是在这个位置做的（图片走 OkHttp 而非 file loader）
+        val realUrl = UrlConvert.convert(url).ifBlank { url }
 
         cache.get(url)?.let { bmp ->
             view.setImageBitmap(bmp)
@@ -64,7 +67,8 @@ object AsyncImageLoader {
         pool.execute {
             try {
                 // 1) 先查磁盘
-                val bytes = readDisk(ctx, url) ?: fetch(ctx, url)?.also { writeDisk(ctx, url, it) }
+                // 磁盘/内存缓存 key 用原始 url（同一张图不因 scheme 差异重复缓存），下载用重写后的地址
+                val bytes = readDisk(ctx, url) ?: fetch(ctx, realUrl)?.also { writeDisk(ctx, url, it) }
                 if (bytes == null || bytes.isEmpty()) return@execute
                 val bmp = decodeSampled(bytes, reqW, reqH) ?: return@execute
                 cache.put(url, bmp)

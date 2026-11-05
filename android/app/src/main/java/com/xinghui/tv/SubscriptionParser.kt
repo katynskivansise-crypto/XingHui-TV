@@ -13,15 +13,21 @@ object SubscriptionParser {
     /**
      * @param defaultJar 订阅顶层 spider 解析出的 jar 完整 URL（csp_ 站点自动带上，对齐原项目）
      */
-    fun parse(text: String, defaultJar: String = ""): List<Site> {
+    fun parse(text: String, defaultJar: String = "", subscribeUrl: String = ""): List<Site> {
         val sites = mutableListOf<Site>()
-        val trimmed = text.trim()
+        // 对齐原项目 Decoder.fix(url, data)：订阅 JSON 里的 "./xxx"、"../xxx" 一律按订阅
+        // 所在目录补成绝对地址（原版是在 Json.parse 之前对整段文本做替换）。
+        // 这一步覆盖的不只是 spider/jar，还包括站点 ext、lives、parses 里的相对地址。
+        val trimmed = absolutize(text.trim(), subscribeUrl)
         if (trimmed.isEmpty()) return sites
 
         // 1) / 2) 整体 JSON
         try {
             val obj = JSONObject(trimmed)
-            val arr = obj.optJSONArray("sites")
+            // 对齐原版 VodConfig.initSite：订阅允许 {"video":{"sites":[...]}} 的嵌套写法
+            // （原版 if (object.has("video")) { initSite(object.getAsJsonObject("video")); return; }）
+            val holder = obj.optJSONObject("video")?.takeIf { it.has("sites") } ?: obj
+            val arr = holder.optJSONArray("sites")
             if (arr != null) {
                 for (i in 0 until arr.length()) {
                     val s = arr.getJSONObject(i)
@@ -66,11 +72,27 @@ object SubscriptionParser {
      * 解析订阅 JSON 顶层的 spider 字段（csp_ 源需要）。
      * 返回形如 ./jar/spider.jar;md5;c6c7 的原文；无则返回空串。
      */
+    /**
+     * 把 JSON 字符串值里以 "./" / "../" 开头的地址补成绝对地址。
+     * 只匹配 "key": "./xxx" 这种"值以相对路径开头"的位置，比原版的全局 replace 更保守，
+     * 不会误伤普通文本里的 "./"。先处理 "../" 再处理 "./"，否则 "../" 会被拆坏。
+     */
+    private fun absolutize(text: String, subscribeUrl: String): String {
+        if (text.isEmpty() || !subscribeUrl.contains("://")) return text
+        val dir = subscribeUrl.substringBeforeLast('/', missingDelimiterValue = subscribeUrl) + "/"
+        val parent = dir.trimEnd('/').substringBeforeLast('/', dir) + "/"
+        return text
+            .replace(Regex("(:\\s*\")\\.\\./")) { m -> m.groupValues[1] + parent }
+            .replace(Regex("(:\\s*\")\\./")) { m -> m.groupValues[1] + dir }
+    }
+
     fun parseJar(text: String): String {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return ""
         return try {
-            JSONObject(trimmed).optString("spider", "")
+            val obj = JSONObject(trimmed)
+            // 顶层优先，其次 video 内（原版递归 initSite 时取的就是所在层级 object 的 spider）
+            obj.optString("spider", "").ifBlank { obj.optJSONObject("video")?.optString("spider", "").orEmpty() }
         } catch (_: Exception) {
             ""
         }

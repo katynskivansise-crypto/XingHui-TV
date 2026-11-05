@@ -177,6 +177,45 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 }
             }
         }
+        // 通用 HTTP —— 供安卓侧自研 okhttp3 兼容层的 Call.execute() 转发。
+        // params: {url, method, headers:{}, body, ua, proxy, timeout}
+        // 返回: {code, headers:{}, body:"<base64>"}；失败时 code=0 且带 error。
+        "http" => {
+            let p = json::safe_object(&json::parse(params));
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if url.is_empty() {
+                serde_json::json!({"code": 0, "error": "empty url"}).to_string()
+            } else {
+                let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let timeout = p.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
+                let opts = serde_json::json!({
+                    "method": p.get("method").and_then(|v| v.as_str()).unwrap_or("GET"),
+                    "headers": p.get("headers").cloned().unwrap_or(serde_json::json!({})),
+                    "body": p.get("body").and_then(|v| v.as_str()).unwrap_or(""),
+                    "body_b64": p.get("body_b64").and_then(|v| v.as_str()).unwrap_or(""),
+                })
+                .to_string();
+                let mut net = Net::new();
+                if !ua.is_empty() {
+                    net.set_ua(&ua);
+                }
+                if !proxy.is_empty() {
+                    net.set_proxy(&proxy);
+                }
+                net.set_timeout_millis(timeout);
+                if let Some(f) = p.get("follow_redirects").and_then(|v| v.as_bool()) {
+                    net.set_follow_redirects(f);
+                }
+                let (bytes, hdrs, code) = net.http_execute(&url, &opts);
+                serde_json::json!({
+                    "code": code,
+                    "headers": hdrs,
+                    "body": if bytes.is_empty() { String::new() } else { base64_encode(&bytes) },
+                })
+                .to_string()
+            }
+        }
         // EPG 节目单：抓取 XMLTV 并按频道名返回节目单（对齐原项目直播 EPG）。
         // params: {url: XMLTV 地址, name: 频道名}；返回 {list:[{start,end,time,title}], channel}
         "epg" => {

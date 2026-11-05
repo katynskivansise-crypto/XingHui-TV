@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- spider.jar 内 com.github.catvod.bean.Doh 读取；用于 DoH 域名解析（非必要功能，缺了会崩） -->
+    <string-array name="doh_url">
+        <item>https://doh.pub/dns-query</item>
+        <item>https://dns.alidns.com/dns-query</item>
+        <item>https://1.12.12.12/dns-query</item>
+    </string-array>
+    <string-array name="doh_name">
+        <item>腾讯DNSPod</item>
+        <item>阿里DNS</item>
+        <item>DNSPod备用</item>
+    </string-array>
+</resources>

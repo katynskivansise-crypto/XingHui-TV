@@ -78,11 +78,20 @@ data class Vod(
             val eps = urls.getOrNull(i)
                 ?.split("#")
                 ?.filter { it.isNotBlank() }
-                ?.map { ep ->
+                ?.mapIndexed { j, ep ->
+                    // 对齐原版 Flag.setUrls：
+                    //   "名称$地址" → 名称；名称为空 → 用集序号
+                    //   没有 $ 的单集  → 名称用集序号，整段当地址（原版是 Episode.create(number, urls[i])）
                     val idx = ep.indexOf('$')
-                    if (idx >= 0) ep.substring(0, idx) to ep.substring(idx + 1) else ep to ep
+                    if (idx >= 0) {
+                        val nm = ep.substring(0, idx).trim()
+                        (nm.ifBlank { "第${j + 1}集" }) to ep.substring(idx + 1)
+                    } else {
+                        "第${j + 1}集" to ep
+                    }
                 } ?: emptyList()
-            PlayLine(fromName, eps)
+            // 线路名为空时给个可读名字
+            PlayLine(fromName.ifBlank { "线路${i + 1}" }, eps)
         }
     }
 }

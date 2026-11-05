@@ -84,6 +84,10 @@ object CspLoader {
 
     private fun loadJar(context: Context, jar: String): DexClassLoader? {
         if (jar.isBlank()) return null
+        // 原版 App.onCreate 里有 Init.set(base)。spider.jar 内的 Path.cache()/Prefers 都靠它拿 Context，
+        // 不设置的话 AppDrama 一碰文件或配置就 NoClassDefFoundError/NPE。
+        runCatching { com.github.catvod.Init.set(context) }
+            .onFailure { Log.e(TAG, "[csp.prepare] Init.set 失败", it) }
         val key = md5Of(jar) // 原版 parseJar(Util.md5(jar), jar)
         loaders[key]?.let { return it }
         synchronized(lock) {
@@ -93,15 +97,23 @@ object CspLoader {
             // 原版 Path.jar(url)：本地文件按 jar 地址区分，避免多 jar 互相覆盖
             val file = File(context.filesDir, "spider_" + md5Of(url) + ".jar")
             val fileOk = file.exists() && file.length() > 1024
-            // 注意：这里**不再**用订阅里的 md5 做"必须匹配才复用"的判定。
-            // 实测 qist/tvbox 的 spider.jar 内容会更新而 jsm.json 里的 md5 不跟着改
-            // （现场校验：实际 356ad46e… ≠ 订阅 c6c7cbd1…），若按原版严格 md5 校验，
-            // 每次启动都会重下 1.9MB，电视上极易超时 → jar 永远拿不到 → csp 永远未就绪。
-            if (!fileOk && file.exists()) {
-                Log.e(TAG, "[csp.prepare] 缓存文件不完整 len=${file.length()}，删除重下")
+            // 严格校验：订阅提供了 md5 就必须匹配（对齐原版 JarLoader.parseJar 的 Util.equals）。
+            // 实际教训：曾把判定放宽成"文件 >1KB 就复用"，结果一个早期下载失败留下的残缺
+            // jar 被永久缓存，DexClassLoader 每次都抛
+            //   ClassNotFoundException: com.github.catvod.spider.AppDrama
+            // 而同一个 URL 在电脑上完整下载 4.97MB 的 classes.dex（dex 版本 035、4014 个类、
+            // AppDrama 确实定义）是完全可加载的 —— 所以问题从来不在 dex，而在这个文件。
+            val md5Ok = expectMd5.isEmpty() || (fileOk && md5OfFile(file) == expectMd5)
+            val cacheOk = fileOk && md5Ok
+            if (!cacheOk && file.exists()) {
+                Log.e(
+                    TAG,
+                    "[csp.prepare] 旧缓存不可用，删除重下：len=${file.length()} " +
+                        "期望md5=$expectMd5 实际=${runCatching { md5OfFile(file) }.getOrDefault("?")}"
+                )
                 file.delete()
             }
-            if (!fileOk) {
+            if (!cacheOk) {
                 var downloaded = false
                 for (attempt in 0..1) {
                     val ok = runCatching {
@@ -123,11 +135,18 @@ object CspLoader {
                     return null
                 }
                 Log.e(TAG, "[csp.prepare] jar 下载完成 len=${file.length()}")
-            } else if (expectMd5.isNotEmpty()) {
-                val real = md5OfFile(file)
-                if (real != expectMd5) {
-                    Log.e(TAG, "[csp.prepare] 缓存 md5 与订阅不符（订阅侧可能过期），直接复用：期望=$expectMd5 实际=$real")
+                // 下载返回 true 也可能被连接中断截断（HTTP 200 + 提前 EOF），必须再校验一次
+                if (expectMd5.isNotEmpty()) {
+                    val real = md5OfFile(file)
+                    if (real != expectMd5) {
+                        lastJarError = "jar 下载不完整（md5 不符）"
+                        Log.e(TAG, "[csp.prepare] 下载后 md5 校验失败 期望=$expectMd5 实际=$real，删除重试")
+                        file.delete()
+                        return null
+                    }
                 }
+            } else {
+                Log.e(TAG, "[csp.prepare] 缓存命中且校验通过 len=${file.length()}")
             }
             val dl = DexClassLoader(
                 file.absolutePath,
@@ -332,10 +351,19 @@ object CspLoader {
     }
 
     /** 分类页 */
-    fun category(context: Context, site: Site, tid: String, pg: String): String {
+    /**
+     * 分类列表。extend 来自官网首页 Result.filters 的选中值（原版 FilterDialog 的结果），
+     * 形如 {"year":"2024","area":"大陆"}，原样交给 spider.categoryContent 的第 4 个参数。
+     */
+    fun category(
+        context: Context,
+        site: Site,
+        tid: String,
+        pg: String,
+        extend: Map<String, String> = emptyMap()
+    ): String {
         val s = spider(context, site) ?: return ""
-        val extend = HashMap<String, String>()
-        return str(invoke(s, "categoryContent", tid, pg, false, extend))
+        return str(invoke(s, "categoryContent", tid, pg, false, HashMap(extend)))
     }
 
     /** 详情页（ids 为 vod_id） */

@@ -59,7 +59,7 @@ class SitesActivity : Activity() {
                     // csp_ 源需要 spider.jar：先解析订阅顶层 spider 字段，再解析站点（站点自带 jar，对齐原项目）
                     val jarRaw = SubscriptionParser.parseJar(text)
                     val jarFull = SubscriptionParser.jarUrl(jarRaw, url)
-                    val sites = SubscriptionParser.parse(text, jarFull)
+                    val sites = SubscriptionParser.parse(text, jarFull, url)
                     if (sites.isEmpty()) {
                         Toast.makeText(this, "未解析到站点（需 JSON 订阅格式）", Toast.LENGTH_LONG).show()
                         return@runOnUiThread

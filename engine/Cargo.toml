@@ -15,7 +15,7 @@ serde_json = "1"
 
 # 网络层（对应原 catvod net/OkHttp.java，基于 okhttp）。
 # 选 ureq 而非 reqwest：同步 API、依赖轻、编译快，对 4G 内存的云机更稳。
-ureq = { version = "2", features = ["tls"] }
+ureq = { version = "2", features = ["tls", "gzip"] }
 
 # JNI 桥（对应原 Java 侧调用 Rust 的接口层）。
 # 通过 feature "jni" 启用，默认关闭 —— 保证主机无 Android NDK 也能编译。

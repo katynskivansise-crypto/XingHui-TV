@@ -85,7 +85,11 @@ class LiveActivity : Activity() {
                 val arr = JSONObject(json).optJSONArray("class") ?: JSONObject(json).optJSONArray("list")
                 (0 until arr!!.length()).mapNotNull { i ->
                     val o = arr.optJSONObject(i)
-                    o?.let { it.optString("type_id") to it.optString("type_name") }
+                    o?.let { c -> 
+                        val gid = c.optString("type_id").ifBlank { c.optString("id") }
+                        val gname = c.optString("type_name").ifBlank { c.optString("name") }
+                        gid to gname
+                    }
                 }
             }.getOrNull() ?: emptyList()
             runOnUiThread {

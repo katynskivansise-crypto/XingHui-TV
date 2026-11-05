@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.recyclerview.widget.GridLayoutManager
@@ -452,16 +453,103 @@ class MainActivity : Activity() {
     }
 
     private fun onCategory(tid: String) {
+        // 切分类先刷新该分类的筛选栏，再把用户已选条件带进请求（原版 FilterDialog → extend）
+        renderFilters(tid)
+        val extend = HashMap(selectedFilters[tid].orEmpty())
+        Log.e("XingHuiTV", "[category] tid=$tid extend=$extend")
         Thread {
             val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
             val cat = if (site?.isCsp() == true) {
-                CspLoader.category(this, site, tid, "1")
+                CspLoader.category(this, site, tid, "1", extend)
             } else {
                 val params = JSONObject().put("tid", tid).put("pg", "1").toString()
                 Engine.execute("category", siteKey, params)
             }
             runOnUiThread { parseCategory(cat) }
         }.start()
+    }
+
+    // ---------- 分类筛选（对齐原版 Result.filters / FilterDialog） ----------
+
+    private data class FilterGroup(
+        val key: String,
+        val name: String,
+        val values: List<Pair<String, String>>   // (显示名, 传给站点的值)
+    )
+
+    private val filtersByType = mutableMapOf<String, List<FilterGroup>>()
+    private val selectedFilters = mutableMapOf<String, MutableMap<String, String>>()
+
+    private fun px(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 解析 homeContent 的 filters 字段；没有就清空（不同站点结构差异很大，全部 runCatching 兜住） */
+    private fun parseFilters(root: JSONObject) {
+        filtersByType.clear()
+        selectedFilters.clear()
+        val fo = runCatching { root.optJSONObject("filters") }.getOrNull() ?: return
+        for (tid in fo.keys()) {
+            val arr = fo.optJSONArray(tid) ?: continue
+            val groups = (0 until arr.length()).mapNotNull { i ->
+                val f = arr.optJSONObject(i) ?: return@mapNotNull null
+                val key = f.optString("key")
+                if (key.isBlank()) return@mapNotNull null
+                val vals = f.optJSONArray("value")?.let { va ->
+                    (0 until va.length()).mapNotNull { j ->
+                        va.optJSONObject(j)?.let { v -> v.optString("n") to v.optString("v") }
+                    }
+                } ?: emptyList()
+                FilterGroup(key, f.optString("name").ifBlank { key }, vals)
+            }
+            if (groups.isNotEmpty()) filtersByType[tid] = groups
+        }
+        Log.e("XingHuiTV", "[filters] 解析到 ${filtersByType.size} 个分类的筛选项")
+    }
+
+    /** 二级页顶部筛选栏：每个筛选组一个按钮，显示当前选中值 */
+    private fun renderFilters(tid: String) {
+        val row = findViewById<View>(R.id.filterRow) ?: return
+        val list = findViewById<LinearLayout>(R.id.filterList) ?: return
+        val groups = filtersByType[tid]
+        if (groups.isNullOrEmpty()) {
+            row.visibility = View.GONE
+            return
+        }
+        row.visibility = View.VISIBLE
+        list.removeAllViews()
+        val sel = selectedFilters.getOrPut(tid) { mutableMapOf() }
+        groups.forEach { g ->
+            val cur = sel[g.key].orEmpty()
+            val label = g.values.firstOrNull { it.second == cur }?.first ?: g.name
+            val btn = TextView(this).apply {
+                text = label
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 15f
+                setPadding(px(14), px(6), px(14), px(6))
+                background = getDrawable(R.drawable.selector_tv_btn)
+                isFocusable = true
+                setOnClickListener { showFilterDialog(tid, g) }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = px(10) }
+            }
+            list.addView(btn)
+        }
+    }
+
+    /** 点筛选组 → 弹出取值列表（TV 遥控器可直接上下选）；选中后重新请求该分类 */
+    private fun showFilterDialog(tid: String, g: FilterGroup) {
+        if (g.values.isEmpty()) return
+        val labels = g.values.map { it.first.ifBlank { it.second }.ifBlank { "默认" } }
+        AlertDialog.Builder(this)
+            .setTitle(g.name)
+            .setItems(labels.toTypedArray()) { _, which ->
+                selectedFilters.getOrPut(tid) { mutableMapOf() }[g.key] = g.values[which].second
+                renderFilters(tid)
+                onCategory(tid)
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun parseHome(json: String) {
@@ -486,12 +574,17 @@ class MainActivity : Activity() {
             root.optJSONArray("class")?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val c = arr.optJSONObject(i) ?: continue
-                    val id = c.optString("type_id").ifBlank { c.optString("typeId") }
-                    val name = c.optString("type_name").ifBlank { c.optString("typeName") }
+                    // 对齐原版 Class.java 的 @SerializedName(value="type_id", alternate="id")
+                    // —— 兼容的是 id / name，不是驼峰 typeId/typeName
+                    val id = c.optString("type_id").ifBlank { c.optString("id") }
+                    val name = c.optString("type_name").ifBlank { c.optString("name") }
                     if (id.isNotBlank()) categories.add(id to name)
                 }
             }
         }.onFailure { Log.e("XingHuiTV", "[parseHome] class 字段解析失败 json前200: ${json.take(200)}", it) }
+
+        // 分类筛选（对齐原版 Result.filters：{type_id: [{key,name,value:[{n,v}]}]}）
+        parseFilters(root)
 
         runCatching { recommends.addAll(Vod.parseList(json)) }
             .onFailure { Log.e("XingHuiTV", "[parseHome] list 字段解析失败 json前200: ${json.take(200)}", it) }

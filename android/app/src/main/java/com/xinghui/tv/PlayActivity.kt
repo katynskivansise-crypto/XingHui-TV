@@ -2,6 +2,7 @@ package com.xinghui.tv
 
 import android.app.Activity
 import android.os.Bundle
+import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.widget.TextView
@@ -15,6 +16,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.xinghui.tv.dialog.EpisodeDialog
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -157,7 +159,50 @@ class PlayActivity : Activity() {
                 Engine.execute("player", siteKey, params)
             }
             val obj = JSONObject(play)
-            url = obj.optString("url", "")
+            // 对齐原版 Result.parse：0=直链直接播；1=需二次解析，playUrl 是解析前缀
+            // （TVBox 生态里 playUrl 形如 "https://jx.xxx/?url="，拼上 url 才是可播地址）
+            val parseFlag = obj.optInt("parse", 0)
+            // 对齐原版 gson/UrlAdapter：playerContent 的 url 有 3 种形态
+            //   1) 字符串      "http://x.m3u8"
+            //   2) 扁平数组    ["1080P","http://a","720P","http://b"]   （每两个一组，n/v 交替）
+            //   3) 对象        {"values":[{"n":"1080P","v":"http://a"}],"position":0}
+            // 之前只认第 1 种，第 2/3 种会被 optString 变成 JSON 文本直接送进播放器，必然播不出来。
+            val urlField = obj.opt("url")
+            val urlPairs = mutableListOf<Pair<String, String>>()
+            when (urlField) {
+                is String -> url = urlField
+                is JSONArray -> {
+                    var i = 0
+                    while (i + 1 < urlField.length()) {
+                        val n = urlField.optString(i, "").ifBlank { "清晰度${urlPairs.size + 1}" }
+                        urlPairs.add(n to urlField.optString(i + 1, ""))
+                        i += 2
+                    }
+                    url = urlPairs.firstOrNull()?.second.orEmpty()
+                }
+                is JSONObject -> {
+                    val vals = urlField.optJSONArray("values")
+                    val pos = urlField.optInt("position", 0)
+                    if (vals != null) for (i in 0 until vals.length()) {
+                        val o = vals.optJSONObject(i) ?: continue
+                        urlPairs.add(o.optString("n").ifBlank { "清晰度${i + 1}" } to o.optString("v"))
+                    }
+                    url = urlPairs.getOrNull(pos)?.second ?: urlPairs.firstOrNull()?.second.orEmpty()
+                }
+                else -> url = ""
+            }
+            if (parseFlag == 1 && !looksLikeMedia(url)) {
+                val pu = obj.optString("playUrl", "")
+                if (pu.isNotBlank()) {
+                    Log.e("XingHuiTV", "[play] parse=1 → playUrl 前缀拼接 ${pu.take(60)}")
+                    url = pu + url
+                    // 多清晰度也要一起拼前缀，否则切换清晰度会拿到未解析的地址
+                    for (i in urlPairs.indices) urlPairs[i] = urlPairs[i].first to (pu + urlPairs[i].second)
+                } else {
+                    Log.e("XingHuiTV", "[play] parse=1 但无 playUrl，按直链尝试 ${url.take(80)}")
+                }
+            }
+            if (urlPairs.size > 1) qualities.addAll(urlPairs)
             if (site?.isCsp() == true) headers = CspLoader.playerHeaders(play)
             // 多清晰度（引擎已把 TVBox `#` 分隔拆成 urls）
             val urls = obj.optJSONArray("urls")
@@ -166,7 +211,7 @@ class PlayActivity : Activity() {
                     val u = urls.optJSONObject(i) ?: continue
                     qualities.add(u.optString("name", "清晰度${i + 1}") to u.optString("v", ""))
                 }
-            } else if (url.isNotBlank()) {
+            } else if (url.isNotBlank() && qualities.isEmpty()) {
                 qualities.add("自动" to url)
             }
             flag = fl
@@ -177,10 +222,18 @@ class PlayActivity : Activity() {
             return
         }
         runOnUiThread {
-            playUrl(url, headers)
+            // spider 可能返回 proxy://xxx 这类本地 scheme，进播放器前统一重写成 http://127.0.0.1:9978/...
+            playUrl(UrlConvert.convert(url), headers)
             updateQualityBtn()
             recordHistory()
         }
+    }
+
+    /** 判断地址是否已经是可直接播放的媒体直链 */
+    private fun looksLikeMedia(u: String): Boolean {
+        val lower = u.lowercase()
+        return lower.contains(".m3u8") || lower.contains(".mp4") || lower.contains(".flv") ||
+            lower.contains(".mkv") || lower.contains(".ts") || lower.contains(".mp3")
     }
 
     /** 播放/解析失败 → 先切下一条线路，再自动换站点；都失败才停止（对齐原项目 startFlow→checkFlag→checkSearch） */

@@ -29,6 +29,8 @@ pub struct Net {
     pub insecure: bool,
     /// 超时，默认 30s
     pub timeout: Duration,
+    /// 是否跟随重定向（对齐 okhttp followRedirects，默认 true）
+    pub follow_redirects: bool,
 }
 
 impl Net {
@@ -40,6 +42,7 @@ impl Net {
             proxy_url: Arc::new(None),
             insecure: true, // 对齐原实现：默认绕过证书校验以兼容大量直播源
             timeout: TIMEOUT,
+            follow_redirects: true,
         }
     }
 
@@ -140,6 +143,30 @@ impl Net {
         (latin1, hjson, code)
     }
 
+    /// 设置是否跟随重定向（ureq 默认跟随；noRedirect 场景要关掉）
+    pub fn set_follow_redirects(&mut self, follow: bool) {
+        self.follow_redirects = follow;
+    }
+
+    /// 设置超时（毫秒）。供 JNI 的 http 动作按 okhttp 的 readTimeout/writeTimeout 传参。
+    pub fn set_timeout_millis(&mut self, millis: u64) {
+        if millis > 0 {
+            self.timeout = Duration::from_millis(millis.min(120_000));
+        }
+    }
+
+    /// 通用 HTTP 执行 —— 供安卓侧自研 `okhttp3` 兼容层转发（替代官方 okhttp 依赖）。
+    /// 与 `request_latin1_full` 同底层，但返回**原始字节**，由调用方决定编码。
+    /// 返回 (body, 响应头, 状态码)；网络异常时返回 (空, {}, 0)。
+    pub fn http_execute(&self, url: &str, options_json: &str) -> (Vec<u8>, HashMap<String, String>, u16) {
+        let (method, body, extra) = Self::parse_options(options_json);
+        let mut merged = (*self.headers).clone();
+        for (k, v) in extra {
+            merged.insert(k, v);
+        }
+        self.fetch_full(&method, url, Some(&merged), body.as_deref())
+    }
+
     /// 解析 options JSON：method / body / headers（两个请求入口共用）
     fn parse_options(options_json: &str) -> (String, Option<Vec<u8>>, HashMap<String, String>) {
         let mut method = "GET".to_string();
@@ -151,7 +178,17 @@ impl Net {
                 method = m.trim().to_uppercase();
             }
         }
-        if let Some(b) = v.get("body").and_then(|x| x.as_str()) {
+        // 优先用 base64（二进制安全，表单/文件上传都走这条）；
+        // 没有时退回纯文本 body（drpy 规则的老路径）。
+        if let Some(b) = v.get("body_b64").and_then(|x| x.as_str()) {
+            if !b.is_empty() {
+                if let Some(d) = Self::base64_decode(b) {
+                    if !d.is_empty() {
+                        body = Some(d);
+                    }
+                }
+            }
+        } else if let Some(b) = v.get("body").and_then(|x| x.as_str()) {
             if !b.is_empty() {
                 body = Some(b.as_bytes().to_vec());
             }
@@ -166,6 +203,32 @@ impl Net {
         (method, body, extra)
     }
 
+    /// 标准 base64 解码（忽略空白与换行），供 body_b64 使用。
+    fn base64_decode(input: &str) -> Option<Vec<u8>> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut buf: u32 = 0;
+        let mut bits: u32 = 0;
+        for c in input.chars() {
+            let v = match c {
+                'A'..='Z' => (c as u8).wrapping_sub(b'A') as u32,
+                'a'..='z' => (c as u8).wrapping_sub(b'a') as u32 + 26,
+                '0'..='9' => (c as u8).wrapping_sub(b'0') as u32 + 52,
+                '+' => 62,
+                '/' => 63,
+                '=' => break,
+                _ => continue,
+            };
+            buf = (buf << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push(((buf >> bits) & 0xFF) as u8);
+                buf &= if bits == 0 { 0 } else { (1u32 << bits) - 1 };
+            }
+        }
+        Some(out)
+    }
+
     fn fetch(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>, body: Option<&[u8]>) -> Vec<u8> {
         self.fetch_full(method, url, headers, body).0
     }
@@ -175,12 +238,17 @@ impl Net {
     fn fetch_full(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>, body: Option<&[u8]>) -> (Vec<u8>, HashMap<String, String>, u16) {
         let mut builder = ureq::AgentBuilder::new()
             .timeout(self.timeout)
-            .timeout_connect(self.timeout);
+            .timeout_connect(self.timeout)
+            .redirects(if self.follow_redirects { 10 } else { 0 });
 
         if self.proxy {
-            if let Some(p) = self.proxy_url.as_ref() {
-                if let Ok(proxy) = ureq::Proxy::new(p.clone()) {
-                    builder = builder.proxy(proxy);
+            // 本机代理回环（127.0.0.1:9978）绝不能走外部代理，否则自己打自己出不去
+            let is_local = url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]");
+            if !is_local {
+                if let Some(p) = self.proxy_url.as_ref() {
+                    if let Ok(proxy) = ureq::Proxy::new(p.clone()) {
+                        builder = builder.proxy(proxy);
+                    }
                 }
             }
         }
