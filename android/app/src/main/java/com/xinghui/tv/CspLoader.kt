@@ -41,6 +41,14 @@ object CspLoader {
     @Volatile
     private var lastJarError: String = ""
 
+    /**
+     * 最近一次反射调用（homeContent 等）抛出的真实异常。
+     * 反射抛的是 InvocationTargetException，真正的 NoSuchMethodError 在 cause 里；
+     * 且 Error 不属于 Exception，原来的 catch(Exception) 根本抓不住。
+     */
+    @Volatile
+    private var lastInvokeError: String = ""
+
     /** 最近一次访问的站点所用 jar 的 md5，/proxy 分发按它取 Proxy 方法 */
     @Volatile
     private var recentJarKey: String = ""
@@ -154,11 +162,73 @@ object CspLoader {
                 null,
                 context.classLoader
             )
+            // ★关键补丁：spider.Init.init 是防二次打包校验器（包名/App名/签名DN黑名单），
+            // 内部还会调 startFloatBall（需悬浮窗权限）并起 4 个后台线程。任一步抛异常，
+            // 整个 init 就被 catch 截断，context 没能存进静态单例 → Init.context() 返回 null →
+            // AppDrama.d 构造设备指纹时 getContentResolver() NPE → 整个 init 中断 →
+            // 第二个请求（/api/v5/find/app/zone）永远发不出去 → homeContent 返回空。
+            // 反汇编确认 context 写在实例字段 c（Init.init 里两处 iput-object Init.c）。
+            // 在 init 前后各强制写一次：先写保证 init 内部崩了也已就绪，后写防止被 init 覆盖。
+            // 原版传的是 App.get()（Application），不是 Activity。
+            // jar 内 Init.init 有 startFloatBall 分支：context 是 Activity 时会尝试弹悬浮球，
+            // 没有 SYSTEM_ALERT_WINDOW 权限就抛 BadTokenException，被外层 catch 截断，context 写不进去。
+            // 传 Application 可避开该分支（AppDrama.d 只用到 getContentResolver，Application 足够）。
+            val actx = context.applicationContext ?: context
+            val initClz = runCatching { dl.loadClass("com.github.catvod.spider.Init") }.getOrNull()
+            fun forceInitContext(tag: String) {
+                val clz = initClz ?: return
+                runCatching {
+                    // Init.get() 只做 sget-object（静态字段 a）然后 return；
+                    // 若 <clinit> 没执行成功，a 为 null，则 Init.context() 会在 null 实例上
+                    // iget-object 直接 NPE（而不是返回 null）。这里先补建单例并写回静态字段 a。
+                    var inst = clz.getDeclaredMethod("get").apply { isAccessible = true }.invoke(null)
+                    if (inst == null) {
+                        inst = clz.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
+                        runCatching {
+                            clz.getDeclaredField("a").apply { isAccessible = true }.set(null, inst)
+                            Log.e(TAG, "[csp.prepare] $tag Init 单例为 null，已补建并写回静态字段 a")
+                        }.onFailure { e ->
+                            Log.e(TAG, "[csp.prepare] $tag 补填 Init 静态单例 a 失败", e)
+                        }
+                    }
+                    if (inst == null) return@runCatching
+                    // 反汇编确认 context 写在实例字段 c；静态字段 a 是单例本身，不能当实例字段写
+                    fun put(name: String): Boolean {
+                        val f = runCatching { clz.getDeclaredField(name) }.getOrNull() ?: return false
+                        if (java.lang.reflect.Modifier.isStatic(f.modifiers)) return false
+                        f.isAccessible = true
+                        if (runCatching { f.set(inst, actx) }.isSuccess) return true
+                        return runCatching { f.set(inst, java.lang.ref.WeakReference<Context>(actx)) }.isSuccess
+                    }
+                    var ok = if (put("c")) 1 else 0
+                    var back = runCatching { clz.getMethod("context").invoke(null) as? Context }.getOrNull()
+                    if (back == null) {
+                        // 兜底：c 写不进（字段名被混淆改掉）时，遍历所有非静态字段逐个尝试
+                        clz.declaredFields.forEach { f ->
+                            if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) {
+                                f.isAccessible = true
+                                val done = runCatching { f.set(inst, actx) }.isSuccess ||
+                                    runCatching { f.set(inst, java.lang.ref.WeakReference<Context>(actx)) }.isSuccess
+                                if (done) ok++
+                            }
+                        }
+                        back = runCatching { clz.getMethod("context").invoke(null) as? Context }.getOrNull()
+                    }
+                    Log.e(TAG, "[csp.prepare] $tag 强制设 Init.context 字段数=$ok 回读=${back != null}")
+                    if (back == null) lastJarError = "Init.context 仍为 null（已写 $ok 个字段）"
+                }.onFailure { e ->
+                    Log.e(TAG, "[csp.prepare] $tag 强制设 Init.context 失败", e)
+                }
+            }
+            forceInitContext("预设")
             // 原版 invokeInit：com.github.catvod.spider.Init.init(Context)
             runCatching {
-                val initClz = dl.loadClass("com.github.catvod.spider.Init")
-                initClz.getMethod("init", Context::class.java).invoke(initClz, context)
-            }.onFailure { e -> Log.e(TAG, "[csp.prepare] Init.init 失败", e) }
+                initClz?.getMethod("init", Context::class.java)?.invoke(initClz, actx)
+            }.onFailure { e ->
+                val real = if (e is java.lang.reflect.InvocationTargetException) (e.targetException ?: e) else e
+                Log.e(TAG, "[csp.prepare] Init.init 失败", real)
+            }
+            forceInitContext("后补")
             // 原版 putProxy：Proxy.proxy(Map) 按 jar 存 Method
             runCatching {
                 val proxyClz = dl.loadClass("com.github.catvod.spider.Proxy")
@@ -278,9 +348,15 @@ object CspLoader {
             // 原版 getSpider：newInstance → spider.init(Context, String ext)
             runCatching {
                 clz.getMethod("init", Context::class.java, String::class.java)
-                    .invoke(inst, context, site.ext)
+                    .invoke(inst, context.applicationContext ?: context, site.ext)
             }.onFailure { e ->
-                Log.e(TAG, "[csp.spider] init 失败 ${site.key} ext=${site.ext.take(100)}", e)
+                val real: Throwable =
+                    if (e is java.lang.reflect.InvocationTargetException) (e.targetException ?: e.cause ?: e) else e
+                // init 失败时 spider 内部状态不完整，后续所有接口都会返回空，
+                // 这里必须留下痕迹，否则会被误判成"站点不提供首页接口"
+                lastJarError = "init 失败：${real.javaClass.simpleName}: ${real.message}"
+                lastInvokeError = "init → ${real.javaClass.simpleName}: ${real.message}"
+                Log.e(TAG, "[csp.spider] init 失败 ${site.key} ext=${site.ext.take(100)}", real)
             }
             spiders[spKey] = inst
             inst
@@ -308,8 +384,13 @@ object CspLoader {
                 }
             }.toTypedArray()
             obj.javaClass.getMethod(name, *types).invoke(obj, *args)
-        } catch (e: Exception) {
-            Log.e(TAG, "[csp.invoke] $name 失败", e)
+        } catch (e: Throwable) {
+            // 反射抛出的是 InvocationTargetException，真实异常（NoSuchMethodError 等）在 cause 里；
+            // 且 NoSuchMethodError 是 Error，原来的 catch(Exception) 抓不住，会一路逃逸掉
+            val real: Throwable =
+                if (e is java.lang.reflect.InvocationTargetException) (e.targetException ?: e.cause ?: e) else e
+            lastInvokeError = "$name → ${real.javaClass.simpleName}: ${real.message}"
+            Log.e(TAG, "[csp.invoke] $name 失败", real)
             null
         }
     }
@@ -337,7 +418,11 @@ object CspLoader {
         if (r2.isBlank()) {
             return if (r1.isBlank())
                 JSONObject().put("code", -1)
-                    .put("msg", "首页接口返回空" + okhttp3.internal.Bridge.diag() + " r1=" + (if (r1.isBlank()) "空" else r1.take(80)))
+                    .put("msg", (if (lastJarError.isNotBlank()) "init=" + lastJarError.take(50) + " | " else "")
+                        + "invoke=" + lastInvokeError.ifBlank { "无异常" }
+                        + okhttp3.internal.Bridge.diag()
+                        + " | r1=" + (if (r1.isBlank()) "空" else r1.take(50))
+                        + " | r2=" + (if (r2.isBlank()) "空" else r2.take(30)))
                     .toString()
             else r1
         }
