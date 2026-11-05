@@ -69,10 +69,14 @@ pub trait Spider {
 /// 这里用结构化表示，便于 JNI 转换。
 #[derive(Debug, Clone)]
 pub struct ProxyResp {
-    /// 原 Object[0]，如 "application/vnd.apple.mpegurl"
+    /// 原 Object[0]：HTTP 状态码（如 200 / 404）
+    pub status: u16,
+    /// 原 Object[1]：Content-Type，如 "application/vnd.apple.mpegurl"
     pub content_type: String,
-    /// 原 Object[1..]，字节数据
+    /// 原 Object[2]：字节数据
     pub body: Vec<u8>,
+    /// 原 Object[3]：响应头（可为空）
+    pub headers: HashMap<String, String>,
 }
 
 /// 爬虫注册表：按 key（如站点名/配置 key）调度到具体 Spider。

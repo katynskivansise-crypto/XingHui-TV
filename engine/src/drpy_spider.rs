@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use crate::drpy_engine::{DrpyEngine, ReqImpl};
 use crate::net::Net;
-use crate::proxy::image_proxy;
 use crate::spider::{ProxyResp, Spider};
 
 /// 将 drpy 规则接入 Spider 契约的适配器。
@@ -59,8 +58,9 @@ impl DrpySpider {
     fn ensure(&self) -> Result<Ref<'_, DrpyEngine>, String> {
         if self.cell.borrow().is_none() {
             let net = Arc::new(self.net.clone());
-            // Latin-1 字节串传输：保留原始字节，JS 侧按规则"编码"字段解码（支持 gb2312/gbk）
-            let req: ReqImpl = Arc::new(move |url: &str| net.string_latin1(url));
+            // 完整请求透传：url + options（method/headers/body），Latin-1 字节串传输，
+            // JS 侧按规则"编码"字段解码（支持 gb2312/gbk），对齐原 quickjs `req(url, options)`
+            let req: ReqImpl = Arc::new(move |url: &str, opts: &str| net.request_latin1_full(url, opts));
             let engine = DrpyEngine::new(&self.dir, &self.rule, &self.engine_script, req)?;
             *self.cell.borrow_mut() = Some(engine);
         }
@@ -108,7 +108,16 @@ impl Spider for DrpySpider {
     }
 
     fn proxy_local(&self, params: &HashMap<String, String>) -> Option<ProxyResp> {
-        image_proxy(&self.net, params)
+        // 对齐原 JsLoader.proxyInvoke → Spider.proxy1：调用 drpy 规则的 `proxy(params)`，
+        // 返回 [status, contentType, body, headers?, base64Flag?]
+        // 规则未 init 时不重建引擎：proxy 依赖 rule.proxy_rule，空 rule 只会退化成 404
+        if self.cell.borrow().is_none() {
+            return None;
+        }
+        let engine = self.ensure().ok()?;
+        let args = serde_json::to_string(params).ok()?;
+        let out = engine.call("proxy", vec![args]).ok()?;
+        super::proxy::parse_proxy_array(&out)
     }
 
     fn destroy(&self) {

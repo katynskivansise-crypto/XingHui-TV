@@ -15,7 +15,7 @@ fn main() {
     let engine = fs::read_to_string(format!("{dir}/drpy2.min.js")).expect("读 drpy2.min.js");
 
     let net = Arc::new(Net::new());
-    let req: ReqImpl = Arc::new(move |url: &str| net.string(url));
+    let req: ReqImpl = Arc::new(move |url: &str, _opts: &str| { let body = net.string(url); (body, "{}".to_string(), 200u16) });
     let e = DrpyEngine::new(dir, &rule, &engine, req).expect("创建 DrpyEngine");
 
     let home = e.home().expect("调用 home");

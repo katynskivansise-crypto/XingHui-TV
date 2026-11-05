@@ -54,7 +54,89 @@ pub fn image_proxy(net: &Net, params: &HashMap<String, String>) -> Option<ProxyR
     if body.is_empty() {
         return None;
     }
-    Some(ProxyResp { content_type: detect_content_type(&body), body })
+    Some(ProxyResp { status: 200, content_type: detect_content_type(&body), body, headers: HashMap::new() })
+}
+
+/// 解析 drpy `proxy(params)` 返回的数组（对齐原 `Spider.proxy1`）：
+/// `[status, contentType, body, headers?, base64Flag?]`
+/// - body 为 JSON 数组 → 每个元素是一个字节（原 getStream 的 JSONArray 分支）
+/// - body 为字符串 → base64Flag==1 时按 base64 解码（先去 "base64," 前缀），否则取 UTF-8 字节
+pub fn parse_proxy_array(json: &str) -> Option<ProxyResp> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let arr = v.as_array()?;
+    let status = arr.first().and_then(|x| x.as_i64()).unwrap_or(200) as u16;
+    let content_type = arr.get(1).and_then(|x| x.as_str()).unwrap_or("text/plain").to_string();
+    let body = match arr.get(2)? {
+        serde_json::Value::Array(a) => a.iter().map(|x| x.as_i64().unwrap_or(0) as u8).collect(),
+        serde_json::Value::String(text) => {
+            let use_base64 = arr.get(4).and_then(|x| x.as_i64()).unwrap_or(0) == 1;
+            if use_base64 {
+                let payload = text.rsplit("base64,").next().unwrap_or(text);
+                base64_decode(payload).unwrap_or_else(|| text.as_bytes().to_vec())
+            } else {
+                text.as_bytes().to_vec()
+            }
+        }
+        serde_json::Value::Null => Vec::new(),
+        _ => return None,
+    };
+    let headers = arr
+        .get(3)
+        .and_then(|x| x.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+    Some(ProxyResp { status, content_type, body, headers })
+}
+
+/// 纯 Rust base64 解码（proxy 规则 base64Flag=1 时使用）。
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4];
+    let mut n = 0usize;
+    for c in s.bytes() {
+        if c == b'=' {
+            break;
+        }
+        if c == b'\n' || c == b'\r' || c == b' ' || c == b'\t' {
+            continue;
+        }
+        match val(c) {
+            Some(v) => {
+                buf[n] = v;
+                n += 1;
+                if n == 4 {
+                    out.push((buf[0] << 2) | (buf[1] >> 4));
+                    out.push((buf[1] << 4) | (buf[2] >> 2));
+                    out.push((buf[2] << 6) | buf[3]);
+                    n = 0;
+                }
+            }
+            None => return None,
+        }
+    }
+    match n {
+        2 => out.push((buf[0] << 2) | (buf[1] >> 4)),
+        3 => {
+            out.push((buf[0] << 2) | (buf[1] >> 4));
+            out.push((buf[1] << 4) | (buf[2] >> 2));
+        }
+        _ => {}
+    }
+    Some(out)
 }
 
 /// 按 magic bytes 判断图片 MIME（缺省 octet-stream）。
@@ -91,6 +173,29 @@ mod tests {
         assert_eq!(detect_content_type(b"GIF89a...."), "image/gif");
         assert_eq!(detect_content_type(b"RIFF1234WEBPVP8 "), "image/webp");
         assert_eq!(detect_content_type(b"plain"), "application/octet-stream");
+    }
+
+    #[test]
+    fn parse_proxy_array_text_body() {
+        let r = parse_proxy_array(r#"[200,"application/vnd.apple.mpegurl","#EXTM3U\n#EXT-X-VERSION:3"]"#).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.content_type, "application/vnd.apple.mpegurl");
+        assert_eq!(r.body, b"#EXTM3U\n#EXT-X-VERSION:3".to_vec());
+    }
+
+    #[test]
+    fn parse_proxy_array_with_headers_and_base64() {
+        let r = parse_proxy_array(r#"[200,"image/png","aGVsbG8=",{"Referer":"https://a.com"},1]"#).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, b"hello".to_vec());
+        assert_eq!(r.headers.get("Referer").map(|s| s.as_str()), Some("https://a.com"));
+    }
+
+    #[test]
+    fn parse_proxy_array_not_found() {
+        let r = parse_proxy_array(r#"[404,"text/plain","Not Found"]"#).unwrap();
+        assert_eq!(r.status, 404);
+        assert_eq!(r.content_type, "text/plain");
     }
 
     #[test]

@@ -30,7 +30,7 @@ impl Resolver for DirResolver {
 }
 
 /// 请求实现：输入 URL 返回 body 字符串（生产走 Rust net，测试可注入 mock）。
-pub type ReqImpl = Arc<dyn Fn(&str) -> String + Send + Sync>;
+pub type ReqImpl = Arc<dyn Fn(&str, &str) -> (String, String, u16) + Send + Sync>;
 
 /// drpy 格式规则的执行器。
 pub struct DrpyEngine {
@@ -80,8 +80,22 @@ impl DrpyEngine {
         }
 
         // 原生 `_net(url, obj)` → body 按 Latin-1 映射的字节串（原始字节，供 JS 侧按编码解码）
-        let net_fn = Function::new(ctx.clone(), move |url: String| req(&url)).map_err(|e| format!("_net: {e}"))?;
+        let req_net = req.clone();
+        let net_fn = Function::new(ctx.clone(), move |url: String, opts: String| req_net(&url, &opts).0)
+            .map_err(|e| format!("_net: {e}"))?;
         let _ = ctx.globals().set("_net", net_fn);
+
+        // 原生 `_netFull(url, obj)` → JSON {"content": Latin-1 body, "headers": {真实响应头}}
+        // 对齐原 quickjs `Connect.success` 的 {code, headers, content}，drpy 规则 obj.withHeaders 时读 headers
+        let req_full = req.clone();
+        let net_full_fn = Function::new(ctx.clone(), move |url: String, opts: String| -> String {
+            let (body, headers_json, code) = req_full(&url, &opts);
+            let hdrs: serde_json::Value = serde_json::from_str(&headers_json)
+                .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+            serde_json::json!({ "content": body, "headers": hdrs, "code": code }).to_string()
+        })
+        .map_err(|e| format!("_netFull: {e}"))?;
+        let _ = ctx.globals().set("_netFull", net_full_fn);
 
         // 原生字符集解码：drpy2 规则"编码: gb2312/gbk/utf-8"支持（对齐原 TextDecoder 语义）。
         // 输入为 Latin-1 字节串 + 编码 label → 输出解码文本。
@@ -123,9 +137,52 @@ globalThis.stringify = JSON.stringify;
 globalThis.buildUrl = function(base, query) { var q = []; for (var k in query) q.push(k + "=" + encodeURIComponent(query[k])); return base + "?" + q.join("&"); };
 globalThis.joinUrl = function(parent, child) { if (!child) return parent; if (child.indexOf("http") >= 0) return child; return parent.replace(/\/+$/, "") + "/" + child.replace(/^\/+/, ""); };
 globalThis.__decode = function(s) { try { var r = globalThis.rule; var enc = (r && r["编码"]) || "utf-8"; return _decodeNative(s, enc); } catch(e) { return _decodeNative(s, "utf-8"); } };
-globalThis.req = function(url, obj) { return { content: __decode(_net(url, obj)), headers: {} }; };
-globalThis.http = function(url, obj) { return __decode(_net(url, obj)); };
-globalThis.fetch = function(url, obj) { return __decode(_net(url, obj)); };
+// 对齐原 quickjs：req/http 返回 {code, content, headers}（headers 为真实响应头），fetch 只取正文
+globalThis.req = function(url, obj) {
+  try {
+    var r = JSON.parse(_netFull(url, JSON.stringify(obj || {})));
+    return { code: (typeof r.code === "number" ? r.code : 200), content: __decode(r.content || ""), headers: r.headers || {} };
+  } catch (e) {
+    return { code: -1, content: "", headers: {} };
+  }
+};
+globalThis.http = function(url, obj) {
+  try {
+    var r = JSON.parse(_netFull(url, JSON.stringify(obj || {})));
+    return { code: (typeof r.code === "number" ? r.code : 200), content: __decode(r.content || ""), headers: r.headers || {} };
+  } catch (e) {
+    return { code: -1, content: "", headers: {} };
+  }
+};
+globalThis.fetch = function(url, obj) { return __decode(_net(url, JSON.stringify(obj || {}))); };
+// 本地存储对象（对齐原版 com.fongmi.quickjs.method.Local）：
+// drpy2 的 getItem/setItem/clearItem 内部调用 local.get/set/delete(rule,key)，缺了必抛错
+globalThis.__LOCAL = {};
+globalThis.local = {
+  _k: function(rule, key) { return "cache_" + (rule || "") + "_" + key; },
+  get: function(rule, key) { var v = globalThis.__LOCAL[this._k(rule, key)]; return v === undefined ? "" : v; },
+  set: function(rule, key, value) { globalThis.__LOCAL[this._k(rule, key)] = String(value); },
+  "delete": function(rule, key) { delete globalThis.__LOCAL[this._k(rule, key)]; }
+};
+// 列表解析宿主：drpy2 只在 typeof pdfl === "function" 时调用（取元素后按 name/url 规则再解析）
+globalThis.pdfl = function(html, p1, list_text, list_url, urlKey) {
+  try {
+    var items = globalThis.pdfa(html, p1) || [];
+    var out = [];
+    for (var i = 0; i < items.length; i++) {
+      var el = items[i];
+      var name = "", url = "";
+      try { name = list_text ? globalThis.pdfh(el, list_text) : ""; } catch (e) { name = ""; }
+      try { url = list_url ? globalThis.pdfh(el, list_url) : ""; } catch (e) { url = ""; }
+      out.push({ name: name, url: url });
+    }
+    return out;
+  } catch (e) { return []; }
+};
+// 规则常见的 await sleep(ms)：给立即 resolve 版本（quickjs 无事件循环，不做真实延时）
+globalThis.sleep = function(ms) { return Promise.resolve(); };
+// setTimeout：立即执行回调，避免规则挂起
+globalThis.setTimeout = function(fn, ms) { try { if (typeof fn === "function") fn(); } catch (e) {} return 0; };
 "#;
         let _: Value = ctx.eval(js).map_err(|e| format!("eval host js: {e}"))?;
 

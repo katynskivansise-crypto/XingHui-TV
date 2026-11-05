@@ -143,7 +143,7 @@ fn real_drpy_engine() -> Result<DrpyEngine, String> {
     let rule = std::fs::read_to_string(format!("{dir}/drpy.js")).map_err(|e| e.to_string())?;
     let engine = std::fs::read_to_string(format!("{dir}/drpy2.min.js")).map_err(|e| e.to_string())?;
     let net = Arc::new(tv_engine::net::Net::new());
-    let req: ReqImpl = Arc::new(move |url: &str| net.string(url));
+    let req: ReqImpl = Arc::new(move |url: &str, _opts: &str| { let body = net.string(url); (body, "{}".to_string(), 200u16) });
     DrpyEngine::new(dir, &rule, &engine, req)
 }
 

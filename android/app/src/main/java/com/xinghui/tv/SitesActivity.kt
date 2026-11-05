@@ -56,16 +56,18 @@ class SitesActivity : Activity() {
                         Toast.makeText(this, "下载失败，请检查地址或网络", Toast.LENGTH_LONG).show()
                         return@runOnUiThread
                     }
-                    val sites = SubscriptionParser.parse(text)
+                    // csp_ 源需要 spider.jar：先解析订阅顶层 spider 字段，再解析站点（站点自带 jar，对齐原项目）
+                    val jarRaw = SubscriptionParser.parseJar(text)
+                    val jarFull = SubscriptionParser.jarUrl(jarRaw, url)
+                    val sites = SubscriptionParser.parse(text, jarFull)
                     if (sites.isEmpty()) {
                         Toast.makeText(this, "未解析到站点（需 JSON 订阅格式）", Toast.LENGTH_LONG).show()
                         return@runOnUiThread
                     }
                     store.addAll(sites)
-                    // csp_ 源需要 spider.jar：解析订阅顶层 spider 字段并保存完整下载 URL
-                    val jarRaw = SubscriptionParser.parseJar(text)
-                    if (jarRaw.isNotBlank()) {
-                        store.setJar(SubscriptionParser.jarUrl(jarRaw, url))
+                    if (jarFull.isNotBlank()) {
+                        store.setJar(jarFull)
+                        store.attachJar(jarFull)
                     }
                     // 保存订阅 URL：drpy2.js 规则源（./js/*.js / ./lib/*.js）相对路径要基于它解析
                     store.setSubscribeUrl(url)

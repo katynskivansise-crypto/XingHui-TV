@@ -76,6 +76,18 @@ class SubscriptionStore(context: Context) {
         prefs.edit().putString(KEY_SUB_URL, url).apply()
     }
 
+    /**
+     * 把 jar 写进所有 csp_ 站点（对齐原项目 site.setJar）：
+     * 旧数据缺 jar 时回填一次，之后每个站点自带 jar，切站不依赖全局字段。
+     */
+    fun attachJar(jar: String) {
+        if (jar.isBlank()) return
+        val all = sites()
+        if (all.isEmpty()) return
+        val updated = all.map { if (it.isCsp() && it.jar.isBlank()) it.copy(jar = jar) else it }
+        if (updated != all) save(updated)
+    }
+
     companion object {
         private const val PREFS = "xinghui_subscriptions"
         private const val KEY_SITES = "sites"

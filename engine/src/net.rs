@@ -80,7 +80,7 @@ impl Net {
 
     /// GET 请求并返回字符串 body（原 `OkHttp.string(url)`）。失败返回空串。
     pub fn string(&self, url: &str) -> String {
-        String::from_utf8_lossy(&self.fetch("GET", url, None)).into_owned()
+        String::from_utf8_lossy(&self.fetch("GET", url, None, None)).into_owned()
     }
 
     /// GET + 自定义 header（原 `OkHttp.string(url, headers)`）。
@@ -89,12 +89,12 @@ impl Net {
         for (k, v) in headers {
             merged.insert(k.clone(), v.clone());
         }
-        String::from_utf8_lossy(&self.fetch("GET", url, Some(&merged))).into_owned()
+        String::from_utf8_lossy(&self.fetch("GET", url, Some(&merged), None)).into_owned()
     }
 
     /// GET 返回字节 body（图片/资源代理用）。
     pub fn bytes(&self, url: &str) -> Vec<u8> {
-        self.fetch("GET", url, None)
+        self.fetch("GET", url, None, None)
     }
 
     /// GET 返回原始字节按 Latin-1 映射成 String（每个字节 → U+00xx 字符）。
@@ -110,10 +110,69 @@ impl Net {
         for (k, v) in headers {
             merged.insert(k.clone(), v.clone());
         }
-        self.fetch("GET", url, Some(&merged))
+        self.fetch("GET", url, Some(&merged), None)
     }
 
-    fn fetch(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>) -> Vec<u8> {
+    /// 完整请求（对齐原 quickjs `req(url, options)`）：支持 method / headers / body。
+    /// options 为 JSON 字符串：{"method":"POST","headers":{...},"body":"..."}。
+    /// 返回 Latin-1 字节串（JS 侧按规则"编码"字段解码）。
+    pub fn request_latin1(&self, url: &str, options_json: &str) -> String {
+        let (method, body, extra) = Self::parse_options(options_json);
+        let mut merged = (*self.headers).clone();
+        for (k, v) in extra {
+            merged.insert(k, v);
+        }
+        let bytes = self.fetch(&method, url, Some(&merged), body.as_deref());
+        bytes.iter().map(|&b| b as char).collect()
+    }
+
+    /// 完整请求 + 真实响应头 + 真实状态码（对齐原 `Connect.success` 的 `{code, headers, content}`）。
+    /// 返回 (Latin-1 body, headers JSON 字符串, HTTP 状态码)，供 JS 侧组装 res.code / res.headers。
+    pub fn request_latin1_full(&self, url: &str, options_json: &str) -> (String, String, u16) {
+        let (method, body, extra) = Self::parse_options(options_json);
+        let mut merged = (*self.headers).clone();
+        for (k, v) in extra {
+            merged.insert(k, v);
+        }
+        let (bytes, hdrs, code) = self.fetch_full(&method, url, Some(&merged), body.as_deref());
+        let latin1: String = bytes.iter().map(|&b| b as char).collect();
+        let hjson = serde_json::to_string(&hdrs).unwrap_or_else(|_| "{}".to_string());
+        (latin1, hjson, code)
+    }
+
+    /// 解析 options JSON：method / body / headers（两个请求入口共用）
+    fn parse_options(options_json: &str) -> (String, Option<Vec<u8>>, HashMap<String, String>) {
+        let mut method = "GET".to_string();
+        let mut body: Option<Vec<u8>> = None;
+        let mut extra: HashMap<String, String> = HashMap::new();
+        let v = crate::json::parse(options_json);
+        if let Some(m) = v.get("method").and_then(|x| x.as_str()) {
+            if !m.trim().is_empty() {
+                method = m.trim().to_uppercase();
+            }
+        }
+        if let Some(b) = v.get("body").and_then(|x| x.as_str()) {
+            if !b.is_empty() {
+                body = Some(b.as_bytes().to_vec());
+            }
+        }
+        if let Some(h) = v.get("headers").and_then(|x| x.as_object()) {
+            for (k, val) in h {
+                if let Some(s) = val.as_str() {
+                    extra.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        (method, body, extra)
+    }
+
+    fn fetch(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>, body: Option<&[u8]>) -> Vec<u8> {
+        self.fetch_full(method, url, headers, body).0
+    }
+
+    /// 与 fetch 相同，但额外返回真实响应头与状态码
+    /// （drpy 规则 `obj.withHeaders` 读 res.headers，`res.code` 读状态码，对齐原 Connect.success）
+    fn fetch_full(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>, body: Option<&[u8]>) -> (Vec<u8>, HashMap<String, String>, u16) {
         let mut builder = ureq::AgentBuilder::new()
             .timeout(self.timeout)
             .timeout_connect(self.timeout);
@@ -141,20 +200,36 @@ impl Net {
             }
         }
 
-        let read_all = |resp: ureq::Response| -> Vec<u8> {
+        let read_all = |resp: ureq::Response| -> (Vec<u8>, HashMap<String, String>, u16) {
+            let code = resp.status();
+            let mut out: HashMap<String, String> = HashMap::new();
+            for name in resp.headers_names() {
+                if let Some(v) = resp.header(&name) {
+                    out.insert(name, v.to_string());
+                }
+            }
             let mut buf = Vec::new();
             let _ = resp.into_reader().read_to_end(&mut buf);
-            buf
+            (buf, out, code)
         };
 
-        match req.call() {
+        // 有 body 走 send_bytes（POST 等），否则走 call（GET）
+        let result = match body {
+            Some(b) => req.send_bytes(b),
+            None => req.call(),
+        };
+
+        match result {
             Ok(resp) => read_all(resp),
-            // 对齐原 OkHttp：非 2xx（如 403/404）也返回 body，而非视为失败
-            Err(ureq::Error::Status(_code, resp)) => read_all(resp),
+            // 对齐原 OkHttp：非 2xx（如 403/404）也返回 body + 真实状态码，而非视为失败
+            Err(ureq::Error::Status(code, resp)) => {
+                let (buf, hdrs, _) = read_all(resp);
+                (buf, hdrs, code)
+            }
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[net] request failed for {url}: {_e}");
-                Vec::new()
+                (Vec::new(), HashMap::new(), 0)
             }
         }
     }

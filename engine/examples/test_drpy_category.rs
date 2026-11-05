@@ -21,7 +21,7 @@ fn main() {
       {"id":"b2","type":"tv","title":"狂飙","pic":{"normal":"http://p2/kuangbiao.jpg"},"rating":{"value":9.0},"honor_infos":[]}
     ]}"#;
     let mock = mock.to_string();
-    let req: ReqImpl = Arc::new(move |_url: &str| mock.clone());
+    let req: ReqImpl = Arc::new(move |_url: &str, _opts: &str| (mock.clone(), "{}".to_string(), 200u16));
 
     let e = DrpyEngine::new(DIR, &rule, &engine, req).expect("创建 DrpyEngine");
 

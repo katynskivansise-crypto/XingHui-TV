@@ -1,6 +1,7 @@
 package com.xinghui.tv
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -26,7 +27,8 @@ import java.util.Locale
 class MainActivity : Activity() {
 
     companion object {
-        const val DEFAULT_KEY = "demo"
+        /** 兜底订阅地址：旧数据缺 jar/subscribeUrl 时用它自动补齐 */
+        const val DEFAULT_SUB_URL = "https://raw.githubusercontent.com/qist/tvbox/master/jsm.json"
     }
 
     private lateinit var catList: RecyclerView
@@ -34,7 +36,7 @@ class MainActivity : Activity() {
     private lateinit var vodAdapter: VideoAdapter
 
     /** 当前引擎站点 key */
-    private var siteKey: String = DEFAULT_KEY
+    private var siteKey: String = ""
     private var lastSiteKey: String? = null
 
     private val categories = mutableListOf<Pair<String, String>>() // (type_id, type_name)
@@ -43,11 +45,14 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 本地播放代理（csp/js 站 /proxy 播放链路）；启动失败不影响主流程
+        runCatching { ProxyServer.startServer() }
+            .onFailure { Log.e("XingHuiTV", "[proxy.server] startServer 异常", it) }
         setContentView(R.layout.activity_main)
 
-        // 左侧分类
+        // 分类 tab（横向，对齐原版二级页）
         catList = findViewById<RecyclerView>(R.id.catList).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
+            layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
             adapter = ListAdapter(categories) { tid -> onCategory(tid) }
         }
 
@@ -74,6 +79,18 @@ class MainActivity : Activity() {
                     Toast.makeText(this@MainActivity, "无法打开详情：${e.message}", Toast.LENGTH_LONG).show()
                 }
             }, { _ -> /* 推荐横排无删除模式 */ })
+        }
+
+        // 左上角站点名：点击弹出站点列表，选中即切换站源并自动刷新（对齐原版）
+        findViewById<TextView>(R.id.title).setOnClickListener {
+            runCatching { showSitePicker() }
+                .onFailure { e -> Toast.makeText(this, "切换站源失败：${e.message}", Toast.LENGTH_LONG).show() }
+        }
+
+        // 点播入口（对齐原版：首页只显示五个入口，点「点播」进二级分类页）
+        findViewById<TextView>(R.id.btnVod).setOnClickListener {
+            runCatching { openCategoryPage() }
+                .onFailure { e -> Toast.makeText(this, "打开点播失败：${e.message}", Toast.LENGTH_LONG).show() }
         }
 
         // 顶部功能按钮（全部 try/catch，失败只提示不崩溃）
@@ -188,29 +205,56 @@ class MainActivity : Activity() {
             val ua = Settings(this).ua
             val proxy = Settings(this).proxy
 
-            // csp_ 源准备：订阅里只要有 csp_ 站点，就先下载并加载 spider.jar
-            if (store.sites().any { it.isCsp() } && store.jar().isNotBlank()) {
-                CspLoader.prepare(this, store.jar())
+            // 兜底：旧版界面导入的订阅缺 jar/subscribeUrl（表现为 csp 站空白、drpy 站注册失败），
+            // 启动时自动用默认订阅补齐，无需用户重导
+            if (store.jar().isBlank() && store.sites().any { it.isCsp() }) {
+                try {
+                    val baseUrl = store.subscribeUrl().ifBlank { DEFAULT_SUB_URL }
+                    val text = JsonFetcher.get(baseUrl)
+                    if (!text.isNullOrBlank()) {
+                        val jarRaw = SubscriptionParser.parseJar(text)
+                        if (jarRaw.isNotBlank()) {
+                            val jarFull = SubscriptionParser.jarUrl(jarRaw, baseUrl)
+                            store.setJar(jarFull)
+                            if (store.subscribeUrl().isBlank()) store.setSubscribeUrl(baseUrl)
+                            store.attachJar(jarFull) // 对齐原项目：jar 写进每个 csp 站点
+                            Log.e("XingHuiTV", "[兜底] 已自动补齐 jar=$jarFull subUrl=${store.subscribeUrl()}")
+                        } else {
+                            Log.e("XingHuiTV", "[兜底] 订阅无 spider 字段，baseUrl=$baseUrl")
+                        }
+                    } else {
+                        Log.e("XingHuiTV", "[兜底] 订阅下载失败 baseUrl=$baseUrl")
+                    }
+                } catch (e: Exception) {
+                    Log.e("XingHuiTV", "[兜底] 自动补齐异常", e)
+                }
             }
 
-            // 1) 当前站点：注册并作为主界面浏览源
-            val registered = mutableListOf<String>()
-            val homeKey: String
-            if (current != null) {
-                if (registerSite(current, current.key, dir, ua, proxy)) {
-                    homeKey = current.key
-                    registered.add(current.key)
-                } else {
-                    // 当前站注册失败 → 回退内置演示源
-                    homeKey = DEFAULT_KEY
-                    registerDemo(dir, ua, proxy)
-                    runOnUiThread {
-                        Toast.makeText(this, "当前站点注册失败，已回退内置演示", Toast.LENGTH_LONG).show()
-                    }
-                }
+            // csp_ 源准备：订阅里只要有 csp_ 站点，就先下载并加载 spider.jar（站点自带 jar 优先）
+            val cspJar = store.jar().ifBlank { store.sites().firstOrNull { it.isCsp() }?.jar ?: "" }
+            if (store.sites().any { it.isCsp() } && cspJar.isNotBlank()) {
+                CspLoader.prepare(this, cspJar)
             } else {
-                homeKey = DEFAULT_KEY
-                registerDemo(dir, ua, proxy)
+                Log.e("XingHuiTV", "[csp] 跳过 prepare：有csp站=${store.sites().any { it.isCsp() }} jar=$cspJar")
+            }
+
+            // 1) 当前站点：注册并作为主界面浏览源（不做任何自建内容回退）
+            val registered = mutableListOf<String>()
+            if (current == null) {
+                Log.e("XingHuiTV", "[home] 无可用站点，停止拉取（不回退内置内容）")
+                runOnUiThread {
+                    showEmpty("还没有可用站点，请导入订阅源")
+                    Toast.makeText(this, "请先在「站点」中导入订阅源", Toast.LENGTH_LONG).show()
+                    findViewById<TextView>(R.id.title).text =
+                        getString(R.string.app_name) + " · 未配置站点"
+                }
+                return@Thread
+            }
+            val homeKey = current.key
+            if (registerSite(current, current.key, dir, ua, proxy)) {
+                registered.add(homeKey)
+            } else {
+                Log.e("XingHuiTV", "[init] 站点注册失败 key=$homeKey，继续直连尝试（csp 站无需注册）")
             }
             siteKey = homeKey
 
@@ -240,16 +284,17 @@ class MainActivity : Activity() {
         if (proxy.isNotBlank()) params.put("proxy", proxy)
         return try {
             when {
-                // drpy2.js 规则源（api=./lib/drpy2.min.js 引擎库、ext=./js/*.js 规则脚本，均为订阅内相对路径）
-                site.api.startsWith("./") && site.ext.startsWith("./") -> {
+                // JS 规则源（对齐原项目 BaseLoader：api 含 .js 即 js 源）。
+                // api 一般是 drpy2.min.js 引擎，ext 是规则脚本；相对路径基于订阅 URL 解析，引擎下载失败回退内置
+                site.isDrpy() -> {
                     val base = SubscriptionStore(this).subscribeUrl()
                     val engineUrl = SubscriptionParser.jarUrl(site.api, base)
                     val ruleUrl = SubscriptionParser.jarUrl(site.ext, base)
                     val ruleText = JsonFetcher.get(ruleUrl)
+                    if (ruleText.isNullOrBlank()) return false
                     val engineText = JsonFetcher.get(engineUrl)
-                    if (ruleText.isNullOrBlank() || engineText.isNullOrBlank()) return false
                     params.put("rule", ruleText)
-                    params.put("engine", engineText)
+                    params.put("engine", if (engineText.isNullOrBlank()) readAsset("drpy2.min.js") else engineText)
                     // 站点级 header（如"新闪雷/茶杯狐"配置了 UA，对齐原项目 getHeaders）
                     try {
                         val h = JSONObject(site.siteJson).optJSONObject("header")
@@ -264,8 +309,8 @@ class MainActivity : Activity() {
                 }
                 site.siteJson.isNotBlank() -> params.put("site_json", site.siteJson)
                 else -> {
-                    params.put("rule", readAsset("drpy.js"))
-                    params.put("engine", readAsset("drpy2.min.js"))
+                    Log.e("XingHuiTV", "[init] key=$key 类型无法识别（api=${site.api}），跳过（不回退内置规则）")
+                    return false
                 }
             }
             val initRes = Engine.execute("init", key, params.toString())
@@ -277,14 +322,116 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 注册内置演示源（无订阅时兜底） */
-    private fun registerDemo(dir: String, ua: String, proxy: String) {
-        val params = JSONObject().put("dir", dir)
-        if (ua.isNotBlank()) params.put("ua", ua)
-        if (proxy.isNotBlank()) params.put("proxy", proxy)
-        params.put("rule", readAsset("drpy.js"))
-        params.put("engine", readAsset("drpy2.min.js"))
-        Engine.execute("init", DEFAULT_KEY, params.toString())
+    /** 左上角站点名点击：弹出站点列表，选中即切换站源并自动刷新（对齐原版） */
+    private fun showSitePicker() {
+        val store = SubscriptionStore(this)
+        val sites = store.sites()
+        if (sites.isEmpty()) {
+            Toast.makeText(this, "没有可用站点，请先到「站点」导入订阅", Toast.LENGTH_LONG).show()
+            return
+        }
+        val cur = store.currentKey()
+        val labels = sites.map { s ->
+            val tag = when {
+                s.isCsp() -> "csp"
+                s.isDrpy() -> "js"
+                else -> "采集"
+            }
+            (if (s.key == cur) "● " else "   ") + s.name + "  [" + tag + "]"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("切换站源")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val s = sites[which]
+                store.setCurrent(s.key)
+                switchToSite(s)
+            }
+            .setNegativeButton("管理站点") { _, _ ->
+                runCatching { startActivity(Intent(this, SitesActivity::class.java)) }
+            }
+            .show()
+    }
+
+    /**
+     * 切换站点（对齐原版 HomeActivity.setSite）：
+     * 原版仅 VodConfig.setHome(item) 持久化当前站 + homeContent() 重新拉首页，
+     * 不重新 init 全部站点。此处同样只注册该站（如未注册）并拉取它的 home。
+     */
+    private fun switchToSite(site: Site) {
+        categories.clear()
+        vods.clear()
+        recommends.clear()
+        (catList.adapter as ListAdapter).notifyDataSetChanged()
+        vodAdapter.notifyDataSetChanged()
+        (findViewById<RecyclerView>(R.id.recommendList).adapter as LibAdapter).notifyDataSetChanged()
+        findViewById<View>(R.id.mainBody)?.visibility = View.GONE
+        findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
+        findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
+        findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + site.name
+        showEmpty("")
+        siteKey = site.key
+        Toast.makeText(this, "已切换到「${site.name}」，正在刷新…", Toast.LENGTH_SHORT).show()
+
+        Thread {
+            try {
+                val dir = filesDir.absolutePath
+                // csp_ 源由 CspLoader 执行（实例已缓存），其余站重新注册该站即可
+                if (!site.isCsp()) {
+                    registerSite(site, site.key, dir, Settings(this).ua, Settings(this).proxy)
+                }
+                val home = if (site.isCsp()) {
+                    CspLoader.home(this, site)
+                } else {
+                    Engine.execute("home", site.key, "{}")
+                }
+                Log.e("XingHuiTV", "[switch] homeKey=${site.key} 返回前800: ${home.take(800)}")
+                runOnUiThread { parseHome(home) }
+            } catch (e: Exception) {
+                Log.e("XingHuiTV", "[switch] 切换站点失败 key=${site.key}", e)
+                runOnUiThread { showEmpty("切换失败：${e.message}") }
+            }
+        }.start()
+    }
+
+    /** 进入点播二级页：横向分类 tab + 影片网格（首页入口隐藏） */
+    private fun openCategoryPage() {
+        findViewById<View>(R.id.entryRow)?.visibility = View.GONE
+        findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
+        findViewById<View>(R.id.quickRow)?.visibility = View.GONE
+        findViewById<View>(R.id.mainBody)?.visibility = View.VISIBLE
+        if (categories.isEmpty()) {
+            showEmpty("站点内容加载中或为空…\n若长时间无内容，请返回首页检查订阅与站点")
+            return
+        }
+        if (vods.isEmpty()) categories.firstOrNull()?.let { onCategory(it.first) }
+        catList.requestFocus()
+    }
+
+    /** 返回一级首页：五个入口 + 更新推荐 */
+    private fun backToHome() {
+        findViewById<View>(R.id.mainBody)?.visibility = View.GONE
+        findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
+        findViewById<View>(R.id.recommendRow)?.visibility =
+            if (recommends.isNotEmpty()) View.VISIBLE else View.GONE
+        loadQuickHistory() // 恢复首页历史行（历史/设置可能已变化）
+        findViewById<TextView>(R.id.btnVod)?.requestFocus()
+    }
+
+    /** 空状态提示（空串则隐藏） */
+    private fun showEmpty(msg: String) {
+        findViewById<TextView>(R.id.tvEmpty)?.apply {
+            text = msg
+            visibility = if (msg.isEmpty()) View.GONE else View.VISIBLE
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE) {
+            backToHome()
+            return
+        }
+        super.onBackPressed()
     }
 
     private fun onCategory(tid: String) {
@@ -320,7 +467,7 @@ class MainActivity : Activity() {
         vodAdapter.notifyDataSetChanged()
         (findViewById<RecyclerView>(R.id.recommendList).adapter as LibAdapter).notifyDataSetChanged()
 
-        val siteName = SubscriptionStore(this).currentSite()?.name ?: "内置默认"
+        val siteName = SubscriptionStore(this).currentSite()?.name ?: "未配置站点"
         findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + siteName
 
         // 推荐横排：有数据才显示
@@ -330,15 +477,19 @@ class MainActivity : Activity() {
             findViewById<TextView>(R.id.recommendLabel).text = "更新推荐 · 共 ${recommends.size} 部"
         }
 
-        // 自动加载第一个分类
-        categories.firstOrNull()?.let { onCategory(it.first) }
+        // 仅当已在点播二级页时才预载首个分类（首页不预载，避免无谓请求）
+        if (findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE) {
+            categories.firstOrNull()?.let { onCategory(it.first) }
+        }
     }
 
     private fun parseCategory(json: String) {
         vods.clear()
-        vods.addAll(Vod.parseList(json))
+        runCatching { vods.addAll(Vod.parseList(json)) }
+            .onFailure { e -> Log.e("XingHuiTV", "[parseCategory] 解析失败 json前300: ${json.take(300)}", e) }
         vodAdapter.notifyDataSetChanged()
         findViewById<TextView>(R.id.labelVod).text = "影片 ${vods.size} 条"
+        showEmpty(if (vods.isEmpty()) "该分类暂无内容（接口返回空）" else "")
     }
 
     private fun readAsset(name: String): String =

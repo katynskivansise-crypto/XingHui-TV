@@ -305,6 +305,17 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                         crate::live_parse::live_source(&url, &tid)
                     }
                 }
+                "proxy" => match spider.proxy_local(&extend) {
+                    Some(r) => {
+                        let mut o = serde_json::Map::new();
+                        o.insert("code".to_string(), serde_json::json!(r.status));
+                        o.insert("type".to_string(), serde_json::json!(r.content_type));
+                        o.insert("b64".to_string(), serde_json::json!(base64_encode(&r.body)));
+                        o.insert("headers".to_string(), serde_json::json!(r.headers));
+                        serde_json::Value::Object(o).to_string()
+                    }
+                    None => String::new(),
+                },
                 _ => String::new(),
             }
         }

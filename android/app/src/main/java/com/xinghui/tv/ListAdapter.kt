@@ -26,6 +26,19 @@ class ListAdapter(
         tv.setPadding(16, 12, 16, 12)
         tv.isFocusable = true
         tv.isClickable = true
+        // 横向 tab（如点播页分类条）：simple_list_item_1 默认 match_parent，横排会撑满导致只显示一项
+        val lm = (parent as? RecyclerView)?.layoutManager
+        if (lm is androidx.recyclerview.widget.LinearLayoutManager &&
+            lm.orientation == androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL
+        ) {
+            val gap = (tv.context.resources.displayMetrics.density * 20 + 0.5f).toInt()
+            tv.layoutParams = RecyclerView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { rightMargin = gap }
+            tv.setPadding(24, 14, 24, 14)
+            tv.background = tv.context.getDrawable(R.drawable.selector_tv_btn)
+        }
         return VH(tv)
     }
 

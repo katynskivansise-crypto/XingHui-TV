@@ -21,7 +21,7 @@ fn load() -> (String, String) {
 
 fn net_req() -> ReqImpl {
     let net = Arc::new(Net::new());
-    Arc::new(move |url: &str| net.string(url))
+    Arc::new(move |url: &str, _opts: &str| { let body = net.string(url); (body, "{}".to_string(), 200u16) })
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn real_rule_category_builds_list_with_mock_req() {
       {"id":"a1","type":"movie","title":"沙丘","pic":{"normal":"http://p1/s.jpg"},"rating":{"value":8.3},"honor_infos":[{"title":"榜"}]},
       {"id":"b2","type":"tv","title":"狂飙","pic":{"normal":"http://p2/k.jpg"},"rating":{"value":9.0},"honor_infos":[]}
     ]}"#.to_string();
-    let req: ReqImpl = Arc::new(move |_url: &str| mock.clone());
+    let req: ReqImpl = Arc::new(move |_url: &str, _opts: &str| (mock.clone(), "{}".to_string(), 200u16));
     let e = DrpyEngine::new(DIR, &rule, &engine, req).unwrap();
 
     let cat = e.category("hot_gaia", "1", "").unwrap();
