@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主界面背景：深色渐变 + 左上偏上的暗红光晕（近似原版的流光氛围，不依赖位图） -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="270"
+                android:startColor="#FF1A0A12"
+                android:centerColor="#FF0C0A0E"
+                android:endColor="#FF05050A" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:gradientRadius="560dp"
+                android:startColor="#40C0304A"
+                android:endColor="#00000000" />
+        </shape>
+    </item>
+</layer-list>

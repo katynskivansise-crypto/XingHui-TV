@@ -90,6 +90,8 @@ object SubscriptionParser {
             val base = subscribeUrl.substringBeforeLast('/', missingDelimiterValue = subscribeUrl) + "/"
             return base + first.removePrefix("./")
         }
-        return first
+        // 相对路径但拿不到订阅 base：无法拼成可下载地址，返回空让上层走兜底，
+        // 避免拼出 "./jar/spider.jar" 这种必然下载失败的地址（csp 站全空的主要成因之一）
+        return ""
     }
 }

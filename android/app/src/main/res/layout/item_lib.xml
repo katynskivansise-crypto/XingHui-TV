@@ -16,9 +16,9 @@
         <ImageView
             android:id="@+id/libImage"
             android:layout_width="match_parent"
-            android:layout_height="150dp"
+            android:layout_height="250dp"
             android:scaleType="centerCrop"
-            android:background="#1A1A1A" />
+            android:background="#16161C" />
 
         <TextView
             android:id="@+id/libName"

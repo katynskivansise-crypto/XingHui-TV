@@ -2,6 +2,7 @@ package com.xinghui.tv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.EditText
@@ -35,6 +36,9 @@ class SettingsActivity : Activity() {
     private lateinit var tvBackup: TextView
     private lateinit var tvRestore: TextView
     private lateinit var tvAbout: TextView
+    private lateinit var tvWallpaper: TextView
+    private lateinit var tvSize: TextView
+    private lateinit var tvScale: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,6 +60,9 @@ class SettingsActivity : Activity() {
         tvBackup = findViewById<TextView>(R.id.valBackup)
         tvRestore = findViewById<TextView>(R.id.valRestore)
         tvAbout = findViewById<TextView>(R.id.valAbout)
+        tvWallpaper = findViewById<TextView>(R.id.valWallpaper)
+        tvSize = findViewById<TextView>(R.id.valSize)
+        tvScale = findViewById<TextView>(R.id.valScale)
 
         refresh()
 
@@ -131,6 +138,15 @@ class SettingsActivity : Activity() {
         }
 
         // 备份：把 SharedPreferences 目录打包导出（对齐原项目 BackupDialog 导出配置）
+        findViewById<View>(R.id.rowWallpaper).setOnClickListener { showWallpaperDialog() }
+        findViewById<View>(R.id.rowSize).setOnClickListener {
+            settings.uiSize = if (settings.uiSize >= 3) 0 else settings.uiSize + 1
+            refresh()
+        }
+        findViewById<View>(R.id.rowScale).setOnClickListener {
+            settings.playerScale = if (settings.playerScale >= 4) 0 else settings.playerScale + 1
+            refresh()
+        }
         findViewById<View>(R.id.rowBackup).setOnClickListener { doBackup() }
 
         // 恢复：从备份 zip 还原配置
@@ -140,6 +156,73 @@ class SettingsActivity : Activity() {
     }
 
     /** 代理设置对话框（对齐原项目 ProxyDialog）：输入地址保存；留空保存即关闭代理 */
+    /** 壁纸：本地选图 / 图片地址 / 恢复默认（对齐原版设置页的壁纸项，来源扩展为可自选） */
+    private fun showWallpaperDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("壁纸")
+            .setItems(arrayOf("选择本地图片", "输入图片地址", "恢复默认（深色渐变）")) { _, which ->
+                when (which) {
+                    0 -> pickWallpaper()
+                    1 -> showWallpaperUrlDialog()
+                    2 -> {
+                        WallpaperStore.clear(this)
+                        refresh()
+                        Toast.makeText(this, "已恢复默认背景", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun pickWallpaper() {
+        runCatching {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivityForResult(intent, REQ_WALLPAPER)
+        }.onFailure {
+            Toast.makeText(this, "无法打开文件选择器", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showWallpaperUrlDialog() {
+        val input = EditText(this)
+        input.setSingleLine(true)
+        input.setHint("https://example.com/wall.jpg")
+        input.requestFocus()
+        AlertDialog.Builder(this)
+            .setTitle("壁纸图片地址")
+            .setMessage("支持 jpg/png 直链，图片会自动裁成屏幕比例")
+            .setView(input)
+            .setPositiveButton("确定") { _, _ ->
+                val url = input.text.toString().trim()
+                if (url.isBlank()) return@setPositiveButton
+                Toast.makeText(this, "正在下载壁纸…", Toast.LENGTH_SHORT).show()
+                WallpaperStore.importFromUrl(this, url) { _, msg ->
+                    refresh()
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_WALLPAPER || resultCode != Activity.RESULT_OK) return
+        val uri = data?.data ?: return
+        // 持久化读权限，重启后仍能读（ACTION_OPEN_DOCUMENT 支持）
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        WallpaperStore.importFromUri(this, uri) { _, msg ->
+            refresh()
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun showProxyDialog() {
         val input = EditText(this)
         input.setText(settings.proxy)
@@ -274,7 +357,14 @@ class SettingsActivity : Activity() {
         val backup = backupFile()
         tvBackup.text = if (backup != null && backup.exists()) "已备份（${java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(backup.lastModified()))}）" else "未备份（点击导出）"
         tvRestore.text = if (backup != null && backup.exists()) "点击从备份恢复" else "暂无备份文件"
+        tvWallpaper.text = if (WallpaperStore.has(this)) "自定义（点击更换）" else "默认渐变（点击设置）"
+        tvSize.text = settings.uiSizeLabel() + "（点击切换）"
+        tvScale.text = settings.playerScaleLabel() + "（点击切换）"
         tvAbout.text = "星汇TV v0.1.0（debug）"
+    }
+
+    private companion object {
+        private const val REQ_WALLPAPER = 1001
     }
 
     /** 备份文件路径（与 doBackup/doRestore 一致） */

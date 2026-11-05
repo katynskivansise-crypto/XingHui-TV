@@ -67,6 +67,19 @@ class Settings(context: Context) {
         else -> "自定义"
     }
 
+    /** 界面大小（对齐原版 Setting.getSize：小/中/大/特大），默认 2=大 */
+    var uiSize: Int
+        get() = prefs.getInt(KEY_UI_SIZE, 2)
+        set(value) = prefs.edit().putInt(KEY_UI_SIZE, value).apply()
+
+    /** 画面缩放（对齐原版 Setting.getScale：原始/16:9/4:3/填充/裁剪），默认 0=原始 */
+    var playerScale: Int
+        get() = prefs.getInt(KEY_PLAYER_SCALE, 0)
+        set(value) = prefs.edit().putInt(KEY_PLAYER_SCALE, value).apply()
+
+    fun uiSizeLabel(): String = UI_SIZE_LABELS.getOrElse(uiSize) { "大" }
+    fun playerScaleLabel(): String = SCALE_LABELS.getOrElse(playerScale) { "原始" }
+
     /** 设置项的中文名称，用于设置界面展示 */
     fun kernelLabel(): String =
         if (playerKernel == KERNEL_MPV) "mpv（外部播放器）" else "ExoPlayer（内置）"
@@ -90,5 +103,13 @@ class Settings(context: Context) {
         private const val KEY_PROXY = "proxy"
         private const val KEY_EPG_URL = "epg_url"
         private const val KEY_LIVE_URL = "live_url"
+        private const val KEY_UI_SIZE = "ui_size"
+        private const val KEY_PLAYER_SCALE = "player_scale"
+
+        /** 界面大小档位（对齐原版 select_size：小/中/大/特大） */
+        val UI_SIZE_LABELS = arrayOf("小", "中", "大", "特大")
+
+        /** 画面缩放档位（对齐原版 select_scale：原始/16:9/4:3/填充/裁剪） */
+        val SCALE_LABELS = arrayOf("原始", "16:9", "4:3", "填充", "裁剪")
     }
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 海报角标（对齐原版首页「全30集」样式）：亮绿底 + 4dp 圆角，盖在海报左下角 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#7CB342" />
+    <corners android:radius="4dp" />
+</shape>

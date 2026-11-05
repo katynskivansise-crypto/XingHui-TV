@@ -1,20 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 卡片焦点选择器：默认透明（不遮海报），聚焦时黄色描边 -->
+<!-- 卡片焦点选择器：默认透明（不遮海报），聚焦时白色描边（对齐原版高亮） -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_focused="true">
         <shape>
+            <solid android:color="#0DFFFFFF" />
             <stroke
                 android:width="3dp"
-                android:color="#FFCC00" />
-            <corners android:radius="4dp" />
+                android:color="#FFFFFFFF" />
+            <corners android:radius="10dp" />
         </shape>
     </item>
     <item>
         <shape>
+            <solid android:color="#00000000" />
             <stroke
                 android:width="0dp"
                 android:color="#00000000" />
-            <corners android:radius="4dp" />
+            <corners android:radius="10dp" />
         </shape>
     </item>
 </selector>

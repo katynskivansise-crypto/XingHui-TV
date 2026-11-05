@@ -9,12 +9,35 @@
     android:clickable="true"
     android:background="@drawable/item_focus">
 
-    <ImageView
-        android:id="@+id/vodImage"
+    <!-- 海报 + 左下角集数/备注角标（对齐原版「全30集」绿标压在海报上） -->
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="150dp"
-        android:scaleType="centerCrop"
-        android:background="#1A1A1A" />
+        android:layout_height="250dp">
+
+        <ImageView
+            android:id="@+id/vodImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="centerCrop"
+            android:background="#16161C" />
+
+        <TextView
+            android:id="@+id/vodRemarks"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|start"
+            android:layout_margin="6dp"
+            android:background="@drawable/bg_remark_tag"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+
+    </FrameLayout>
 
     <TextView
         android:id="@+id/vodName"
@@ -22,17 +45,8 @@
         android:layout_height="wrap_content"
         android:maxLines="1"
         android:ellipsize="end"
-        android:paddingTop="4dp"
+        android:paddingTop="6dp"
         android:textColor="#FFFFFF"
         android:textSize="15sp" />
-
-    <TextView
-        android:id="@+id/vodRemarks"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:textColor="#80FFFFFF"
-        android:textSize="12sp" />
 
 </LinearLayout>

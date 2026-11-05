@@ -32,7 +32,10 @@ class VideoAdapter(
     override fun onBindViewHolder(holder: VH, position: Int) {
         val vod = items[position]
         holder.name.text = vod.vodName
-        holder.remarks.text = vod.vodRemarks.ifBlank { vod.vodYear.ifBlank { " " } }
+        val tag = vod.vodRemarks.ifBlank { vod.vodYear }.trim()
+        holder.remarks.text = tag
+        // 空备注不显示空绿块（原版也是只有有备注时才画角标）
+        holder.remarks.visibility = if (tag.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
         if (Settings(holder.root.context).showPoster) {
             AsyncImageLoader.load(holder.image, vod.vodPic)
         } else {

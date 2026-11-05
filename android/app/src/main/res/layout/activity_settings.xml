@@ -1,451 +1,581 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 设置界面布局（分组式）：仅原生控件，兼容 API 21 起的旧 TV 盒子 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- 设置页（对齐原版 activity_setting.xml 视觉语言）：
+     不用卡片堆叠，改为「左标签 0.3 / 右值 0.7 右对齐」双列行，18sp 全白，行距 12dp，可滚动。
+     原版右侧还有 home/history/refresh 图标按钮，本期只对齐视觉，不补功能。 -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="#000000"
-    android:padding="24dp">
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingBottom="16dp"
-        android:textColor="#FFFFFF"
-        android:textSize="22sp"
-        android:text="设置" />
-
-    <!-- 播放 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="6dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFCC00"
-        android:textSize="14sp"
-        android:text="播放" />
+    android:fillViewport="true"
+    android:keepScreenOn="true"
+    android:background="@drawable/bg_main">
 
     <LinearLayout
-        android:id="@+id/rowKernel"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="24dp">
+
+        <LinearLayout
+            android:id="@+id/rowKernel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="播放内核" />
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="播放内核" />
 
+            <TextView
+                android:id="@+id/valKernel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="ExoPlayer（内置）" />
+        </LinearLayout>
         <TextView
-            android:id="@+id/valKernel"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
+            android:layout_marginTop="20dp"
+            android:textColor="#99FFFFFF"
             android:textSize="15sp"
-            android:text="ExoPlayer（内置）" />
+            android:text="网络" />
 
-    </LinearLayout>
-
-    <!-- 网络 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFCC00"
-        android:textSize="14sp"
-        android:text="网络" />
-
-    <LinearLayout
-        android:id="@+id/rowTimeout"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+        <LinearLayout
+            android:id="@+id/rowTimeout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="网络超时" />
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="网络超时" />
 
-        <TextView
-            android:id="@+id/valTimeout"
-            android:layout_width="wrap_content"
+            <TextView
+                android:id="@+id/valTimeout"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="15 秒" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowUa"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="User-Agent" />
+
+            <TextView
+                android:id="@+id/valUa"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="默认" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowProxy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="代理" />
+
+            <TextView
+                android:id="@+id/valProxy"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="关闭" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowEpg"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="直播 EPG 源" />
+
+            <TextView
+                android:id="@+id/valEpg"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="未配置" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowLive"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="直播源" />
+
+            <TextView
+                android:id="@+id/valLive"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="未配置" />
+        </LinearLayout>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="#99FFFFFF"
             android:textSize="15sp"
-            android:text="15 秒" />
+            android:text="界面" />
 
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowUa"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+        <LinearLayout
+            android:id="@+id/rowWallpaper"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="User-Agent" />
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="壁纸" />
 
-        <TextView
-            android:id="@+id/valUa"
-            android:layout_width="wrap_content"
+            <TextView
+                android:id="@+id/valWallpaper"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="默认渐变" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowSize"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="界面大小" />
+
+            <TextView
+                android:id="@+id/valSize"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="大" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowScale"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="画面缩放" />
+
+            <TextView
+                android:id="@+id/valScale"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="原始" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowPoster"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="显示海报" />
+
+            <TextView
+                android:id="@+id/valPoster"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="开" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowHomeHistory"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="@drawable/selector_tv_btn">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="首页显示历史" />
+
+            <TextView
+                android:id="@+id/valHomeHistory"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="开" />
+        </LinearLayout>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="#99FFFFFF"
             android:textSize="15sp"
-            android:text="默认" />
+            android:text="资料库" />
 
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowProxy"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+        <LinearLayout
+            android:id="@+id/rowHistory"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
-        <TextView
-            android:layout_width="0dp"
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="历史记录" />
+
+            <TextView
+                android:id="@+id/valHistory"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="0 条（点击清空）" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowFav"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="代理" />
-
-        <TextView
-            android:id="@+id/valProxy"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="14sp"
-            android:text="关闭" />
-
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowEpg"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="收藏" />
+
+            <TextView
+                android:id="@+id/valFav"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="0 条（点击清空）" />
+        </LinearLayout>
         <TextView
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="直播 EPG 源" />
-
-        <TextView
-            android:id="@+id/valEpg"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="14sp"
-            android:text="未配置" />
-
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowLive"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
-            android:background="@drawable/selector_tv_btn">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="直播源" />
-
-        <TextView
-            android:id="@+id/valLive"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="14sp"
-            android:text="未配置" />
-
-    </LinearLayout>
-
-    <!-- 界面 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFCC00"
-        android:textSize="14sp"
-        android:text="界面" />
-
-    <LinearLayout
-        android:id="@+id/rowPoster"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
-            android:background="@drawable/selector_tv_btn">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="显示海报" />
-
-        <TextView
-            android:id="@+id/valPoster"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
+            android:layout_marginTop="20dp"
+            android:textColor="#99FFFFFF"
             android:textSize="15sp"
-            android:text="开" />
+            android:text="备份与恢复" />
 
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowHomeHistory"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+        <LinearLayout
+            android:id="@+id/rowBackup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
-        <TextView
-            android:layout_width="0dp"
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="备份数据" />
+
+            <TextView
+                android:id="@+id/valBackup"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="导出到本地" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowRestore"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="首页显示历史" />
-
-        <TextView
-            android:id="@+id/valHomeHistory"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="15sp"
-            android:text="开" />
-
-    </LinearLayout>
-
-    <!-- 资料库 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFCC00"
-        android:textSize="14sp"
-        android:text="资料库" />
-
-    <LinearLayout
-        android:id="@+id/rowHistory"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:focusable="true"
+            android:clickable="true"
             android:background="@drawable/selector_tv_btn">
 
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="历史记录" />
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="恢复数据" />
 
+            <TextView
+                android:id="@+id/valRestore"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="从本地导入" />
+        </LinearLayout>
         <TextView
-            android:id="@+id/valHistory"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
+            android:layout_marginTop="20dp"
+            android:textColor="#99FFFFFF"
             android:textSize="15sp"
-            android:text="0 条（点击清空）" />
+            android:text="关于" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.3"
+                android:layout_marginEnd="16dp"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="版本" />
+
+            <TextView
+                android:id="@+id/valAbout"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.7"
+                android:gravity="end"
+                android:singleLine="true"
+                android:ellipsize="middle"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:text="星汇TV v0.1.0" />
+        </LinearLayout>
 
     </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowFav"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
-            android:background="@drawable/selector_tv_btn">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="收藏" />
-
-        <TextView
-            android:id="@+id/valFav"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="15sp"
-            android:text="0 条（点击清空）" />
-
-    </LinearLayout>
-
-    <!-- 备份与恢复（对应原项目 BackupDialog） -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFCC00"
-        android:textSize="14sp"
-        android:text="备份与恢复" />
-
-    <LinearLayout
-        android:id="@+id/rowBackup"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
-            android:background="@drawable/selector_tv_btn">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="备份数据" />
-
-        <TextView
-            android:id="@+id/valBackup"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="15sp"
-            android:text="导出到本地" />
-
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/rowRestore"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
-        android:focusable="true"
-        android:clickable="true"
-            android:background="@drawable/selector_tv_btn">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="恢复数据" />
-
-        <TextView
-            android:id="@+id/valRestore"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="15sp"
-            android:text="从本地导入" />
-
-    </LinearLayout>
-
-    <!-- 关于 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFCC00"
-        android:textSize="14sp"
-        android:text="关于" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:text="版本" />
-
-        <TextView
-            android:id="@+id/valAbout"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#B0FFFFFF"
-            android:textSize="15sp"
-            android:text="星汇TV v0.1.0" />
-
-    </LinearLayout>
-
-</LinearLayout>
+</ScrollView>

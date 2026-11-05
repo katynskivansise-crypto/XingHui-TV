@@ -49,6 +49,8 @@ class MainActivity : Activity() {
         runCatching { ProxyServer.startServer() }
             .onFailure { Log.e("XingHuiTV", "[proxy.server] startServer 异常", it) }
         setContentView(R.layout.activity_main)
+        // 壁纸（对齐原版 BaseActivity.refreshWall：只设 window 背景，不额外加 View）
+        runCatching { WallpaperStore.apply(this) }
 
         // 分类 tab（横向，对齐原版二级页）
         catList = findViewById<RecyclerView>(R.id.catList).apply {
@@ -65,7 +67,7 @@ class MainActivity : Activity() {
             }
         }
         vodList = findViewById<RecyclerView>(R.id.vodList).apply {
-            layoutManager = GridLayoutManager(this@MainActivity, 4)
+            layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
             adapter = vodAdapter
         }
 
@@ -88,7 +90,7 @@ class MainActivity : Activity() {
         }
 
         // 点播入口（对齐原版：首页只显示五个入口，点「点播」进二级分类页）
-        findViewById<TextView>(R.id.btnVod).setOnClickListener {
+        findViewById<View>(R.id.btnVod).setOnClickListener {
             runCatching { openCategoryPage() }
                 .onFailure { e -> Toast.makeText(this, "打开点播失败：${e.message}", Toast.LENGTH_LONG).show() }
         }
@@ -98,19 +100,19 @@ class MainActivity : Activity() {
             runCatching { startActivity(Intent(this, SitesActivity::class.java)) }
                 .onFailure { e -> Toast.makeText(this, "无法打开站点管理：${e.message}", Toast.LENGTH_LONG).show() }
         }
-        findViewById<TextView>(R.id.btnSearch).setOnClickListener {
+        findViewById<View>(R.id.btnSearch).setOnClickListener {
             runCatching { startActivity(Intent(this, SearchActivity::class.java)) }
                 .onFailure { e -> Toast.makeText(this, "无法打开搜索：${e.message}", Toast.LENGTH_LONG).show() }
         }
-        findViewById<TextView>(R.id.btnLive).setOnClickListener {
+        findViewById<View>(R.id.btnLive).setOnClickListener {
             runCatching { startActivity(Intent(this, LiveActivity::class.java)) }
                 .onFailure { e -> Toast.makeText(this, "无法打开直播：${e.message}", Toast.LENGTH_LONG).show() }
         }
-        findViewById<TextView>(R.id.btnHistory).setOnClickListener {
+        findViewById<View>(R.id.btnHistory).setOnClickListener {
             runCatching { startActivity(Intent(this, HistoryActivity::class.java)) }
                 .onFailure { e -> Toast.makeText(this, "无法打开历史：${e.message}", Toast.LENGTH_LONG).show() }
         }
-        findViewById<TextView>(R.id.btnCollect).setOnClickListener {
+        findViewById<View>(R.id.btnCollect).setOnClickListener {
             runCatching { startActivity(Intent(this, CollectActivity::class.java)) }
                 .onFailure { e -> Toast.makeText(this, "无法打开收藏：${e.message}", Toast.LENGTH_LONG).show() }
         }
@@ -181,7 +183,7 @@ class MainActivity : Activity() {
     private val clockTick = object : Runnable {
         override fun run() {
             findViewById<TextView>(R.id.clock).text =
-                SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+                SimpleDateFormat("HH:mm:ss MM/dd EEE", Locale.SIMPLIFIED_CHINESE).format(Date())
             clockHandler.postDelayed(this, 1000)
         }
     }
@@ -207,20 +209,27 @@ class MainActivity : Activity() {
 
             // 兜底：旧版界面导入的订阅缺 jar/subscribeUrl（表现为 csp 站空白、drpy 站注册失败），
             // 启动时自动用默认订阅补齐，无需用户重导
-            if (store.jar().isBlank() && store.sites().any { it.isCsp() }) {
+            // 兜底：jar 缺失 / 非 http 地址 / csp 站点未 attach jar → 强制从订阅重解析并写回。
+            // 旧版界面导入的订阅可能存了相对路径 "./jar/spider.jar"，loadJar 会下载失败 → 所有 csp 站空白，
+            // 只判 isBlank() 会漏掉这种"非空但无效"的脏值，所以这里连同"站点未 attach"一起判。
+            val cspSites = store.sites().filter { it.isCsp() }
+            val jarBad = store.jar().let { it.isBlank() || !it.startsWith("http") }
+            val siteJarBad = cspSites.any { it.jar.isBlank() || !it.jar.startsWith("http") }
+            if (cspSites.isNotEmpty() && (jarBad || siteJarBad)) {
+                Log.e("XingHuiTV", "[兜底] 触发 jarBad=$jarBad siteJarBad=$siteJarBad jar=${store.jar().take(70)}")
                 try {
                     val baseUrl = store.subscribeUrl().ifBlank { DEFAULT_SUB_URL }
                     val text = JsonFetcher.get(baseUrl)
                     if (!text.isNullOrBlank()) {
                         val jarRaw = SubscriptionParser.parseJar(text)
-                        if (jarRaw.isNotBlank()) {
-                            val jarFull = SubscriptionParser.jarUrl(jarRaw, baseUrl)
+                        val jarFull = SubscriptionParser.jarUrl(jarRaw, baseUrl)
+                        if (jarFull.isNotBlank() && jarFull.startsWith("http")) {
                             store.setJar(jarFull)
                             if (store.subscribeUrl().isBlank()) store.setSubscribeUrl(baseUrl)
                             store.attachJar(jarFull) // 对齐原项目：jar 写进每个 csp 站点
                             Log.e("XingHuiTV", "[兜底] 已自动补齐 jar=$jarFull subUrl=${store.subscribeUrl()}")
                         } else {
-                            Log.e("XingHuiTV", "[兜底] 订阅无 spider 字段，baseUrl=$baseUrl")
+                            Log.e("XingHuiTV", "[兜底] spider 无法解析为 URL：raw=$jarRaw base=$baseUrl")
                         }
                     } else {
                         Log.e("XingHuiTV", "[兜底] 订阅下载失败 baseUrl=$baseUrl")
@@ -322,6 +331,14 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 界面大小 → 网格列数（对齐原版 Product：size 越大卡片越大、每行列数越少） */
+    private fun uiColumns(): Int = when (Settings(this).uiSize) {
+        0 -> 6
+        1 -> 5
+        2 -> 4
+        else -> 3
+    }
+
     /** 左上角站点名点击：弹出站点列表，选中即切换站源并自动刷新（对齐原版） */
     private fun showSitePicker() {
         val store = SubscriptionStore(this)
@@ -400,7 +417,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.quickRow)?.visibility = View.GONE
         findViewById<View>(R.id.mainBody)?.visibility = View.VISIBLE
         if (categories.isEmpty()) {
-            showEmpty("站点内容加载中或为空…\n若长时间无内容，请返回首页检查订阅与站点")
+            showEmpty("未获取到分类列表（首页接口未返回 class 字段）\n按返回键回首页，看首页显示的失败原因")
             return
         }
         if (vods.isEmpty()) categories.firstOrNull()?.let { onCategory(it.first) }
@@ -414,7 +431,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.recommendRow)?.visibility =
             if (recommends.isNotEmpty()) View.VISIBLE else View.GONE
         loadQuickHistory() // 恢复首页历史行（历史/设置可能已变化）
-        findViewById<TextView>(R.id.btnVod)?.requestFocus()
+        findViewById<View>(R.id.btnVod)?.requestFocus()
     }
 
     /** 空状态提示（空串则隐藏） */
@@ -451,36 +468,79 @@ class MainActivity : Activity() {
         categories.clear()
         vods.clear()
         recommends.clear()
-        runCatching {
-            val root = JSONObject(json)
-            val classes = root.getJSONArray("class")
-            for (i in 0 until classes.length()) {
-                val c = classes.getJSONObject(i)
-                categories.add(c.getString("type_id") to c.getString("type_name"))
-            }
-            // 更新推荐（原项目首页推荐行）：home 的 list
-            recommends.addAll(Vod.parseList(json))
-        }.onFailure { e ->
-            Log.e("XingHuiTV", "[parseHome] 解析失败 json前300: ${json.take(300)}", e)
+
+        // 首页 JSON 为空/不可解析时，不再留黑屏：直接显示原因（用户截图即可定位）
+        val root = runCatching { JSONObject(json) }.getOrNull()
+        if (root == null) {
+            val reason = if (json.isBlank()) "站点未返回首页数据（返回为空）"
+            else "站点返回无法解析：${json.take(100)}"
+            Log.e("XingHuiTV", "[parseHome] $reason")
+            refreshLists()
+            updateTitle()
+            showHomeHint("$reason\n请点「点播」浏览分类，或点右上角「站点」切换站源")
+            return
         }
-        (catList.adapter as ListAdapter).notifyDataSetChanged()
-        vodAdapter.notifyDataSetChanged()
-        (findViewById<RecyclerView>(R.id.recommendList).adapter as LibAdapter).notifyDataSetChanged()
 
-        val siteName = SubscriptionStore(this).currentSite()?.name ?: "未配置站点"
-        findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + siteName
+        // class / list 分开解析：任一字段缺失都不再拖垮另一个（原实现同块解析，class 抛异常会连带推荐行全丢）
+        runCatching {
+            root.optJSONArray("class")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val c = arr.optJSONObject(i) ?: continue
+                    val id = c.optString("type_id").ifBlank { c.optString("typeId") }
+                    val name = c.optString("type_name").ifBlank { c.optString("typeName") }
+                    if (id.isNotBlank()) categories.add(id to name)
+                }
+            }
+        }.onFailure { Log.e("XingHuiTV", "[parseHome] class 字段解析失败 json前200: ${json.take(200)}", it) }
 
-        // 推荐横排：有数据才显示
-        findViewById<View>(R.id.recommendRow).visibility =
-            if (recommends.isNotEmpty()) View.VISIBLE else View.GONE
+        runCatching { recommends.addAll(Vod.parseList(json)) }
+            .onFailure { Log.e("XingHuiTV", "[parseHome] list 字段解析失败 json前200: ${json.take(200)}", it) }
+
+        refreshLists()
+        updateTitle()
+
         if (recommends.isNotEmpty()) {
+            findViewById<View>(R.id.recommendRow)?.visibility = View.VISIBLE
             findViewById<TextView>(R.id.recommendLabel).text = "更新推荐 · 共 ${recommends.size} 部"
+        } else {
+            // 首页无推荐时的可读提示（区分「站点没给推荐」与「接口没通」）
+            val msg = root.optString("msg", "")
+            val jar = SubscriptionStore(this).jar()
+            val siteJar = SubscriptionStore(this).currentSite()?.jar ?: ""
+            val jarState = when {
+                jar.isBlank() -> "jar=空"
+                !jar.startsWith("http") -> "jar=非URL(${jar.take(50)})"
+                else -> "jar=${jar.substringAfterLast('/').take(40)}"
+            }
+            showHomeHint(
+                (if (msg.isNotBlank()) "站点提示：$msg" else "本站未提供首页推荐（分类 ${categories.size} 个）")
+                    + "\n$jarState / site.jar=" + (if (siteJar.isBlank()) "空" else siteJar.take(40))
+                    + "\n请点「点播」浏览分类" +
+                    (if (categories.isEmpty()) "；若点播也空，点右上角「站点」换源" else "")
+            )
         }
 
         // 仅当已在点播二级页时才预载首个分类（首页不预载，避免无谓请求）
         if (findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE) {
             categories.firstOrNull()?.let { onCategory(it.first) }
         }
+    }
+
+    /** 首页提示行：复用 recommendRow/Label 位置，避免内容区纯黑无任何可读信息 */
+    private fun showHomeHint(text: String) {
+        findViewById<View>(R.id.recommendRow)?.visibility = View.VISIBLE
+        findViewById<TextView>(R.id.recommendLabel)?.text = text
+    }
+
+    private fun refreshLists() {
+        (catList.adapter as ListAdapter?)?.notifyDataSetChanged()
+        vodAdapter.notifyDataSetChanged()
+        (findViewById<RecyclerView>(R.id.recommendList)?.adapter as LibAdapter?)?.notifyDataSetChanged()
+    }
+
+    private fun updateTitle() {
+        val siteName = SubscriptionStore(this).currentSite()?.name ?: "未配置站点"
+        findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + siteName
     }
 
     private fun parseCategory(json: String) {

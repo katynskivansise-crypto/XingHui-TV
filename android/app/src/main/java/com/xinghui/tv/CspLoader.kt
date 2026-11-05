@@ -239,7 +239,8 @@ object CspLoader {
             }
             spiders[spKey] = inst
             inst
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // 对齐原版 catch Throwable：NoClassDefFoundError / ExceptionInInitializerError 也要接住
             Log.e(TAG, "[csp.spider] 实例化失败 ${site.key}", e)
             null
         }
@@ -269,7 +270,10 @@ object CspLoader {
 
     /** 首页：homeContent；list 为空时再取 homeVideoContent 合并（对齐原版 type=3 流程） */
     fun home(context: Context, site: Site): String {
-        val s = spider(context, site) ?: return ""
+        // 失败不返回空串：带上原因，壳侧可直接显示给用户（便于定位 jar/init/接口问题）
+        val s = spider(context, site)
+            ?: return JSONObject().put("code", -1)
+                .put("msg", "csp 未就绪（jar=${jarOf(site).take(60)}；为空或非 URL 说明 jar 没加载成功）").toString()
         val r1 = str(invoke(s, "homeContent", true))
         val hasList = runCatching {
             JSONObject(r1).optJSONArray("list")?.length() ?: 0
@@ -277,7 +281,11 @@ object CspLoader {
         if (hasList) return r1
         // list 空 → 尝试 homeVideoContent（Gz360 的更新推荐）
         val r2 = str(invoke(s, "homeVideoContent"))
-        if (r2.isBlank()) return r1
+        if (r2.isBlank()) {
+            return if (r1.isBlank())
+                JSONObject().put("code", -1).put("msg", "homeContent/homeVideoContent 均返回空（该站点可能不提供首页接口）").toString()
+            else r1
+        }
         return try {
             val o1 = JSONObject(r1)
             val o2 = JSONObject(r2)

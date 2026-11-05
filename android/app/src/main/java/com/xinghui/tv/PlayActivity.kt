@@ -46,12 +46,15 @@ class PlayActivity : Activity() {
     private var savedSpeedIdx = 2
     private var playerView: PlayerView? = null
     private var scaleIdx = 0
+    // 对齐原版 select_scale：原始 / 16:9 / 4:3 / 填充 / 裁剪 → ExoPlayer resizeMode
     private val scaleModes = intArrayOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
+        AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH,
+        AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT,
         AspectRatioFrameLayout.RESIZE_MODE_FILL,
         AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
     )
-    private val scaleNames = arrayOf("等比", "拉伸", "裁剪")
+    private val scaleNames = arrayOf("原始", "16:9", "4:3", "填充", "裁剪")
 
     // 清晰度（对齐原版 Url.values）：多清晰度切换；单清晰度时隐藏按钮
     private val qualities = mutableListOf<Pair<String, String>>() // (name, v)
@@ -74,6 +77,10 @@ class PlayActivity : Activity() {
         siteKey = SubscriptionStore(this).currentKey() ?: ""
 
         playerView = findViewById<PlayerView>(R.id.playView)
+        // 画面缩放（对齐原版 VideoActivity.setScale：读 Setting.getScale 并 apply）
+        scaleIdx = Settings(this).playerScale.coerceIn(0, scaleModes.size - 1)
+        playerView?.resizeMode = scaleModes[scaleIdx]
+        findViewById<TextView>(R.id.btnScale)?.text = "缩放 ${scaleNames[scaleIdx]}"
         player = ExoPlayer.Builder(this).build().also { playerView?.player = it }
         // 播放出错 → 自动换源重试（对齐原项目 onErrorEvent→startFlow→checkFlag 线路轮换）
         player?.addListener(object : Player.Listener {
@@ -311,6 +318,7 @@ class PlayActivity : Activity() {
         scaleIdx = (scaleIdx + 1) % scaleModes.size
         playerView?.resizeMode = scaleModes[scaleIdx]
         findViewById<TextView>(R.id.btnScale).text = "缩放 ${scaleNames[scaleIdx]}"
+        Settings(this).playerScale = scaleIdx // 对齐原版 putScale：退出后仍保持
     }
 
     /** 上一集/下一集：当前线路内切集，边界钳制（对齐原项目 onPrev/onNext + checkPrev/checkNext） */
