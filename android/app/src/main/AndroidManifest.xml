@@ -3,14 +3,35 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- ★ ACCESS_WIFI_STATE 是配置·中心能否点击的硬前提。
+         spider 的 merge/m/G.<init> 里第 31~41 条指令：
+             getSystemService("wifi") → WifiManager.getConnectionInfo() → WifiInfo.getIpAddress()
+         用途是把局域网 IP 拼进「远程输入」的推送地址（?do=push&operate=web）。
+         没有这条权限时 getConnectionInfo() 直接抛 SecurityException，G 的单例构造失败，
+         持有它的 G$a.<clinit> 随之失败，之后凡是点配置卡片都抛
+         NoClassDefFoundError: com.github.catvod.spider.merge.m.G$a ——
+         界面上就是"配置有内容，一点就闪退/什么也弹不出来"。
+         这不是我们能绕的：G 是 spider 自绘弹窗的唯一入口。 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Init.checkPermission 的清单里逐条列了 CHANGE_WIFI_STATE，虽然 getConnectionInfo()
+         只需要 ACCESS_WIFI_STATE，但声明缺项会让它那次批量请求返回被拒状态 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <!-- 原版 TVBox 就带这条；spider 里做网络状态判断（I.f()）要用 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- 配置·中心的三类功能落盘位置不同，权限要求也不同：
          网盘线程 / GO 代理版本 → <filesDir>/Pizazz/config.json，应用私有目录，不需要任何权限；
-         Cookie / Token          → /sdcard/TVBox/*.txt，走外部存储
+         Cookie / Token          → /sdcard/TVBox 下的 quark_cookie.txt 等文本文件，走外部存储
                                    （spider 的 merge/m/k.b(String) = new File(getExternalStorageDirectory(), "TVBox")）。
          少了这两条就是 EACCES：界面上"输入框填了、提示保存成功"，文件其实一个字都没写进去。
          targetSdk 34 在 API 25 设备上仍然按运行时权限模型走，所以还得在代码里动态申请。 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+    <!-- 原版也声明了这条；配置·中心「综合配置」的 update 项要用 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"

@@ -38,6 +38,65 @@ public final class Bridge {
     public static volatile String lastTrace = "";
     public static volatile String lastFail = "";
 
+    /**
+     * 按 host 维度的会话 Cookie 存储。原版把 CookieJar 挂在共享的 OkHttp.client() 上，
+     * spider 的 API 请求和 Glide 的图片请求共用同一份会话；我们这里复刻同一语义，
+     * 让"取了影片列表却加载不出海报（302 到 login.html）"不再发生。
+     */
+    private static final java.util.Map<String, String> cookieStore =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 取某个 URL 对应的会话 Cookie 串（形如 "JSESSIONID=xxx"）；没有则返回空串。 */
+    public static String cookieFor(String url) {
+        String host = hostOf(url);
+        if (host == null) return "";
+        String v = cookieStore.get(host);
+        return v == null ? "" : v;
+    }
+
+    private static String hostOf(String url) {
+        try {
+            return new java.net.URL(url).getHost();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 吸收响应里的 Set-Cookie，按 host 合并覆盖同名项。 */
+    private static void absorbCookies(String url, Headers headers) {
+        String host = hostOf(url);
+        if (host == null || headers == null) return;
+        java.util.List<String> scs;
+        try {
+            scs = headers.values("Set-Cookie");
+        } catch (Throwable t) {
+            return;
+        }
+        if (scs == null || scs.isEmpty()) return;
+        java.util.LinkedHashMap<String, String> jar = new java.util.LinkedHashMap<>();
+        String old = cookieStore.get(host);
+        if (old != null && !old.isEmpty()) {
+            for (String kv : old.split("; ")) {
+                int eq = kv.indexOf('=');
+                if (eq > 0) jar.put(kv.substring(0, eq).trim(), kv.substring(eq + 1).trim());
+            }
+        }
+        for (String sc : scs) {
+            if (sc == null || sc.isEmpty()) continue;
+            String pair = sc.split(";", 2)[0].trim();
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            jar.put(pair.substring(0, eq).trim(), pair.substring(eq + 1).trim());
+        }
+        if (jar.isEmpty()) return;
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, String> e : jar.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        cookieStore.put(host, sb.toString());
+    }
+
     private Bridge() {
     }
 
@@ -65,6 +124,13 @@ public final class Bridge {
             for (String name : request.headers().names()) {
                 String v = request.headers().get(name);
                 if (v != null) headers.put(name, v);
+            }
+            // 会话 Cookie 自动补：原版 Glide 用 OkHttpUrlLoader 共享同一个 OkHttp.client()，
+            // 图片请求因此天然带上 spider 会话期间拿到的 Cookie；我们图片走独立连接，
+            // 这里在唯一的 HTTP 出口上补齐，才不会出现"API 能出数据、海报却 302 到登录页"。
+            if (!request.headers().names().contains("Cookie")) {
+                String ck = cookieFor(url);
+                if (!ck.isEmpty()) headers.put("Cookie", ck);
             }
             p.put("headers", headers);
 
@@ -130,6 +196,7 @@ public final class Bridge {
         String ct = hb.get("Content-Type");
         MediaType mt = ct == null ? null : MediaType.get(ct);
         lastTrace = request.method() + " " + url + " → " + code + " len=" + data.length;
+        absorbCookies(url, hb.build());
 
         return new Response.Builder()
                 .code(code)

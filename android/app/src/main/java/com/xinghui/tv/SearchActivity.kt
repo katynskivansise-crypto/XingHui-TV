@@ -29,6 +29,10 @@ class SearchActivity : Activity() {
     private lateinit var wordAdapter: SearchWordAdapter
     private lateinit var input: EditText
 
+    private var currentKeyword = ""
+    private var currentPage = 1
+    private var loadingMore = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_search)
@@ -43,6 +47,15 @@ class SearchActivity : Activity() {
         }
         list.layoutManager = GridLayoutManager(this, 4)
         list.adapter = adapter
+        // 滚到末尾自动取下一页。原版搜索页同样是滚到底加载更多；
+        // 聚合搜索的每一页 = 所有源的第 N 页合并，所以翻页时把同一个 pg 传给全部源。
+        list.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (loadingMore || currentKeyword.isEmpty()) return
+                val lm = rv.layoutManager as? GridLayoutManager ?: return
+                if (lm.findLastVisibleItemPosition() >= results.size - 6) loadMore()
+            }
+        })
 
         // 搜索历史
         wordAdapter = SearchWordAdapter(words) { word ->
@@ -104,6 +117,9 @@ class SearchActivity : Activity() {
     private fun doSearch(keyword: String) {
         wordStore.addWord(keyword)
         refreshWords()
+        currentKeyword = keyword
+        currentPage = 1
+        loadingMore = false
         Toast.makeText(this, "正在搜索：$keyword", Toast.LENGTH_SHORT).show()
         Thread {
             // 聚合搜索：遍历全部已注册源，引擎合并结果（对齐原项目聚合搜索）
@@ -119,6 +135,41 @@ class SearchActivity : Activity() {
                 adapter.notifyDataSetChanged()
                 findViewById<TextView>(R.id.searchLabel).text =
                     "搜索 “$keyword” 共 ${results.size} 条（全部源）"
+            }
+        }.start()
+    }
+
+    /**
+     * 取下一页。把同一个 pg 传给引擎与全部 csp 源，结果按来源顺序追加到末尾。
+     * 之前搜索只有第 1 页：CspLoader.search 只传 key+false 两个参数，
+     * 而 spider 的签名是 searchContent(String key, boolean quick, String pg)，
+     * pg 缺失时站点默认回第 1 页，所以一个关键词永远只能看到前 N 条。
+     */
+    private fun loadMore() {
+        if (loadingMore) return
+        val key = currentKeyword
+        if (key.isEmpty()) return
+        loadingMore = true
+        val pg = (currentPage + 1).toString()
+        Thread {
+            val params = JSONObject().put("key", key).put("pg", pg).toString()
+            val more = runCatching {
+                val json = Engine.execute("searchAll", "", params)
+                Vod.parseList(json) + Vod.parseList(
+                    CspLoader.searchAll(this, SubscriptionStore(this), key, pg)
+                )
+            }.getOrElse { emptyList() }
+            runOnUiThread {
+                loadingMore = false
+                val label = findViewById<TextView>(R.id.searchLabel)
+                if (more.isEmpty()) {
+                    label.text = "搜索 “$key” 共 ${results.size} 条（已到底）"
+                    return@runOnUiThread
+                }
+                currentPage++
+                results.addAll(more)
+                adapter.notifyDataSetChanged()
+                label.text = "搜索 “$key” 第 ${currentPage} 页 · 共 ${results.size} 条"
             }
         }.start()
     }

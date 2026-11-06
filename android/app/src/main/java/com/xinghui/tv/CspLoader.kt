@@ -51,6 +51,47 @@ object CspLoader {
     private var lastJarError: String = ""
 
     /**
+     * 最近一次 base 地址兜底的完整过程（探活了哪些域名、各自返回什么码、最终写没写进去）。
+     * 必须透传到界面：这类"分类页空且一个请求都没发"的故障，只看屏幕上的
+     * 「invoke=无异常 | ext=…」是判不出 a 到底是不是 null 的，而没有 logcat 时等于瞎猜。
+     */
+    @Volatile
+    private var lastBaseInfo: String = ""
+
+    /**
+     * 当前站的候选 base 域名（来自 ext.site），用于"主域名失败就轮换下一项"。
+     * JianPian 这类站的 ext.site 本身就是镜像列表，第一项常年是已注销或限地区的旧站；
+     * 主域名返回空/非 JSON 时切到下一项重试一次，往往就能出数据，失败再还原。
+     */
+    @Volatile
+    private var baseCandidates: List<String> = emptyList()
+
+    /**
+     * 当前站点的图片域名（带结尾斜杠），供 AsyncImageLoader 把相对海报路径补成完整地址。
+     *
+     * 为什么需要这一层：csp_AppDrama 这类站的 ext 里 "host" 是空串，真实域名写在
+     * ext.site 指向的远程配置里。以苹果·APP 为例，ext.site 是
+     *   https://xpgandroid03-1372779881.cos.ap-beijing.myqcloud.com/app_xpg_android.txt
+     * 内容是 {"domain":"http://122.228.193.211:18008","enabled":true}（正好 65 字节）。
+     * spider 没读到 domain 时 vod_pic 就只剩 load/vod/xxx 这种相对路径，
+     * 加载器直接请求会拿到 CDN 的兜底文件 —— 也就是那份 65 字节配置本身，
+     * 真机诊断行因此显示「解码失败 len=65」，跟解码器毫无关系。
+     *
+     * 这里只读站点配置、不碰 spider 的解析逻辑，属于宿主该补的那一层。
+     */
+    @Volatile var imageBase: String = ""
+    @Volatile private var imageBaseSite: String = ""
+
+    /**
+     * 最近一次能取到的前台 Activity 类名（空串表示 spider 的 Init.getActivity 取不到）。
+     * 配置·中心的卡片全部是 spider 自绘弹窗，没有 Activity 就挂不上 Window，
+     * 一弹就是后台线程 NPE —— 这个值直接决定"点了会不会闪退"。
+     */
+    @Volatile
+    var lastActivityName: String = ""
+        private set
+
+    /**
      * 最近一次反射调用（homeContent 等）抛出的真实异常。
      * 反射抛的是 InvocationTargetException，真正的 NoSuchMethodError 在 cause 里；
      * 且 Error 不属于 Exception，原来的 catch(Exception) 根本抓不住。
@@ -218,6 +259,21 @@ object CspLoader {
                     val back = runCatching { clz.getMethod("context").invoke(null) as? Context }.getOrNull()
                     Log.e(TAG, "[csp.prepare] $tag 写 Init.c 完成 回读=${back != null}")
                     if (back == null) lastJarError = "Init.context 写 c 后仍为 null"
+
+                    // 配置·中心每张卡片点下去，最终都要一个真 Activity 去挂 Window
+                    // （merge/m/G 是一整套自绘弹窗：showAuthDialog / addInputWithHint / createTitleView）。
+                    // spider 不信任 Init.c，它自己反射 ActivityThread.mActivities 取前台 Activity；
+                    // 这里顺带探一次，取到 null 就说明后面所有弹窗都会在后台线程 NPE —— 与其猜，不如写进界面。
+                    val act = runCatching {
+                        val m = clz.getMethod("getActivity")
+                        if (java.lang.reflect.Modifier.isStatic(m.modifiers)) m.invoke(null) else m.invoke(inst)
+                    }.getOrNull()
+                    Log.e(TAG, "[csp.prepare] $tag Init.getActivity=${act?.javaClass?.name ?: "null"}")
+                    if (act == null) {
+                        lastJarError = lastJarError.ifBlank { "Init.getActivity 取不到前台 Activity" }
+                    } else {
+                        lastActivityName = act.javaClass.name
+                    }
                 }.onFailure { e ->
                     Log.e(TAG, "[csp.prepare] $tag 写 Init.c 失败", e)
                 }
@@ -449,6 +505,7 @@ object CspLoader {
             // 表现就是"分类页永远空、而且根本没发出请求"。这里把真实值打出来。
             dumpStringFields(site, inst)
             ensureBaseUrl(site, inst)
+            resolveImageBase(site, inst)
             inst
         } catch (e: Throwable) {
             // 对齐原版 catch Throwable：NoClassDefFoundError / ExceptionInInitializerError 也要接住
@@ -494,39 +551,106 @@ object CspLoader {
     /**
      * 补齐 spider 的 base 地址字段（JianPian 的 String a）。
      *
-     * 实测语义：JianPian.init 会对 ext.site 里每个地址发 HEAD，只把第一个返回 2xx/3xx 的写进 a，
-     * 写成功后立刻 return；其中任何一个地址若 DNS 解析失败并抛出异常，整个循环会被 catch 掉并 return，
-     * 后面的地址根本不再尝试。a 一旦留成 null，categoryContent 的第一条实质指令就是
-     * StringBuilder.append(this.a)，NPE 被 spider 自己吞掉，表现就是「分类页永远空、而且一个请求都没发」。
-     * 现网订阅 ext.site 的第一个域名已注销（NXDOMAIN），所以这条兜底是必需的。
+     * 实测语义（新 jar 字节码逐条核对过）：JianPian.init 遍历 ext.site 每一项，
+     * 对每项发一次 `Request.Builder().url(u).head()` 的 HEAD 请求，拿到 200 就写 a 并 return。
+     * try 的覆盖范围是 43..125，落在循环体内，捕获类型是 Exception —— 所以某一项 DNS 失败
+     * 只会让这一轮 continue，不会中断整个循环。（早期注释里"整个循环被 catch 掉"是错的。）
+     *
+     * 但还有两种情况会让 a 留空：
+     *   1) ext.site 里所有域名都不可达 / 全部非 200；
+     *   2) 我们的 okhttp 兼容层把 HEAD 落成 code==0（Bridge 抛 IOException，被 init 的 catch 吞掉）。
+     * a 一旦为空，categoryContent 的第一条实质指令 `StringBuilder.append(this.a)` 会拼出
+     * "null/api/..."，而 merge/k/b.l 的第一条判断是 `if (!url.startsWith("http")) return "";`，
+     * 于是**一个请求都不发**、直接返回空串 —— 屏幕上的诊断行因此看不到任何痕迹。
      */
     private fun ensureBaseUrl(site: Site, inst: Any) {
+        val sb = StringBuilder()
         runCatching {
             val f = inst.javaClass.getDeclaredField("a")
             f.isAccessible = true
             val cur = f.get(inst) as String?
             if (!cur.isNullOrBlank()) {
+                lastBaseInfo = "a=$cur（init 已设置）"
                 Log.e(TAG, "[csp.base] ${site.key} a=$cur（init 已设置，无需补齐）")
                 return
             }
             val arr = runCatching { JSONObject(site.ext).optJSONArray("site") }.getOrNull()
             if (arr == null) {
+                lastBaseInfo = "a=null（ext 无 site 数组：${site.ext.take(40)}）"
                 Log.e(TAG, "[csp.base] ${site.key} ext 无 site 数组，跳过")
                 return
             }
+            sb.append("a=null，逐个探活: ")
+            var first: String? = null
+            var ok: String? = null
             for (i in 0 until arr.length()) {
                 val u = arr.optString(i).trim()
                 if (u.isEmpty()) continue
-                val code = runCatching { probeHead(u) }.getOrDefault(-1)
-                Log.e(TAG, "[csp.base] ${site.key} 探活 $u → $code")
+                if (first == null) first = u
+                var code = -1
+                var em = ""
+                runCatching { probeHead(u) }
+                    .onSuccess { code = it }
+                    .onFailure { code = -1; em = it.message ?: it.javaClass.simpleName }
+                sb.append("$u→").append(code)
+                if (em.isNotBlank()) sb.append("[").append(em.take(60)).append("]")
+                sb.append("; ")
+                Log.e(TAG, "[csp.base] ${site.key} 探活 $u → $code ${em.take(80)}")
                 if (code in 200..399) {
-                    f.set(inst, u)
-                    Log.e(TAG, "[csp.base] ${site.key} 手工补齐 a=$u")
-                    return
+                    ok = u
+                    break
                 }
             }
-            Log.e(TAG, "[csp.base] ${site.key} ext.site 全部不可达，a 仍为 null")
-        }.onFailure { Log.e(TAG, "[csp.base] 补齐失败 ${site.key}", it) }
+            val candidates = (0 until arr.length())
+                .map { arr.optString(it).trim() }
+                .filter { it.isNotEmpty() }
+            baseCandidates = candidates
+            val chosen = ok ?: first
+            if (chosen != null) {
+                f.set(inst, chosen)
+                lastBaseInfo = sb.toString() +
+                    if (ok != null) "⇒已写 a=$chosen" else "⇒全部不可达，强制写首项 a=$chosen（保证请求能发出）"
+                Log.e(TAG, "[csp.base] ${site.key} 写入 a=$chosen${if (ok == null) "（探活全失败）" else ""}")
+            } else {
+                lastBaseInfo = sb.toString() + "⇒ext.site 全为空，a 仍 null"
+                Log.e(TAG, "[csp.base] ${site.key} ext.site 全为空")
+            }
+        }.onFailure { e ->
+            // 大多数 spider 根本没有 a 字段（只有 JianPian 这类"多域名择一"的站才有），
+            // 这种情况不该在界面上显示成"补齐异常"，否则每个站的空分类都会挂一条噪音。
+            lastBaseInfo = if (e is NoSuchFieldException) "" else "补齐异常: ${e.message}"
+            Log.e(TAG, "[csp.base] 补齐失败 ${site.key}", e)
+        }
+    }
+
+    /** 读 spider 的 base 字段（JianPian.a）；没有该字段返回 null */
+    private fun readBase(inst: Any): String? = runCatching {
+        val f = inst.javaClass.getDeclaredField("a").apply { isAccessible = true }
+        f.get(inst) as? String
+    }.getOrNull()
+
+    /** 写回 spider 的 base 字段；没有该字段静默忽略 */
+    private fun setBase(inst: Any, value: String?) {
+        runCatching {
+            val f = inst.javaClass.getDeclaredField("a").apply { isAccessible = true }
+            f.set(inst, value)
+        }
+    }
+
+    /**
+     * 切到候选列表里的下一项，返回新地址；没有下一个候选返回 null。
+     * 只用于"主域名已经发出请求但没拿到可用数据"的场景 —— 与 a 为空时补值不同，
+     * 这里 a 本身是有效的，只是该镜像站不提供该接口。
+     */
+    private fun setBaseToNext(inst: Any, current: String?): String? {
+        val cands = baseCandidates
+        if (cands.size < 2) return null
+        val idx = cands.indexOf(current ?: "")
+        if (idx < 0 || idx + 1 >= cands.size) return null
+        val next = cands[idx + 1]
+        if (next == current) return null
+        setBase(inst, next)
+        return next
     }
 
     /** HEAD 探活，返回状态码；连不上返回 -1。超时压到 5s，避免启动被死域名拖住。 */
@@ -549,6 +673,65 @@ object CspLoader {
      *   在部分服务上会丢失，Bridge 里 code==0 直接抛 IOException，探活全部变成 -1，
      *   兜底等于没做。GET 没有这个毛病。
      */
+    /**
+     * 解析当前站点的图片域名，写进 imageBase。
+     * 优先级：ext.host（已是完整 http）→ ext.site 远程配置里的 domain → spider 实例的 String 字段兜底。
+     * 幂等：同一站点且已有值就直接返回，只在切换站点时重做一次。
+     */
+    private fun resolveImageBase(site: Site, inst: Any) {
+        if (imageBase.isNotBlank() && imageBaseSite == site.key) return
+        runCatching {
+            val extObj = runCatching { JSONObject(site.ext) }.getOrNull() ?: return@runCatching
+            // 1) ext 里直接给了完整域名
+            val host = extObj.optString("host").trim()
+            if (host.startsWith("http")) {
+                imageBase = host.trimEnd('/') + "/"
+                imageBaseSite = site.key
+                Log.e(TAG, "[csp.image] ${site.key} ext.host → $imageBase")
+                return@runCatching
+            }
+            // 2) 拉 ext.site 指向的远程配置，读 domain（苹果·APP 走这条）
+            val cfgUrl = extObj.optString("site").trim()
+            if (cfgUrl.startsWith("http")) {
+                val body = fetchGet(cfgUrl)
+                if (!body.isNullOrBlank()) {
+                    val domain = runCatching { JSONObject(body).optString("domain") }
+                        .getOrNull().orEmpty().trim()
+                    if (domain.startsWith("http")) {
+                        imageBase = domain.trimEnd('/') + "/"
+                        imageBaseSite = site.key
+                        Log.e(TAG, "[csp.image] ${site.key} site.domain → $imageBase")
+                        return@runCatching
+                    }
+                }
+            }
+            // 3) spider 实例上的 String 字段兜底（JianPian 的 b = img.cqkgy.com）
+            val b = runCatching {
+                inst.javaClass.getDeclaredField("b").apply { isAccessible = true }.get(inst) as? String
+            }.getOrNull().orEmpty().trim()
+            if (b.contains(".") && !b.contains("/")) {
+                imageBase = "https://" + b + "/"
+                imageBaseSite = site.key
+                Log.e(TAG, "[csp.image] ${site.key} 字段 b → $imageBase")
+            }
+        }.onFailure { Log.e(TAG, "[csp.image] 解析失败 ${site.key}", it) }
+    }
+
+    /** 取一小段文本（站点配置只有几十字节，读全文即可） */
+    private fun fetchGet(url: String): String? {
+        val client = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build()
+        val req = okhttp3.Request.Builder().url(url).method("GET", null).build()
+        val resp = client.newCall(req).execute()
+        return try {
+            if (resp.code() in 200..299) resp.body()?.string() else null
+        } finally {
+            runCatching { resp.close() }
+        }
+    }
+
     private fun probeHead(url: String): Int {
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -651,17 +834,48 @@ object CspLoader {
                     "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}，原因未记录" }}）"
                 ).toString()
         lastInvokeError = ""
-        val r = str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
+        var r = str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
         // spider 返回非空但列表为空时，问题在它内部的解析/解密，不在我们的参数；
         // 这条日志把 spider 的真实原文留下来，真机上直接看就知道它给了什么。
         Log.e(TAG, "[csp.category] tid=$tid pg=$pg extend=$extend len=${r.length} 原文=${r.take(300)}")
+        // 主域名没拿到数据就轮换镜像：JianPian 这类站的 ext.site 是镜像列表，
+        // 第一项常常是已注销或只提供 HTML 的旧站，切到下一项往往能出数据。
+        // 轮换后仍为空则还原原值，避免把一个本来还能用的域名替换掉。
         if (r.isBlank()) {
+            val aNow = readBase(s)
+            val alt = setBaseToNext(s, aNow)
+            if (alt != null) {
+                lastInvokeError = ""
+                val r2 = str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
+                Log.e(TAG, "[csp.category] ${site.key} 主域名空，轮换 base=$alt len=${r2.length}")
+                if (r2.isNotBlank()) {
+                    r = r2
+                } else {
+                    setBase(s, aNow)
+                }
+            }
+        }
+        if (r.isBlank()) {
+            // 关键诊断：spider 的 HTTP 入口 merge/k/b.l 只有 32 字码，第一条实质判断是
+            //     if (!url.startsWith("http")) return "";
+            // 也就是说 URL 只要不以 http 开头，它一个请求都不发，直接吐空串。
+            // 而 categoryContent 的 URL 是 StringBuilder.append(this.a) + "/api/..."，
+            // a 为 null 时会拼成 "null/api/..."，a 带了路径时会拼成 "https://host/xxx/api/..."，
+            // 两种都会让分类页恒 0 条，且在网络层看不到任何请求。
+            // 这里把 a 的真实值和拼出来的 URL 一起上屏，截图即可判断是哪种。
+            val aVal = runCatching {
+                s.javaClass.getDeclaredField("a").apply { isAccessible = true }.get(s) as? String
+            }.getOrNull()
             return JSONObject().put("code", -1)
                 .put(
                     "msg",
                     "categoryContent 返回空（tid=$tid pg=$pg）"
                         + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                        + " | a=" + (aVal?.let { "\"$it\"" } ?: "null(无 a 字段)")
+                        + " | expectUrl=" + ((aVal ?: "null") + "/api/…")
                         + (if (lastJarError.isNotBlank()) " | init=$lastJarError" else "")
+                        + (if (lastBaseInfo.isNotBlank()) " | base=[$lastBaseInfo]" else "")
+                        + " | act=" + lastActivityName.ifBlank { "null" }
                         + " | ext=" + site.ext.take(80)
                         + okhttp3.internal.Bridge.diag()
                 ).toString()
@@ -709,15 +923,28 @@ object CspLoader {
     }
 
     /** 搜索 */
-    fun search(context: Context, site: Site, key: String): String {
+    /**
+     * 搜索。签名对齐原版 Spider.searchContent(String key, boolean quick, String pg)：
+     * quick=true 时站点可以只回粗略结果（原版用于聚合搜索的预筛），我们统一用 false 走完整结果；
+     * pg 从 1 开始，翻页时递增 —— 之前只传 key/false 两参数，等于把每个源都锁死在第 1 页。
+     */
+    fun search(context: Context, site: Site, key: String, pg: String = "1"): String {
         val s = spider(context, site)
             ?: return JSONObject().put("code", -1)
                 .put("msg", "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}" }}）").toString()
         lastInvokeError = ""
-        val r = str(invoke(s, "searchContent", key, false))
+        // 3 参数调用；若该站的 searchContent 只声明了两参数（少数老 jar），
+        // 反射会抛 NoSuchMethodException，这里退回两参数版本，避免整站搜索直接失效。
+        val r = str(
+            runCatching { invoke(s, "searchContent", key, false, pg) }
+                .getOrElse {
+                    lastInvokeError = ""
+                    invoke(s, "searchContent", key, false)
+                }
+        )
         if (r.isBlank()) {
             return JSONObject().put("code", -1)
-                .put("msg", "searchContent 返回空（key=$key）"
+                .put("msg", "searchContent 返回空（key=$key pg=$pg）"
                     + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
                     + okhttp3.internal.Bridge.diag())
                 .toString()
@@ -762,7 +989,7 @@ object CspLoader {
     }
 
     /** 聚合搜索：当前订阅里所有可搜索的 csp_ 站点逐个搜并合并（keepAll 不去重） */
-    fun searchAll(context: Context, store: SubscriptionStore, key: String): String {
+    fun searchAll(context: Context, store: SubscriptionStore, key: String, pg: String = "1"): String {
         // 对齐原版 Site.isSearchable()：订阅里 29/157 站标了 searchable=0
         // （配置中心、各网盘、体育、新片预告等）。这类站没有搜索接口，
         // 参与聚合搜索只会让每个关键词多等一轮网络请求、再返回空列表。
@@ -771,7 +998,7 @@ object CspLoader {
         val merged = JSONObject()
         val list = JSONArray()
         for (site in cspSites) {
-            val r = search(context, site, key)
+            val r = search(context, site, key, pg)
             try {
                 val arr = JSONObject(r).optJSONArray("list") ?: continue
                 for (i in 0 until arr.length()) {

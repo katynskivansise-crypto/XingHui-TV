@@ -83,7 +83,15 @@ object AsyncImageLoader {
         //   https://x.jpg@Referer=https://y/@User-Agent=Mozilla...
         //   不拆出来的话，@Referer=... 会被当成路径的一部分 → 服务器 404 → 海报永远空白。
         //   这是"部分图能显示、大部分空白"的真正原因（能显示的那些恰好没带后缀）。
-        val (cleanUrl, extraHeaders) = splitHeaders(url)
+        // 站点返回相对海报路径时（苹果·APP 就是 load/vod/20240617-1/xxx），
+        // 用站点图片域名补成完整地址。不补的话请求会打到 CDN 根，
+        // 拿到的是它的兜底文件——实测正好 65 字节，就是站点那份 domain 配置本身，
+        // 于是在诊断行里表现为「解码失败 len=65」。
+        val absUrl = if (!url.contains("://") && !url.startsWith("data:")) {
+            val base = CspLoader.imageBase
+            if (base.isNotBlank()) base + url.trimStart('/') else url
+        } else url
+        val (cleanUrl, extraHeaders) = splitHeaders(absUrl)
         // data: 内嵌 base64 图，无需下载（原版同样在 getUrl 里直接返回）
         if (cleanUrl.startsWith("data:")) {
             val comma = cleanUrl.indexOf(',')
@@ -245,14 +253,26 @@ object AsyncImageLoader {
         conn.setRequestProperty("Accept", "image/*,*/*;q=0.8")
         // 原版从 URL 拆出来的防盗链 header 原样带上（Referer / Cookie 是出图的关键）
         extraHeaders["Referer"]?.let { conn.setRequestProperty("Referer", it) }
-        extraHeaders["Cookie"]?.let { conn.setRequestProperty("Cookie", it) }
+        // 会话 Cookie：原版 Glide 通过 OkHttpUrlLoader 共享 OkHttp.client()，spider 会话期间的
+        // Cookie 会跟着图片请求一起走；我们直连必须显式补上，否则被判未登录、302 到登录页。
+        val ck = extraHeaders["Cookie"]?.takeIf { it.isNotBlank() }
+            ?: okhttp3.internal.Bridge.cookieFor(url)
+        if (ck.isNotBlank()) conn.setRequestProperty("Cookie", ck)
         extraHeaders.filterKeys { it != "Referer" && it != "Cookie" && it != "User-Agent" }
             .forEach { (k, v) -> runCatching { conn.setRequestProperty(k, v) } }
         val code = conn.responseCode
         val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.use { it.readBytes() }
+        val location = conn.headerFields?.get("Location")?.firstOrNull() ?: ""
         conn.disconnect()
         if (code !in 200..299) {
-            Log.e("XingHuiTV", "[image] 直连 HTTP $code url=$url")
+            // 302 到 login.html 不是"解码失败"，是这个封面本身要求登录态。
+            // 把这层语义显式打出来，避免把站点侧的鉴权要求误判成我们的解码 bug。
+            val needLogin = location.contains("login", true) || code == 302 || code == 401 || code == 403
+            Log.e(
+                "XingHuiTV",
+                "[image] 直连 HTTP $code${if (needLogin) "（需登录/被拒）" else ""}" +
+                    " loc=${location.take(80)} url=$url"
+            )
             null
         } else body
     }.onFailure { e ->
