@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 历史/收藏卡片：海报 + 片名 + 备注 + 删除按钮 -->
+<!-- 历史/收藏卡片：海报 + 片名 + 备注 + 删除按钮
+     宽度改 match_parent，由 GridLayoutManager 分配到列宽；海报高度由 LibAdapter
+     按「宽 / 0.75」实时计算（对齐原版 style/Style.getRatio 的 rect 默认值）。
+     此前写死 200dp × 250dp，换屏或换列数时既不铺满也不保持比例。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="200dp"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:padding="6dp"
     android:focusable="true"

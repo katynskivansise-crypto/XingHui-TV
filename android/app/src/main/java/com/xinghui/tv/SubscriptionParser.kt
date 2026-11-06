@@ -78,6 +78,21 @@ object SubscriptionParser {
         val jar = ownJar.ifBlank { if (api.startsWith("csp_")) defaultJar else "" }
         // 卡片形态（订阅里 51/157 站带 style，如体育站 type=list、影视站 ratio=1.33）
         val (stType, stRatio) = Site.styleOf(o)
+        // 站点行为字段，对齐原版 Site：
+        //   type=3 → 走 spider（jar 或 js 规则）；type=1 → 直接 GET api 并按 JSON 解析；
+        //   type=0 → 直接 GET api 并按 XML 解析。
+        // 订阅实测 157 站：type=3 共 142 个（108 csp + 34 js），type=1 共 14 个，type=0 共 1 个。
+        // 缺 type 时按 api 形态推断，避免被当成 0（XML）解析导致整站返回空。
+        val siteType = when {
+            o.has("type") -> o.optInt("type", 0)
+            api.startsWith("csp_") -> 3
+            api.contains(".js") -> 3
+            else -> 1
+        }
+        // searchable=0 的 29 站（配置中心、各网盘、体育等）原版不参与搜索，
+        // 混进搜索结果只会拖慢速度并返回空列表。
+        val searchable = o.optInt("searchable", 1)
+        val changeable = o.optInt("changeable", 1)
         return Site(
             key = key,
             name = name,
@@ -88,6 +103,10 @@ object SubscriptionParser {
             styleType = stType,
             styleRatio = stRatio,
             headerJson = Site.normalizeHeader(o),
+            siteType = siteType,
+            searchable = searchable,
+            changeable = changeable,
+            categoriesJson = Site.categoriesOf(o),
         )
     }
 

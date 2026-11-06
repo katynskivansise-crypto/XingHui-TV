@@ -31,6 +31,9 @@ object UrlConvert {
             lower.startsWith("assets://") -> BASE + "/" + url.substring(9)
             lower.startsWith("file://") -> BASE + "/file/" + url.substring(7)
             lower.startsWith("clan://") -> convert(fixUrl("file://" + url.substring(7)))
+            // 原版 player/extractor/Video.java：match "video" scheme，fetch = url.substring(8)。
+            // 这是 9 个 extractor 里唯一不需要闭源 SDK 的一个，纯去前缀即可。
+            lower.startsWith("video://") -> url.substring(8)
             else -> url
         }
     }

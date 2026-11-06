@@ -378,6 +378,15 @@ class PlayActivity : Activity() {
             Toast.makeText(this, "未解析到播放地址", Toast.LENGTH_LONG).show()
             return
         }
+        // 对齐原版 Players.java:605：
+        //   for (Map.Entry<String, String> header : headers.entrySet())
+        //       if (HttpHeaders.USER_AGENT.equalsIgnoreCase(header.getKey())) return headers;
+        //   headers.put(HttpHeaders.USER_AGENT, Setting.getUa());
+        // 播放接口通常只返回 Referer，没有 UA。media3 默认 UA 是 "ExoPlayerLib/1.3.1"，
+        // 多数采集站/CDN 见到这个标识会直接 403，表现为"能进详情、播放器一直转圈"。
+        // 原版走 OkHttpDataSource，继承的是用户设置的 UA，所以不会踩这个坑。
+        val effHeaders = if (headers.keys.any { it.equals("User-Agent", true) }) headers
+        else Settings(this).ua.takeIf { it.isNotBlank() }?.let { headers + ("User-Agent" to it) } ?: headers
         // 续播：同一集上次看到哪儿，就绪后跳过去
         pendingSeek = HistoryStore(this).position(vodId, epUrl)
         lastSavedPos = 0
@@ -389,8 +398,8 @@ class PlayActivity : Activity() {
             }
         }
         // header 与当前播放器不一致时重建（播放接口返回的 UA/Referer 需注入数据源）
-        if (headers != activeHeaders) {
-            rebuildPlayer(headers)
+        if (effHeaders != activeHeaders) {
+            rebuildPlayer(effHeaders)
         }
         player?.apply {
             val itemBuilder = MediaItem.Builder().setUri(url).setMediaId(url)

@@ -247,15 +247,28 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 },
                 // filter 传 true 对齐原版（VodFragment:184 / TypeFragment:157 均传 true）。
                 // 传 false 会让 drpy/json 规则走"无筛选"分支，部分规则在该分支下不返回封面字段。
-                "category" => match spider.category_content(
-                    extend.get("tid").map(String::as_str).unwrap_or(""),
-                    extend.get("pg").map(String::as_str).unwrap_or("1"),
-                    true,
-                    &extend,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
-                },
+                // extend 必须只含筛选项：param_map 里还混着 tid/pg/ids 这类控制参数，
+                // 整个 map 往下传会让站点收到 {"tid":"1","pg":"1"} 这种垃圾筛选值
+                // （原版 extend 只来自 Filter.getInit/FilterDialog 的 key-value）。
+                "category" => {
+                    const CTL: [&str; 7] = ["tid", "pg", "page", "ids", "key", "flag", "id"];
+                    let filter_extend: std::collections::HashMap<String, String> = extend
+                        .iter()
+                        .filter(|(k, _)| !CTL.contains(&k.as_str()))
+                        // iter() 给出的 k 是 &&String，直接 k.clone() 得到的是 &String，
+                        // collect 到 HashMap<String,String> 会类型不匹配，这里显式转成 String。
+                        .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+                        .collect();
+                    match spider.category_content(
+                        extend.get("tid").map(String::as_str).unwrap_or(""),
+                        extend.get("pg").map(String::as_str).unwrap_or("1"),
+                        true,
+                        &filter_extend,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
+                    }
+                }
                 "detail" => {
                     let ids: Vec<String> =
                         extend.get("ids").map(|s| s.split(',').map(String::from).collect()).unwrap_or_default();

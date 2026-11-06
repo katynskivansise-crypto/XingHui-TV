@@ -27,6 +27,18 @@ data class Site(
     val styleRatio: Float = 0f,
     /** 站点级请求头 JSON 文本（对象型 header 已序列化） */
     val headerJson: String = "",
+    /**
+     * 站点类型，对齐原版 Site.type：
+     * 0=XML 采集（ac=videolist）、1=JSON 采集（ac=detail，筛选取值走 f 参数）、
+     * 3=csp（spider.jar）、4=特殊 js。默认 0。
+     */
+    val siteType: Int = 0,
+    /** 是否可被搜索，对齐原版 Site.searchable：0=不可搜索，1=可搜索，2=用户关闭 */
+    val searchable: Int = 1,
+    /** 是否允许切换站点，对齐原版 Site.changeable */
+    val changeable: Int = 1,
+    /** 分类白名单 JSON 数组文本，对齐原版 Site.categories（为空表示不限制） */
+    val categoriesJson: String = "",
 ) {
     /** csp_ 源（CatVod 内置 Java 爬虫类，走 spider.jar 壳侧执行，对齐原项目 JarLoader） */
     fun isCsp(): Boolean = api.startsWith("csp_")
@@ -67,6 +79,33 @@ data class Site(
         }
     }
 
+    /** 是否可被搜索（对齐原版 Site.isSearchable：仅 searchable == 1 参与） */
+    fun isSearchable(): Boolean = searchable == 1
+
+    /** 分类白名单（对齐原版 Site.getCategories；为空表示不限制） */
+    fun categories(): List<String> {
+        if (categoriesJson.isBlank()) return emptyList()
+        return try {
+            val a = JSONArray(categoriesJson)
+            (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 按白名单过滤分类 tab，对齐原版 HomeActivity:185：
+     *   for (String cate : site.getCategories())
+     *       for (Class item : result.getTypes())
+     *           if (Trans.s2t(cate).equals(item.getTypeName())) items.add(item);
+     * 白名单为空时原样返回；否则只保留 name 命中的分类（保持原顺序与原版一致）。
+     */
+    fun filterCategories(tabs: List<Pair<String, String>>): List<Pair<String, String>> {
+        val allow = categories()
+        if (allow.isEmpty()) return tabs
+        return tabs.filter { p -> allow.any { it.equals(p.second, true) } }
+    }
+
     fun toJson(): String = JSONObject().apply {
         put("key", key)
         put("name", name)
@@ -79,6 +118,12 @@ data class Site(
         if (styleType.isNotBlank()) put("style_type", styleType)
         if (styleRatio > 0f) put("style_ratio", styleRatio.toDouble())
         if (headerJson.isNotBlank()) put("header", headerJson)
+        // 站点行为字段同样必须持久化：只存在内存里的话，杀掉 App 重进
+        // 分类白名单和"是否可搜索"就会回默认值（表现为重启后搜索多出一堆站）。
+        put("type", siteType)
+        put("searchable", searchable)
+        put("changeable", changeable)
+        if (categoriesJson.isNotBlank()) put("categories", categoriesJson)
     }.toString()
 
     companion object {
@@ -124,6 +169,13 @@ data class Site(
                 styleType = stType,
                 styleRatio = stRatio,
                 headerJson = header,
+                siteType = if (o.has("type")) o.optInt("type", 0) else inner?.optInt("type", 0) ?: 0,
+                searchable = if (o.has("searchable")) o.optInt("searchable", 1)
+                else inner?.optInt("searchable", 1) ?: 1,
+                changeable = if (o.has("changeable")) o.optInt("changeable", 1)
+                else inner?.optInt("changeable", 1) ?: 1,
+                categoriesJson = if (o.has("categories")) o.optString("categories", "")
+                else inner?.let { categoriesOf(it) } ?: "",
             )
         } catch (_: Exception) {
             null
@@ -135,6 +187,12 @@ data class Site(
             val type = st.optString("type", "").ifBlank { "rect" }
             val ratio = st.optDouble("ratio", 0.0).toFloat()
             return type to ratio
+        }
+
+        /** 分类白名单序列化（对齐 Site.categories：字符串数组） */
+        fun categoriesOf(o: JSONObject): String {
+            val a = o.optJSONArray("categories") ?: return ""
+            return a.toString()
         }
     }
 }

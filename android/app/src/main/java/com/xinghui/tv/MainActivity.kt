@@ -35,6 +35,12 @@ class MainActivity : Activity() {
     private lateinit var catList: RecyclerView
     private lateinit var vodList: RecyclerView
     private lateinit var vodAdapter: VideoAdapter
+    /**
+     * 首页「更新推荐」适配器。原版 VodFragment:134 用 VodPresenter(this, Style.list())，
+     * 而 Style.list() 的 ratio 为 0 → 实际按 0.75 竖版网格渲染，列数 = 4。
+     * 这里同样走 VideoAdapter，才能真正按 Product.getSpec 算格宽，而不是 item_lib 的 200dp 死值。
+     */
+    private lateinit var recommendAdapter: VideoAdapter
 
     /** 当前引擎站点 key */
     private var siteKey: String = ""
@@ -45,6 +51,8 @@ class MainActivity : Activity() {
     /** 站点返回的总页数；0 表示站点未告知（视为可一直翻） */
     private var pageCount: Int = 0
     private var loadingMore: Boolean = false
+    /** 最近一次"返回空列表"的页码；避免滚到底反复请求同一空页（对齐原版 endLoading 的 page--） */
+    private var lastEmptyPage: Int = 0
     private var lastSiteKey: String? = null
 
     private val categories = mutableListOf<Pair<String, String>>() // (type_id, type_name)
@@ -89,16 +97,19 @@ class MainActivity : Activity() {
         }
 
         // 首页更新推荐：对齐原版的多行海报网格（原版整个首页是一个竖向滚动的 VerticalGridView，
-        // 区块竖向堆叠、可以继续往下浏览）。之前是横向单行 LinearLayout，只显示一排、下方大片空白。
+        // 区块竖向堆叠、可以继续往下浏览）。
+        // 形态按 Style.list() → rect 0.75、列数 = uiColumns()，宽度由 VideoAdapter 按 Product.getSpec 计算；
+        // 之前用 LibAdapter + item_lib.xml（200dp 死宽 / 250dp 死高），卡片既不随屏幕也不随列数变化。
+        recommendAdapter = VideoAdapter(recommends, columns = uiColumns()) { vod ->
+            runCatching {
+                startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
+            }.onFailure { e ->
+                Toast.makeText(this@MainActivity, "无法打开详情：${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
         findViewById<RecyclerView>(R.id.recommendList).apply {
             layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
-            adapter = LibAdapter(recommends, { vod ->
-                runCatching {
-                    startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
-                }.onFailure { e ->
-                    Toast.makeText(this@MainActivity, "无法打开详情：${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }, { _ -> /* 推荐横排无删除模式 */ })
+            adapter = recommendAdapter
         }
 
         // 左上角站点名：点击弹出站点列表，选中即切换站源并自动刷新（对齐原版）
@@ -364,12 +375,25 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 界面大小 → 网格列数（对齐原版 Product：size 越大卡片越大、每行列数越少） */
-    private fun uiColumns(): Int = when (Settings(this).uiSize) {
-        0 -> 6
-        1 -> 5
-        2 -> 4
-        else -> 3
+    /**
+     * 界面大小 → 网格列数，对齐原版 Product.getColumn：
+     *   getColumn() = Math.abs(Setting.getSize() - 7)
+     *   Setting.getSize() 默认 2（档位 0..6），所以默认是 5 列，档位越大列越少。
+     * 之前这里写的是 0→6 / 1→5 / 2→4 / 其余→3，整体比原版少一列 ——
+     * 表现为卡片比原版大一圈、每行少一张，越往后偏差越大。
+     */
+    private fun uiColumns(): Int = (7 - Settings(this).uiSize).coerceAtLeast(1)
+
+    /**
+     * 横版再减一列，对齐 Product.getColumn(Style)：
+     *   return style.isLand() ? getColumn() - 1 : getColumn();
+     *   isLand() = isRect() && getRatio() > 1.0f
+     * 横版海报更宽，同屏放不下原来那么多列。
+     */
+    private fun uiColumnsFor(type: String, ratio: Float): Int {
+        val base = uiColumns()
+        val land = type.equals("rect", true) && ratio > 1.0f
+        return if (land) (base - 1).coerceAtLeast(1) else base
     }
 
     /**
@@ -379,13 +403,44 @@ class MainActivity : Activity() {
      */
     private fun applyCardStyle(site: Site) {
         val isList = site.isListStyle()
-        val cols = if (isList) 1 else uiColumns()
+        // 站点 styleRatio 缺省时按 rect 0.75 走（Style.getRatio 的兜底），
+        // 这样横版站点能正确触发"减一列"。
+        val rawRatio = if (site.styleRatio > 0f) site.styleRatio else 0.75f
+        val cols = if (isList) 1 else uiColumnsFor(if (site.styleType.isBlank()) "rect" else site.styleType, rawRatio)
         runCatching {
             vodAdapter.setStyle(site.styleType, site.styleRatio, cols)
             (findViewById<RecyclerView>(R.id.vodList)?.layoutManager as? GridLayoutManager)?.spanCount = cols
         }.onFailure { Log.e("XingHuiTV", "[style] 套用形态失败", it) }
         Log.e("XingHuiTV", "[style] ${site.name} type=${site.styleType.ifBlank { "rect" }} " +
             "ratio=${site.styleRatio} cols=$cols")
+    }
+
+    /**
+     * 单页形态覆盖，对齐原版：
+     *   VodFragment: Style style = result.getStyle(getStyle());
+     *   Result.getStyle → getList().get(0).getStyle(style)
+     *   Vod.getStyle  → 影片自带 style，否则 Style.get(land, circle, ratio)，再否则用站点 style
+     * 也就是「首条影片的形态决定整页」。land==1 → rect(默认 1.33)，circle==1 → oval(默认 1.0)，
+     * 都为 0 时原版 Style.get 返回 null、继续沿用站点形态，这里同样不动。
+     */
+    private fun applyPageStyle(first: Vod?) {
+        if (first == null) return
+        val type = when {
+            first.land == 1 -> "rect"
+            first.circle == 1 -> "oval"
+            else -> return   // 回落站点形态，不改
+        }
+        val ratio = when {
+            first.ratio > 0f -> first.ratio.coerceIn(0.1f, 4f)
+            first.land == 1 -> 1.33f
+            else -> 1.0f
+        }
+        runCatching {
+            val cols = uiColumnsFor(type, ratio)
+            vodAdapter.setStyle(type, ratio, cols)
+            (vodList.layoutManager as? GridLayoutManager)?.spanCount = cols
+            Log.e("XingHuiTV", "[style] 影片级覆盖 ${first.vodName} type=$type ratio=$ratio cols=$cols")
+        }.onFailure { Log.e("XingHuiTV", "[style] 影片级覆盖失败", it) }
     }
 
     /** 左上角站点名点击：弹出站点列表，选中即切换站源并自动刷新（对齐原版） */
@@ -429,7 +484,7 @@ class MainActivity : Activity() {
         recommends.clear()
         (catList.adapter as ListAdapter).notifyDataSetChanged()
         vodAdapter.notifyDataSetChanged()
-        (findViewById<RecyclerView>(R.id.recommendList).adapter as LibAdapter).notifyDataSetChanged()
+        (findViewById<RecyclerView>(R.id.recommendList).adapter as? VideoAdapter)?.notifyDataSetChanged()
         findViewById<View>(R.id.mainBody)?.visibility = View.GONE
         findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
         findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
@@ -508,6 +563,7 @@ class MainActivity : Activity() {
         currentPage = 0
         pageCount = 0
         loadingMore = false
+        lastEmptyPage = 0
         vods.clear()
         vodAdapter.notifyDataSetChanged()
         loadCategoryPage(tid, 1, append = false)
@@ -530,8 +586,15 @@ class MainActivity : Activity() {
                 json = if (site?.isCsp() == true) {
                     CspLoader.category(this, site, tid, page.toString(), extend)
                 } else {
-                    val params = JSONObject().put("tid", tid).put("pg", page.toString()).toString()
-                    Engine.execute("category", siteKey, params)
+                    // 非 csp（type=1 直连 / js+drpy）也要把筛选值传下去。
+                    // 原版 SiteViewModel:110 是 params.put("f", gson(extend))，只对 type==1；
+                    // js 站则走 spider.categoryContent(tid, pg, filter, extend) 直接带 extend。
+                    // 之前这里只放 tid/pg，导致 34 个 js 站 + 14 个 type=1 站的筛选栏点了完全没反应。
+                    // 引擎侧会剔除 tid/pg 这类控制参数，只把真正的筛选项当 extend。
+                    val params = JSONObject()
+                    extend.forEach { (k, v) -> params.put(k, v) }
+                    params.put("tid", tid).put("pg", page.toString())
+                    Engine.execute("category", siteKey, params.toString())
                 }
             } catch (e: Exception) {
                 err = e.message
@@ -555,6 +618,8 @@ class MainActivity : Activity() {
         if (currentTid.isBlank() || vods.isEmpty()) return
         // 原版 setEnable：page < pageCount || pageCount == 0 时才允许继续翻
         if (pageCount > 0 && currentPage >= pageCount) return
+        // 上一页已经确认为空，就别再请求它（原版 endLoading 里的 page-- 就是这个意思）
+        if (currentPage + 1 == lastEmptyPage && lastEmptyPage > 1) return
         loadCategoryPage(currentTid, currentPage + 1, append = true)
     }
 
@@ -693,6 +758,23 @@ class MainActivity : Activity() {
             }
         }.onFailure { Log.e("XingHuiTV", "[parseHome] class 字段解析失败 json前200: ${json.take(200)}", it) }
 
+        // 分类白名单，对齐原版 HomeActivity:185：
+        //   for (String cate : site.getCategories())
+        //       for (Class item : result.getTypes())
+        //           if (Trans.s2t(cate).equals(item.getTypeName())) items.add(item);
+        // 订阅里 8/157 站带 categories（多是直连采集站，接口会返回全站分类），
+        // 不过滤就会多出一排站点本身不返回内容的分类 tab，点进去全空。
+        runCatching {
+            val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
+            if (site != null && site.categories().isNotEmpty()) {
+                val filtered = site.filterCategories(categories)
+                Log.e("XingHuiTV", "[parseHome] 分类白名单 ${site.categories().size} 项，" +
+                    "原 ${categories.size} 个 → 保留 ${filtered.size} 个")
+                categories.clear()
+                categories.addAll(filtered)
+            }
+        }
+
         // 分类筛选（对齐原版 Result.filters：{type_id: [{key,name,value:[{n,v}]}]}）
         parseFilters(root)
 
@@ -738,7 +820,7 @@ class MainActivity : Activity() {
     private fun refreshLists() {
         (catList.adapter as ListAdapter?)?.notifyDataSetChanged()
         vodAdapter.notifyDataSetChanged()
-        (findViewById<RecyclerView>(R.id.recommendList)?.adapter as LibAdapter?)?.notifyDataSetChanged()
+        (findViewById<RecyclerView>(R.id.recommendList)?.adapter as? VideoAdapter)?.notifyDataSetChanged()
     }
 
     private fun updateTitle() {
@@ -780,8 +862,31 @@ class MainActivity : Activity() {
         } else {
             vodAdapter.notifyDataSetChanged()
         }
+        // 对齐原版 CustomScroller.endLoading：
+        //   if (result.getList().isEmpty()) page--;
+        // 目的是记住"这一页是空的"，别在滚到底时反复请求同一空页。
+        if (append && parsed.isEmpty()) lastEmptyPage = currentPage
+        // 首条影片的形态决定整页（原版 VodFragment: result.getStyle(getStyle())）。
+        // 只在首页（非追加）时应用，避免翻页过程中反复改列数导致焦点跳动。
+        if (!append && parsed.isNotEmpty()) applyPageStyle(parsed.first())
         findViewById<TextView>(R.id.labelVod).text = "影片 ${vods.size} 条"
-        showEmpty(if (vods.isEmpty()) "该分类暂无内容（接口返回空）" else "")
+        // 空列表时把接口原始返回摘要直接显示在页面上。
+        // TV 上抓 logcat 麻烦，截图即可区分三种情况：
+        //   list.len=-1  → 返回体里根本没有 list 字段（站点的 categoryContent 没按 TVBox 格式返回）
+        //   list.len=0   → 接口确实返回空（配置型/搜索型站点的正常表现）
+        //   code!=0      → 接口报错，msg 会带原因
+        if (vods.isEmpty()) {
+            val diag = runCatching {
+                val o = JSONObject(json)
+                val n = o.optJSONArray("list")?.length() ?: -1
+                val code = o.optInt("code", 0)
+                val msg = o.optString("msg")
+                "list.len=$n code=$code" + (if (msg.isNotBlank()) " msg=${msg.take(60)}" else "")
+            }.getOrDefault("raw=${json.take(80)}")
+            showEmpty("该分类暂无内容（接口返回空）\n$diag")
+        } else {
+            showEmpty("")
+        }
     }
 
     private fun readAsset(name: String): String =

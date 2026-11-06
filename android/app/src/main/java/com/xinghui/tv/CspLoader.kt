@@ -502,9 +502,12 @@ object CspLoader {
         }
     }
 
-    /** 聚合搜索：当前订阅里所有 csp_ 站点逐个搜并合并（keepAll 不去重） */
+    /** 聚合搜索：当前订阅里所有可搜索的 csp_ 站点逐个搜并合并（keepAll 不去重） */
     fun searchAll(context: Context, store: SubscriptionStore, key: String): String {
-        val cspSites = store.sites().filter { it.isCsp() }
+        // 对齐原版 Site.isSearchable()：订阅里 29/157 站标了 searchable=0
+        // （配置中心、各网盘、体育、新片预告等）。这类站没有搜索接口，
+        // 参与聚合搜索只会让每个关键词多等一轮网络请求、再返回空列表。
+        val cspSites = store.sites().filter { it.isCsp() && it.isSearchable() }
         if (cspSites.isEmpty()) return "{\"list\":[]}"
         val merged = JSONObject()
         val list = JSONArray()
