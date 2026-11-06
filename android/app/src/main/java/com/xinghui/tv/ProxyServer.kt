@@ -10,7 +10,7 @@ import java.io.InputStream
 import java.net.URLDecoder
 
 /**
- * 本地服务（对齐原版 server/Nano.java 的路由分派 + server/process/*）。
+ * 本地服务（对齐原版 server/Nano.java 的路由分派 + server/process 下各 Process 实现）。
  *
  * 原版 Nano 在 serve() 里按路径前缀分派到 6 个 Process，再兜底当 assets 读：
  *   /action   Action      —— 遥控/投屏动作
