@@ -8,23 +8,45 @@ import android.os.Bundle
 import android.text.method.LinkMovementMethod
 import android.view.View
 import android.view.Window
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import org.json.JSONObject
 
 /**
- * 详情页：展示影片信息 + 播放线路/集数列表（遥控器切换）。
- * 点击线路 → 展开集数 → 点击集数 → 进入播放页。
+ * 详情页：影片信息 + 内嵌播放器小窗 + 集数网格（对齐原版 VideoActivity 的合一形态）。
+ * 点播放器小窗 → 全屏；点集数 → 换集；点「当前正在播的那集」→ 全屏。
  */
 class DetailActivity : Activity() {
 
     private lateinit var store: HistoryStore
     private var vod: Vod? = null
     private var currentLine: PlayLine? = null
+
+    /** 内嵌播放器（对齐原版 mBinding.video） */
+    private var player: ExoPlayer? = null
+    private lateinit var inlineView: PlayerView
+    private var inlineFullscreen = false
+    /** 当前正在播放的集下标；-1 表示还没起播 */
+    private var playingIdx = -1
+    /** 当前线路的集数数组，供"点当前那集进全屏"判断用 */
+    private var episodes: List<Pair<String, String>> = emptyList()
+    /** 是否倒序（原版「倒序」按钮） */
+    private var epOrder = false
+    /** 当前所在分段（0 表示 1-40 那一段） */
+    private var activeSection = 0
+    /** 原版每段 40 集（1-40 / 41-80 / 81-102） */
+    private val GROUP_SIZE = 40
 
     private val pairs = mutableListOf<Pair<String, String>>() // (key, 显示名)
     private lateinit var adapter: ListAdapter
@@ -37,13 +59,33 @@ class DetailActivity : Activity() {
         val vodId = intent.getStringExtra("vod_id") ?: ""
 
         val list = findViewById<RecyclerView>(R.id.detailList)
-        adapter = ListAdapter(pairs) { key -> onPick(key) }
+        // 集数聚焦用黄字（对齐原版 01[1080P] 的高亮），分类条等其它地方不受影响
+        adapter = ListAdapter(pairs, null, Color.rgb(255, 204, 0)) { key -> onPick(key) }
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
 
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<View>(R.id.btnFav).setOnClickListener { toggleFav() }
         findViewById<View>(R.id.btnDesc).setOnClickListener { showDescDialog() }
+        findViewById<View>(R.id.btnSource).setOnClickListener { switchSource() }
+        // 倒序：整段集数反向排（原版「倒序 →」那个按钮）
+        findViewById<View>(R.id.btnOrder).setOnClickListener {
+            epOrder = !epOrder
+            if (episodes.size > GROUP_SIZE) activeSection = 0
+            rebuildGroups()
+            showGroup(activeSection * GROUP_SIZE)
+            Toast.makeText(this, if (epOrder) "已倒序" else "已正序", Toast.LENGTH_SHORT).show()
+        }
+
+        // 对齐原版 VideoActivity：那里播放器和集数在同一页，点上方视频框即进全屏。
+        // 我们是 DetailActivity + PlayActivity 两页，就在这里补上同样的直达：
+        // 点海报→播第一集，点任意集数→直接全屏播那一集（省掉「先看详情、再点进去」这一步）。
+        // 对齐原版 VideoActivity：视频框和集数在同一页，点框进全屏（onVideo 的语义）
+        inlineView = findViewById(R.id.inlinePlayer)
+        player = ExoPlayer.Builder(this).build().also { inlineView.player = it }
+        findViewById<View>(R.id.playerBox).setOnClickListener {
+            if (!inlineFullscreen) enterInlineFullscreen()
+        }
 
         Thread {
             val store = SubscriptionStore(this)
@@ -80,38 +122,107 @@ class DetailActivity : Activity() {
         currentLine = null
 
         findViewById<TextView>(R.id.detailName).text = v.vodName
-        val info = listOf(v.vodYear, v.vodArea, v.vodRemarks).filter { it.isNotBlank() }.joinToString(" · ")
+        // 对齐原版信息行：「站源: xxx   年份: xxx   地区: xxx」，标签与值分段，
+        // 之前用「 · 」拼成一行，读不出哪段是什么。
+        val siteName = SubscriptionStore(this).currentSite()?.name.orEmpty()
+        val info = buildString {
+            if (siteName.isNotBlank()) append("站源: ").append(siteName)
+            if (v.vodYear.isNotBlank()) { if (isNotEmpty()) append("    "); append("年份: ").append(v.vodYear) }
+            if (v.vodArea.isNotBlank()) { if (isNotEmpty()) append("    "); append("地区: ").append(v.vodArea) }
+            if (v.vodRemarks.isNotBlank() && v.vodRemarks != v.vodYear) {
+                if (isNotEmpty()) append("    "); append("更新: ").append(v.vodRemarks)
+            }
+        }
         findViewById<TextView>(R.id.detailInfo).text = info.ifBlank { "暂无信息" }
         findViewById<TextView>(R.id.detailDesc).text = v.vodContent.ifBlank { "暂无简介" }
         if (Settings(this).showPoster) {
             AsyncImageLoader.load(findViewById(R.id.detailImage), v.vodPic)
         }
-        findViewById<TextView>(R.id.btnFav).text = if (store.isFavorite(v.vodId)) "取消收藏" else "收藏"
+        applyFavState(store.isFavorite(v.vodId))
 
         pairs.clear()
         val lines = v.parseLines()
         if (lines.isEmpty()) {
+            showLines = true
             pairs.add("none" to "无播放线路")
-        } else {
-            lines.forEachIndexed { i, line -> pairs.add("L:$i" to line.name) }
+            findViewById<TextView>(R.id.detailListLabel).text = "播放线路（0）"
+            findViewById<RecyclerView>(R.id.detailList).layoutManager = LinearLayoutManager(this)
+            adapter.notifyDataSetChanged()
+            return
         }
-        findViewById<TextView>(R.id.detailListLabel).text = "播放线路（${lines.size}）"
-        findViewById<RecyclerView>(R.id.detailList).layoutManager = LinearLayoutManager(this)
-        adapter.notifyDataSetChanged()
+        // 对齐原版：进详情页直接展开第一条线路的集数网格，焦点落在第一集，
+        // 按确认即起播。原版没有「先选线路、再选集数」这一层，多条线路用「换源」切换。
+        currentLine = lines.first()
+        showLines = false
+        renderEpisodes(lines.first())
+        findViewById<RecyclerView>(R.id.detailList)?.let { rv ->
+            rv.post { rv.requestFocus() }
+        }
     }
 
     /** 显示当前线路的集数列表 */
     private fun renderEpisodes(line: PlayLine) {
-        pairs.clear()
-        if (line.episodes.isEmpty()) {
-            pairs.add("none" to "无集数")
-        } else {
-            line.episodes.forEachIndexed { i, (name, _) ->
-                pairs.add("E:$i" to name)
-            }
+        episodes = line.episodes
+        // 原版这一行的文案就是线路名本身（截图里的「瓜子视频」），不是「集数（...）」
+        findViewById<TextView>(R.id.detailListLabel).text = line.name
+        findViewById<RecyclerView>(R.id.detailList).layoutManager = GridLayoutManager(this, 4)
+        rebuildGroups()
+        showGroup(0)
+    }
+
+    /** 重建分段按钮：原版按 40 集一段（1-40 / 41-80 / 81-102），集数少就不显示这一行 */
+    private fun rebuildGroups() {
+        val box = findViewById<android.widget.LinearLayout>(R.id.groupItems)
+        box.removeAllViews()
+        val row = findViewById<View>(R.id.groupRow)
+        if (episodes.size <= GROUP_SIZE) {
+            row?.visibility = View.GONE
+            return
         }
-        findViewById<TextView>(R.id.detailListLabel).text = "集数（${line.name}）"
-        findViewById<RecyclerView>(R.id.detailList).layoutManager = GridLayoutManager(this, 6)
+        row?.visibility = View.VISIBLE
+        val sections = ((episodes.size + GROUP_SIZE - 1) / GROUP_SIZE)
+        // 倒序时后缀小的段排在前面，和原版「倒序」的语义一致
+        val list = if (epOrder) (sections - 1 downTo 0) else (0 until sections)
+        for (s in list) {
+            val start = s * GROUP_SIZE
+            val end = minOf(start + GROUP_SIZE, episodes.size)
+            val label = "${start + 1}-$end"
+            val btn = TextView(this).apply {
+                text = label
+                textSize = 15f
+                setTextColor(if (s == activeSection) 0xFFFFCC00.toInt() else 0xFFFFFFFF.toInt())
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                isFocusable = true
+                isClickable = true
+                background = getDrawable(R.drawable.selector_tv_btn)
+                setOnClickListener {
+                    activeSection = s
+                    rebuildGroups()
+                    showGroup(s * GROUP_SIZE)
+                    (it as TextView).requestFocus()
+                }
+            }
+            box.addView(btn)
+        }
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 只展示 [start, start+GROUP_SIZE) 这一段集数；倒序时在该段内反向排列 */
+    private fun showGroup(start: Int) {
+        pairs.clear()
+        if (episodes.isEmpty()) {
+            pairs.add("none" to "无集数")
+            adapter.notifyDataSetChanged()
+            return
+        }
+        val from = start.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+        val to = minOf(from + GROUP_SIZE, episodes.size)
+        if (epOrder) {
+            for (i in to - 1 downTo from) pairs.add("E:$i" to episodes[i].first)
+        } else {
+            for (i in from until to) pairs.add("E:$i" to episodes[i].first)
+        }
         adapter.notifyDataSetChanged()
     }
 
@@ -129,17 +240,164 @@ class DetailActivity : Activity() {
             }
             !showLines && key.startsWith("E:") -> {
                 val idx = key.removePrefix("E:").toIntOrNull() ?: return
-                val line = currentLine ?: return
-                val ep = line.episodes.getOrNull(idx) ?: return
-                startActivity(Intent(this, PlayActivity::class.java).apply {
-                    putExtra("vod_id", v.vodId)
-                    putExtra("vod_name", v.vodName)
-                    putExtra("vod_pic", v.vodPic)
-                    putExtra("flag", line.name)
-                    putExtra("ep_url", ep.second)
-                })
+                // 对齐原版 shouldEnterFullscreen：点到「正在播的这一集」就进全屏，
+                // 点到别的集才是换集。所以集数上按一次是换集，再按一次是全屏。
+                if (idx == playingIdx) {
+                    enterInlineFullscreen()
+                    return
+                }
+                playInline(idx)
             }
         }
+    }
+
+    /** 换源：在当前影片的各条播放线路之间轮换（对齐原版 onChange → 重新取播放地址） */
+    private fun switchSource() {
+        val v = vod ?: return
+        val lines = v.parseLines()
+        if (lines.size <= 1) {
+            Toast.makeText(this, "该影片只有 ${lines.size} 个线路，无处可换", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cur = lines.indexOfFirst { it.name == currentLine?.name }.let { if (it < 0) 0 else it }
+        val next = lines[(cur + 1) % lines.size]
+        currentLine = next
+        renderEpisodes(next)
+        findViewById<TextView>(R.id.detailListLabel).text = next.name
+        Toast.makeText(this, "已换源：${next.name}", Toast.LENGTH_SHORT).show()
+        // 正在播就接着播同一集号的另一线路，否则只切换集数列表
+        if (playingIdx >= 0) playInline(playingIdx)
+    }
+
+    /** 当前线路的第 idx 集（对齐原版 setEpisodeActivated → onRefresh） */
+    private fun playInline(idx: Int) {
+        val v = vod ?: return
+        val line = currentLine ?: v.parseLines().firstOrNull() ?: return
+        val ep = line.episodes.getOrNull(idx) ?: return
+        playingIdx = idx
+        inlineView.visibility = View.VISIBLE
+        Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
+        Thread {
+            var url = ""
+            var err = ""
+            runCatching {
+                val store = SubscriptionStore(this)
+                val site = store.sites().firstOrNull { it.key == store.currentKey() }
+                if (site == null) { err = "无当前站点"; return@runCatching }
+                val play = if (site.isCsp()) {
+                    CspLoader.player(this, site, line.name, ep.second.ifBlank { v.vodId })
+                } else {
+                    val params = JSONObject().put("flag", line.name)
+                        .put("id", ep.second.ifBlank { v.vodId }).toString()
+                    Engine.execute("player", store.currentKey() ?: "", params)
+                }
+                url = extractPlayUrl(play)
+                if (url.isBlank()) err = "解析返回空 url"
+            }.onFailure { err = it.message ?: it.javaClass.simpleName }
+            runOnUiThread {
+                if (url.isBlank()) {
+                    // 解析不出来就退回独立播放器，让它走完整的嗅探/迅雷链路
+                    Toast.makeText(this, "内嵌解析失败（$err），转播放页", Toast.LENGTH_SHORT).show()
+                    openPlayPage(idx)
+                    return@runOnUiThread
+                }
+                player?.setMediaItem(MediaItem.Builder().setUri(url).build())
+                player?.prepare()
+                player?.play()
+            }
+        }.start()
+    }
+
+    /** 从 playerContent 的 JSON 里取第一个可播地址（url 可能是字符串/扁平数组/对象） */
+    private fun extractPlayUrl(play: String): String {
+        if (play.isBlank()) return ""
+        runCatching {
+            val obj = JSONObject(play)
+            return when (val u = obj.opt("url")) {
+                is String -> u
+                is org.json.JSONArray -> {
+                    // 每两个一组：名称, 地址（与原版 Result.parse 一致）
+                    var i = 0
+                    while (i + 1 < u.length()) {
+                        val addr = u.optString(i + 1, "")
+                        if (addr.startsWith("http")) return addr
+                        i += 2
+                    }
+                    ""
+                }
+                is JSONObject -> {
+                    val vals = u.optJSONArray("values") ?: return ""
+                    for (i in 0 until vals.length()) {
+                        val addr = vals.optJSONObject(i)?.optString("v", "").orEmpty()
+                        if (addr.startsWith("http")) return addr
+                    }
+                    ""
+                }
+                else -> ""
+            }
+        }
+        return ""
+    }
+
+    /** 转独立播放页（完整链路兜底） */
+    private fun openPlayPage(idx: Int) {
+        val v = vod ?: return
+        val line = currentLine ?: return
+        val ep = line.episodes.getOrNull(idx) ?: return
+        startActivity(Intent(this, PlayActivity::class.java).apply {
+            putExtra("vod_id", v.vodId)
+            putExtra("vod_name", v.vodName)
+            putExtra("vod_pic", v.vodPic)
+            putExtra("flag", line.name)
+            putExtra("ep_url", ep.second)
+        })
+    }
+
+    /** 进全屏：播放器铺满整页，其余区域隐藏（对齐原版 enterFullscreen） */
+    private fun enterInlineFullscreen() {
+        if (inlineFullscreen) return
+        inlineFullscreen = true
+        inlineView.visibility = View.VISIBLE
+        val box = findViewById<FrameLayout>(R.id.playerBox)
+        box.layoutParams = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+        )
+        listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.detailListLabel, R.id.detailList).forEach {
+            findViewById<View>(it)?.visibility = View.GONE
+        }
+        box.requestFocus()
+    }
+
+    /** 退出全屏：恢复小窗与其它区域（原版退出全屏走返回键，这里同样） */
+    private fun exitInlineFullscreen() {
+        if (!inlineFullscreen) return
+        inlineFullscreen = false
+        val box = findViewById<FrameLayout>(R.id.playerBox)
+        box.layoutParams = android.widget.LinearLayout.LayoutParams(
+            0, (270 * resources.displayMetrics.density).toInt(), 1.2f
+        )
+        listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.detailListLabel, R.id.detailList).forEach {
+            findViewById<View>(it)?.visibility = View.VISIBLE
+        }
+        findViewById<View>(R.id.detailList).requestFocus()
+    }
+
+    override fun onBackPressed() {
+        // 全屏时返回键先退全屏，不直接退出页面（对齐原版 mKeyDown 的返回语义）
+        if (inlineFullscreen) {
+            exitInlineFullscreen()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    override fun onDestroy() {
+        player?.release()
+        player = null
+        super.onDestroy()
     }
 
     /** 简介全文弹窗（支持点击链接），对应原项目 DescDialog */
@@ -162,7 +420,18 @@ class DetailActivity : Activity() {
     private fun toggleFav() {
         val v = vod ?: return
         val fav = store.toggleFavorite(v.vodId, v.vodName, v.vodPic, v.vodRemarks)
-        findViewById<TextView>(R.id.btnFav).text = if (fav) "取消收藏" else "收藏"
+        applyFavState(fav)
         Toast.makeText(this, if (fav) "已收藏" else "已取消收藏", Toast.LENGTH_SHORT).show()
+    }
+
+    /** 收藏态：文字固定「收藏」，靠图标切换（原版 keep 就是 off/on 两个矢量，实心星表示已收藏） */
+    private fun applyFavState(fav: Boolean) {
+        val btn = findViewById<TextView>(R.id.btnFav) ?: return
+        btn.text = "收藏"
+        btn.setCompoundDrawablesWithIntrinsicBounds(
+            if (fav) R.drawable.ic_detail_keep_on else R.drawable.ic_detail_keep_off,
+            0, 0, 0
+        )
+        btn.compoundDrawablePadding = (6 * resources.displayMetrics.density).toInt()
     }
 }

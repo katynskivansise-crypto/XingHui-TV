@@ -13,6 +13,8 @@ import androidx.recyclerview.widget.RecyclerView
 class ListAdapter(
     private val items: List<Pair<String, String>>,
     private val onLongClick: ((String) -> Unit)? = null,
+    /** 聚焦时的文字色；0 表示沿用原来的纯背景高亮（分类条等不动） */
+    private val focusTextColor: Int = 0,
     private val onClick: (String) -> Unit,
 ) : RecyclerView.Adapter<ListAdapter.VH>() {
 
@@ -51,6 +53,12 @@ class ListAdapter(
             true
         }
         holder.text.setOnFocusChangeListener { v, has ->
+            // 对齐原版集数：聚焦那格是黄字，其余白字
+            if (focusTextColor != 0) {
+                (v as TextView).setTextColor(
+                    if (has) focusTextColor else android.graphics.Color.WHITE
+                )
+            }
             v.setBackgroundColor(
                 if (has) 0xFF335588.toInt() else android.graphics.Color.TRANSPARENT
             )
