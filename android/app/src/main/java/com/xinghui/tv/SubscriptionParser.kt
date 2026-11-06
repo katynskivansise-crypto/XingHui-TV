@@ -61,11 +61,33 @@ object SubscriptionParser {
         val key = o.optString("key").ifBlank { "site$index" }
         val name = o.optString("name").ifBlank { key }
         val api = o.optString("api", "")
-        val ext = o.optString("ext", "")
+        // ext 对齐原版 gson 的 ExtAdapter：字符串原样，对象/数组序列化成 JSON 文本。
+        // 之前直接 optString("ext")，遇到对象型 ext（苹果站等加密站）会返回空串，
+        // spider.init(ctx, "") 拿不到 appName/publicKey/dataKey 等配置，
+        // 表现为首页还能出内容、分类页却缺字段（海报空白）。
+        // 订阅实测：157 站中 42 站 ext 是对象。
+        val ext = when (val e = o.opt("ext")) {
+            is String -> e
+            is JSONObject -> e.toString()
+            is JSONArray -> e.toString()
+            else -> ""
+        }
         // 对齐原项目：csp_ 站点自带 jar（订阅内若有 site.jar 优先，否则用订阅顶层 spider）
         val ownJar = o.optString("jar", "")
         val jar = ownJar.ifBlank { if (api.startsWith("csp_")) defaultJar else "" }
-        return Site(key = key, name = name, api = api, ext = ext, siteJson = o.toString(), jar = jar)
+        // 卡片形态（订阅里 51/157 站带 style，如体育站 type=list、影视站 ratio=1.33）
+        val (stType, stRatio) = Site.styleOf(o)
+        return Site(
+            key = key,
+            name = name,
+            api = api,
+            ext = ext,
+            siteJson = o.toString(),
+            jar = jar,
+            styleType = stType,
+            styleRatio = stRatio,
+            headerJson = Site.normalizeHeader(o),
+        )
     }
 
     /**

@@ -25,15 +25,22 @@ data class Vod(
         fun fromJson(o: JSONObject): Vod = Vod(
             vodId = o.optString("vod_id"),
             vodName = o.optString("vod_name"),
-            // 封面字段兜底：jar 源（AppDrama 等）返回的字段名并不统一
-            // —— 首页 converUrl、推荐 coverImage、部分站点 pic/cover，
-            // 只认 vod_pic 会让海报区整片空白（标题与角标却有值）。
+            // 封面字段兜底：jar 源（AppDrama 等）返回的字段名并不统一。
+            // 实测现象：同一站点首页有图、分类页整片空白 —— 标题与角标都有值、只有图取不到，
+            // 说明两套接口组装的字段名不同。dex 里同时存在 vod_pic / vodPic / vod_pic_thumb /
+            // cover / image / poster，全部纳入兜底，主图优先、缩略图其次。
             vodPic = o.optString("vod_pic")
                 .ifBlank { o.optString("pic") }
+                .ifBlank { o.optString("vodPic") }
+                .ifBlank { o.optString("vod_pic_url") }
                 .ifBlank { o.optString("coverImage") }
                 .ifBlank { o.optString("converUrl") }
+                .ifBlank { o.optString("vod_pic_thumb") }
                 .ifBlank { o.optString("cover") }
-                .ifBlank { o.optString("vod_pic_url") },
+                .ifBlank { o.optString("poster") }
+                .ifBlank { o.optString("image") }
+                .ifBlank { o.optString("img") }
+                .ifBlank { o.optString("thumbnail") },
             vodRemarks = o.optString("vod_remarks"),
             vodYear = o.optString("vod_year"),
             vodArea = o.optString("vod_area"),

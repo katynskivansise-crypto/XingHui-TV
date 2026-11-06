@@ -245,10 +245,12 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     Ok(s) => s,
                     Err(e) => serde_json::json!({"code":-1,"msg":e}).to_string(),
                 },
+                // filter 传 true 对齐原版（VodFragment:184 / TypeFragment:157 均传 true）。
+                // 传 false 会让 drpy/json 规则走"无筛选"分支，部分规则在该分支下不返回封面字段。
                 "category" => match spider.category_content(
                     extend.get("tid").map(String::as_str).unwrap_or(""),
                     extend.get("pg").map(String::as_str).unwrap_or("1"),
-                    false,
+                    true,
                     &extend,
                 ) {
                     Ok(s) => s,

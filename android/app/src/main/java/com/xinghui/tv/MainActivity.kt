@@ -38,6 +38,13 @@ class MainActivity : Activity() {
 
     /** 当前引擎站点 key */
     private var siteKey: String = ""
+
+    /** 当前分类翻页状态（对齐原版 CustomScroller：滚到底部自动加载下一页） */
+    private var currentTid: String = ""
+    private var currentPage: Int = 0
+    /** 站点返回的总页数；0 表示站点未告知（视为可一直翻） */
+    private var pageCount: Int = 0
+    private var loadingMore: Boolean = false
     private var lastSiteKey: String? = null
 
     private val categories = mutableListOf<Pair<String, String>>() // (type_id, type_name)
@@ -46,8 +53,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 本地播放代理（csp/js 站 /proxy 播放链路）；启动失败不影响主流程
-        runCatching { ProxyServer.startServer() }
+        // 本地服务（csp/js 站 /proxy 播放链路 + /file 本地文件 + assets 兜底）；启动失败不影响主流程
+        runCatching { ProxyServer.startServer(this) }
             .onFailure { Log.e("XingHuiTV", "[proxy.server] startServer 异常", it) }
         setContentView(R.layout.activity_main)
         // 壁纸（对齐原版 BaseActivity.refreshWall：只设 window 背景，不额外加 View）
@@ -70,6 +77,15 @@ class MainActivity : Activity() {
         vodList = findViewById<RecyclerView>(R.id.vodList).apply {
             layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
             adapter = vodAdapter
+            // 对齐原版 CustomScroller：滚到倒数第 3 个就开始预加载下一页
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                    if (dy <= 0) return
+                    val lm = rv.layoutManager as? GridLayoutManager ?: return
+                    val last = lm.findLastVisibleItemPosition()
+                    if (last >= vods.size - 3) maybeLoadMore()
+                }
+            })
         }
 
         // 首页更新推荐：对齐原版的多行海报网格（原版整个首页是一个竖向滚动的 VerticalGridView，
@@ -356,6 +372,22 @@ class MainActivity : Activity() {
         else -> 3
     }
 
+    /**
+     * 按站点 Style 应用卡片形态（对齐原版 bean/Style + Product.getSpec）。
+     * - list：整行一条横卡（体育/网盘/听书站），spanCount 强制 1
+     * - rect/oval：网格，海报高 = 格宽 / ratio（默认 rect 0.75 竖版、oval 1.0 正方）
+     */
+    private fun applyCardStyle(site: Site) {
+        val isList = site.isListStyle()
+        val cols = if (isList) 1 else uiColumns()
+        runCatching {
+            vodAdapter.setStyle(site.styleType, site.styleRatio, cols)
+            (findViewById<RecyclerView>(R.id.vodList)?.layoutManager as? GridLayoutManager)?.spanCount = cols
+        }.onFailure { Log.e("XingHuiTV", "[style] 套用形态失败", it) }
+        Log.e("XingHuiTV", "[style] ${site.name} type=${site.styleType.ifBlank { "rect" }} " +
+            "ratio=${site.styleRatio} cols=$cols")
+    }
+
     /** 左上角站点名点击：弹出站点列表，选中即切换站源并自动刷新（对齐原版） */
     private fun showSitePicker() {
         val store = SubscriptionStore(this)
@@ -471,18 +503,59 @@ class MainActivity : Activity() {
     private fun onCategory(tid: String) {
         // 切分类先刷新该分类的筛选栏，再把用户已选条件带进请求（原版 FilterDialog → extend）
         renderFilters(tid)
+        // 切分类 = 回到第 1 页并清空旧列表（原版 VodFragment.mPages.reset）
+        currentTid = tid
+        currentPage = 0
+        pageCount = 0
+        loadingMore = false
+        vods.clear()
+        vodAdapter.notifyDataSetChanged()
+        loadCategoryPage(tid, 1, append = false)
+    }
+
+    /**
+     * 拉取分类页第 page 页。
+     * append=false 覆盖列表（切分类/切筛选），append=true 追加（滚到底翻页）。
+     */
+    private fun loadCategoryPage(tid: String, page: Int, append: Boolean) {
+        if (loadingMore) return
+        loadingMore = true
         val extend = HashMap(selectedFilters[tid].orEmpty())
-        Log.e("XingHuiTV", "[category] tid=$tid extend=$extend")
+        Log.e("XingHuiTV", "[category] tid=$tid pg=$page append=$append extend=$extend")
         Thread {
-            val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
-            val cat = if (site?.isCsp() == true) {
-                CspLoader.category(this, site, tid, "1", extend)
-            } else {
-                val params = JSONObject().put("tid", tid).put("pg", "1").toString()
-                Engine.execute("category", siteKey, params)
+            var json = ""
+            var err: String? = null
+            try {
+                val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
+                json = if (site?.isCsp() == true) {
+                    CspLoader.category(this, site, tid, page.toString(), extend)
+                } else {
+                    val params = JSONObject().put("tid", tid).put("pg", page.toString()).toString()
+                    Engine.execute("category", siteKey, params)
+                }
+            } catch (e: Exception) {
+                err = e.message
+                Log.e("XingHuiTV", "[category] 请求失败 tid=$tid pg=$page", e)
             }
-            runOnUiThread { parseCategory(cat) }
+            runOnUiThread {
+                loadingMore = false
+                if (err != null) {
+                    if (!append) showEmpty("加载失败：$err")
+                    return@runOnUiThread
+                }
+                currentPage = page
+                parseCategory(json, append)
+            }
         }.start()
+    }
+
+    /** 滚到接近底部时加载下一页（对齐原版 CustomScroller.onLoadMore） */
+    private fun maybeLoadMore() {
+        if (loadingMore) return
+        if (currentTid.isBlank() || vods.isEmpty()) return
+        // 原版 setEnable：page < pageCount || pageCount == 0 时才允许继续翻
+        if (pageCount > 0 && currentPage >= pageCount) return
+        loadCategoryPage(currentTid, currentPage + 1, append = true)
     }
 
     // ---------- 分类筛选（对齐原版 Result.filters / FilterDialog） ----------
@@ -490,7 +563,8 @@ class MainActivity : Activity() {
     private data class FilterGroup(
         val key: String,
         val name: String,
-        val values: List<Pair<String, String>>   // (显示名, 传给站点的值)
+        val values: List<Pair<String, String>>,  // (显示名, 传给站点的值)
+        val init: String = ""                    // 原版 Filter.init：该组的默认选中值
     )
 
     private val filtersByType = mutableMapOf<String, List<FilterGroup>>()
@@ -514,11 +588,19 @@ class MainActivity : Activity() {
                         va.optJSONObject(j)?.let { v -> v.optString("n") to v.optString("v") }
                     }
                 } ?: emptyList()
-                FilterGroup(key, f.optString("name").ifBlank { key }, vals)
+                FilterGroup(key, f.optString("name").ifBlank { key }, vals, f.optString("init"))
             }
-            if (groups.isNotEmpty()) filtersByType[tid] = groups
+            if (groups.isNotEmpty()) {
+                filtersByType[tid] = groups
+                // 对齐原版 Class.getExtend：带 init 的筛选组默认就计入请求参数。
+                // 不带的话首次进分类页的请求比原版少几个参数，部分站点（如 AppDrama）
+                // 会因此返回字段残缺的数据 —— 表现为标题/角标正常但海报整片空白。
+                val sel = selectedFilters.getOrPut(tid) { mutableMapOf() }
+                groups.forEach { g -> if (g.init.isNotBlank()) sel.putIfAbsent(g.key, g.init) }
+            }
         }
-        Log.e("XingHuiTV", "[filters] 解析到 ${filtersByType.size} 个分类的筛选项")
+        Log.e("XingHuiTV", "[filters] 解析到 ${filtersByType.size} 个分类的筛选项，" +
+            "预置默认值 ${selectedFilters.values.sumOf { it.size }} 个")
     }
 
     /** 二级页顶部筛选栏：每个筛选组一个按钮，显示当前选中值 */
@@ -572,6 +654,18 @@ class MainActivity : Activity() {
         categories.clear()
         vods.clear()
         recommends.clear()
+        // 切站/刷新首页 = 翻页状态归零（原版换源后 VodFragment.mPages 清空）
+        currentTid = ""
+        currentPage = 0
+        pageCount = 0
+        loadingMore = false
+
+        // 卡片形态跟随站点 Style（订阅里 51/157 站带 style）：
+        // 体育/网盘/听书站 type=list 要整行横条，影视站 ratio=1.33、教育站 1.618 要压扁海报。
+        // 放在 parseHome 入口统一执行，首屏与切站都会走到这里。
+        runCatching {
+            SubscriptionStore(this@MainActivity).currentSite()?.let { applyCardStyle(it) }
+        }.onFailure { Log.e("XingHuiTV", "[style] 应用卡片形态失败", it) }
 
         // 首页 JSON 为空/不可解析时，不再留黑屏：直接显示原因（用户截图即可定位）
         val root = runCatching { JSONObject(json) }.getOrNull()
@@ -655,11 +749,37 @@ class MainActivity : Activity() {
         findViewById<TextView>(R.id.title).text = siteName
     }
 
-    private fun parseCategory(json: String) {
-        vods.clear()
-        runCatching { vods.addAll(Vod.parseList(json)) }
+    private fun parseCategory(json: String, append: Boolean = false) {
+        if (!append) vods.clear()
+        val parsed = runCatching { Vod.parseList(json) }
             .onFailure { e -> Log.e("XingHuiTV", "[parseCategory] 解析失败 json前300: ${json.take(300)}", e) }
-        vodAdapter.notifyDataSetChanged()
+            .getOrElse { emptyList() }
+        vods.addAll(parsed)
+        // 总页数（原版 Result.pagecount → CustomScroller.setEnable：page < pageCount || pageCount == 0）
+        runCatching { pageCount = JSONObject(json).optInt("pagecount", 0) }.getOrNull()
+        // 海报诊断：把首条原始 key 与所有图像类字段的值打出来。
+        // 分类页海报空白而标题/角标正常时，看这两行即可判断是"字段名没兜住"还是"站点确实没给图"。
+        runCatching {
+            val first = org.json.JSONObject(json).optJSONArray("list")?.optJSONObject(0)
+            if (first != null) {
+                val keys = first.keys().asSequence().toList()
+                Log.e("XingHuiTV", "[parseCategory] 首条 keys=$keys")
+                val imgKeys = keys.filter { k ->
+                    k.contains("pic", true) || k.contains("img", true) ||
+                        k.contains("cover", true) || k.contains("image", true) || k.contains("poster", true)
+                }
+                Log.e("XingHuiTV", "[parseCategory] 图像类字段 => " +
+                    imgKeys.joinToString(", ") { k -> "$k='${first.optString(k).take(80)}'" })
+            }
+            Log.e("XingHuiTV", "[parseCategory] 本页 ${parsed.size} 条，累计 ${vods.size} 条，" +
+                "有封面 ${vods.count { it.vodPic.isNotBlank() }} 条，pg=$currentPage pagecount=$pageCount")
+        }
+        if (append && parsed.isNotEmpty()) {
+            // 追加时只刷新新增区间，避免整表重绘导致焦点跳动
+            vodAdapter.notifyItemRangeInserted(vods.size - parsed.size, parsed.size)
+        } else {
+            vodAdapter.notifyDataSetChanged()
+        }
         findViewById<TextView>(R.id.labelVod).text = "影片 ${vods.size} 条"
         showEmpty(if (vods.isEmpty()) "该分类暂无内容（接口返回空）" else "")
     }

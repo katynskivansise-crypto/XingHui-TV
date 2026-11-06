@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 影片网格项：海报 + 片名 + 备注 -->
+<!-- 影片网格项（rect / oval 形态）：海报 + 片名 + 备注角标
+     海报高度由 VideoAdapter 按 Style.ratio 动态计算（高 = 格宽 / ratio），
+     这里给 250dp 只是布局预览期的占位值。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="200dp"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="6dp"
@@ -11,6 +13,7 @@
 
     <!-- 海报 + 左下角集数/备注角标（对齐原版「全30集」绿标压在海报上） -->
     <FrameLayout
+        android:id="@+id/posterBox"
         android:layout_width="match_parent"
         android:layout_height="250dp">
 

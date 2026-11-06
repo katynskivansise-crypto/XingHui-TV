@@ -446,8 +446,13 @@ object CspLoader {
 
     /** 分类页 */
     /**
-     * 分类列表。extend 来自官网首页 Result.filters 的选中值（原版 FilterDialog 的结果），
+     * 分类列表。extend 来自首页 Result.filters 的选中值（原版 FilterDialog 的结果），
      * 形如 {"year":"2024","area":"大陆"}，原样交给 spider.categoryContent 的第 4 个参数。
+     *
+     * 第 3 个参数 filter 必须传 true（对齐原版 VodFragment:184 / TypeFragment:157）。
+     * 之前传 false 会让 jar 内部走"不带筛选"的另一个接口分支，
+     * 部分站点（AppDrama 等）该分支返回的条目缺少封面字段 —— 表现为分类页标题/角标正常、
+     * 海报整片空白，而同站首页（走 homeContent）图片正常。
      */
     fun category(
         context: Context,
@@ -457,7 +462,7 @@ object CspLoader {
         extend: Map<String, String> = emptyMap()
     ): String {
         val s = spider(context, site) ?: return ""
-        return str(invoke(s, "categoryContent", tid, pg, false, HashMap(extend)))
+        return str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
     }
 
     /** 详情页（ids 为 vod_id） */

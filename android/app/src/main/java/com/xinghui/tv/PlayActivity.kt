@@ -8,6 +8,7 @@ import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -84,13 +85,7 @@ class PlayActivity : Activity() {
         playerView?.resizeMode = scaleModes[scaleIdx]
         findViewById<TextView>(R.id.btnScale)?.text = "缩放 ${scaleNames[scaleIdx]}"
         player = ExoPlayer.Builder(this).build().also { playerView?.player = it }
-        // 播放出错 → 自动换源重试（对齐原项目 onErrorEvent→startFlow→checkFlag 线路轮换）
-        player?.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                if (directUrl.isNotBlank()) return // 直播直链不自动换线路
-                onPlayFail("播放出错：${error.errorCodeName}")
-            }
-        })
+        attachPlayerListeners()
         findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
 
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
@@ -203,7 +198,15 @@ class PlayActivity : Activity() {
                 }
             }
             if (urlPairs.size > 1) qualities.addAll(urlPairs)
-            if (site?.isCsp() == true) headers = CspLoader.playerHeaders(play)
+            // Result.header 透传：原版对所有源都取（不区分 csp / js / json），
+            // 之前只在 csp 站取，drpy 与 json 站播放接口返回的 UA/Referer 被丢掉了，
+            // 表现为「能进详情但播放器一直转圈 / 403」。
+            // 合并顺序对齐原版：站点级 header 打底，播放接口返回的 header 覆盖同名项。
+            val siteHdr = site?.headerMap().orEmpty()
+            val playHdr = CspLoader.playerHeaders(play)
+            headers = if (siteHdr.isEmpty()) playHdr else siteHdr + playHdr
+            // Result.subs 字幕：原版 Result.getSubs() → Sub.getConfig() → ExoPlayer SubtitleConfiguration
+            activeSubs = parseSubs(play)
             // 多清晰度（引擎已把 TVBox `#` 分隔拆成 urls）
             val urls = obj.optJSONArray("urls")
             if (urls != null && urls.length() > 1) {
@@ -308,14 +311,76 @@ class PlayActivity : Activity() {
         }
     }
 
-    /** 播放地址；csp_ 源播放需按接口返回的 header（UA/Referer）构建请求 */
+    /** 播放地址请求头；取播放接口返回的 Result.header（UA/Referer/Cookie 等） */
     private var activeHeaders: Map<String, String> = emptyMap()
+
+    /** 字幕轨；取播放接口返回的 Result.subs，装配成 ExoPlayer 的 SubtitleConfiguration */
+    private var activeSubs: List<MediaItem.SubtitleConfiguration> = emptyList()
+
+    /** 待跳转的续播位置（毫秒）；播放器就绪后消费掉 */
+    private var pendingSeek: Long = 0
+
+    /** 上次落盘的位置，避免重复写同一进度把 SharedPreferences 打爆 */
+    private var lastSavedPos: Long = 0
+
+    private val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val saveRunnable = object : Runnable {
+        override fun run() {
+            savePosition()
+            saveHandler.postDelayed(this, 15_000)
+        }
+    }
+
+    /** 统一挂播放器监听：onCreate 和 rebuildPlayer 都要挂，避免两处逻辑漂移 */
+    private fun attachPlayerListeners() {
+        player?.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                if (directUrl.isNotBlank()) return // 直播直链不自动换线路
+                onPlayFail("播放出错：${error.errorCodeName}")
+            }
+
+            /** 就绪后跳续播位置：太靠近片尾（不足 5 秒）就当作看完了，从头播 */
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state != Player.STATE_READY || pendingSeek <= 0) return
+                val target = pendingSeek
+                pendingSeek = 0
+                val p = player ?: return
+                if (p.duration > 0 && target < p.duration - 5_000) {
+                    p.seekTo(target)
+                    Toast.makeText(this@PlayActivity, "续播 ${target / 1000} 秒", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) scheduleSave() else savePosition()
+            }
+        })
+    }
+
+    private fun scheduleSave() {
+        saveHandler.removeCallbacks(saveRunnable)
+        saveHandler.postDelayed(saveRunnable, 15_000)
+    }
+
+    /** 落盘当前播放位置；异常值/片尾不记（播完应从头看，不该一跳就跳结尾） */
+    private fun savePosition() {
+        val p = player ?: return
+        val pos = runCatching { p.currentPosition }.getOrDefault(0)
+        if (pos <= 0 || pos == lastSavedPos) return
+        val dur = runCatching { p.duration }.getOrDefault(0)
+        if (dur > 0 && pos >= dur - 10_000) return
+        lastSavedPos = pos
+        HistoryStore(this).setPosition(vodId, epUrl, pos)
+    }
 
     private fun playUrl(url: String, headers: Map<String, String> = emptyMap()) {
         if (url.isBlank()) {
             Toast.makeText(this, "未解析到播放地址", Toast.LENGTH_LONG).show()
             return
         }
+        // 续播：同一集上次看到哪儿，就绪后跳过去
+        pendingSeek = HistoryStore(this).position(vodId, epUrl)
+        lastSavedPos = 0
         // mpv 内核：交给外部播放器
         if (PlayerManager.shouldUseMpv(this)) {
             if (PlayerManager.launchMpv(this, url, vodName)) {
@@ -323,15 +388,59 @@ class PlayActivity : Activity() {
                 return
             }
         }
-        // header 与当前播放器不一致时重建（csp_ 源播放地址需带 UA/Referer）
+        // header 与当前播放器不一致时重建（播放接口返回的 UA/Referer 需注入数据源）
         if (headers != activeHeaders) {
             rebuildPlayer(headers)
         }
         player?.apply {
-            setMediaItem(MediaItem.fromUri(url))
+            val itemBuilder = MediaItem.Builder().setUri(url).setMediaId(url)
+            // 字幕轨：对齐原版 ExoUtil.getMediaItem → setSubtitleConfigurations(getSubtitleConfigs(subs))
+            if (activeSubs.isNotEmpty()) itemBuilder.setSubtitleConfigurations(activeSubs)
+            setMediaItem(itemBuilder.build())
             prepare()
             playWhenReady = true
         }
+    }
+
+    /**
+     * 解析播放接口返回的 subs（对齐原版 Result.subs / Sub.getConfig）：
+     * 缺 format 时按扩展名推断 MIME（原版 ExoUtil.getMimeType 同一套规则）。
+     */
+    private fun parseSubs(playJson: String): List<MediaItem.SubtitleConfiguration> {
+        if (playJson.isBlank()) return emptyList()
+        val out = ArrayList<MediaItem.SubtitleConfiguration>()
+        runCatching {
+            val arr = JSONObject(playJson).optJSONArray("subs") ?: return emptyList()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val raw = o.optString("url")
+                if (raw.isBlank()) continue
+                // 与原版一致：subs 里的 url 也过一遍 UrlConvert（可能带 @Referer= 或 proxy:// 前缀）
+                val src = UrlConvert.convert(raw)
+                val clean = src.substringBefore("@")
+                val name = o.optString("name").ifBlank { clean.substringAfterLast('/') }
+                val lang = o.optString("lang")
+                val mime = o.optString("format").ifBlank { mimeOfSub(clean) }
+                out.add(
+                    MediaItem.SubtitleConfiguration.Builder(android.net.Uri.parse(clean))
+                        .setLabel(name)
+                        .setMimeType(mime)
+                        .apply { if (lang.isNotBlank()) setLanguage(lang) }
+                        .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT)
+                        .build()
+                )
+            }
+        }.onFailure { Log.e("XingHuiTV", "[subs] 解析字幕失败", it) }
+        if (out.isNotEmpty()) Log.e("XingHuiTV", "[subs] 装配 ${out.size} 条字幕轨")
+        return out
+    }
+
+    /** 字幕 MIME 推断，对齐原版 ExoUtil.getMimeType(String) */
+    private fun mimeOfSub(url: String): String = when {
+        url.endsWith(".vtt", true) -> MimeTypes.TEXT_VTT
+        url.endsWith(".ass", true) || url.endsWith(".ssa", true) -> MimeTypes.TEXT_SSA
+        url.endsWith(".ttml", true) || url.endsWith(".xml", true) || url.endsWith(".dfxp", true) -> MimeTypes.APPLICATION_TTML
+        else -> MimeTypes.APPLICATION_SUBRIP
     }
 
     /** 重建播放器；headers 为空时用默认（普通源），非空时注入请求头（csp_ 源） */
@@ -345,13 +454,7 @@ class PlayActivity : Activity() {
             builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
         }
         player = builder.build().also { playerView?.player = it }
-        // 播放出错 → 自动换源重试（对齐原项目 onErrorEvent→startFlow→checkFlag 线路轮换）
-        player?.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                if (directUrl.isNotBlank()) return // 直播直链不自动换线路
-                onPlayFail("播放出错：${error.errorCodeName}")
-            }
-        })
+        attachPlayerListeners()
         player?.setPlaybackSpeed(speedSteps[speedIdx])
     }
 
@@ -434,7 +537,15 @@ class PlayActivity : Activity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    /** 切后台/被遮挡时立即落盘，避免只靠 15 秒定时那一次丢掉最后片段 */
+    override fun onPause() {
+        super.onPause()
+        savePosition()
+    }
+
     override fun onDestroy() {
+        saveHandler.removeCallbacks(saveRunnable)
+        savePosition()
         super.onDestroy()
         player?.release()
         player = null

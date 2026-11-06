@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 影片列表项（list 形态）：对齐原版 adapter_vod_list.xml
+     左侧小封面 + 右侧片名/备注，整行占满宽度，用于体育/网盘/听书这类
+     订阅里标了 style:{type:"list"} 的站点。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingTop="6dp"
+    android:paddingBottom="6dp"
+    android:focusable="true"
+    android:clickable="true"
+    android:background="@drawable/item_focus">
+
+    <ImageView
+        android:id="@+id/vodImage"
+        android:layout_width="110dp"
+        android:layout_height="70dp"
+        android:scaleType="centerCrop"
+        android:background="#16161C" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginStart="16dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/vodName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/vodRemarks"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="#B0B0B0"
+            android:textSize="14sp" />
+
+    </LinearLayout>
+
+</LinearLayout>
