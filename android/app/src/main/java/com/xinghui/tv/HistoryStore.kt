@@ -21,6 +21,7 @@ class HistoryStore(context: Context) {
         remarks: String = "",
         flag: String = "",
         epUrl: String = "",
+        position: Long = 0,
     ) {
         if (vodId.isBlank()) return
         val list = history().filterNot { it.optString("vod_id") == vodId }.toMutableList()
@@ -31,9 +32,33 @@ class HistoryStore(context: Context) {
             put("vod_remarks", remarks)
             put("vod_flag", flag)
             put("vod_ep_url", epUrl)
+            put("position", position)
             put("time", System.currentTimeMillis())
         })
         save(KEY_HISTORY, list.take(50))
+    }
+
+    /**
+     * 保存播放位置（毫秒）。按 vodId + 集地址定位：
+     * 同一部剧换集后位置就作废，不会出现第 3 集跳到第 1 集进度的情况。
+     */
+    fun setPosition(vodId: String, epUrl: String, positionMs: Long) {
+        if (vodId.isBlank() || positionMs <= 0) return
+        val list = history().toMutableList()
+        val idx = list.indexOfFirst { it.optString("vod_id") == vodId }
+        if (idx < 0) return
+        list[idx] = JSONObject(list[idx].toString()).apply {
+            put("position", positionMs)
+            put("position_ep", epUrl)
+        }
+        save(KEY_HISTORY, list)
+    }
+
+    /** 读取续播位置；集地址不一致（换集了）则返回 0，从头播 */
+    fun position(vodId: String, epUrl: String): Long {
+        val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return 0
+        if (obj.optString("position_ep", obj.optString("vod_ep_url")) != epUrl) return 0
+        return obj.optLong("position", 0)
     }
 
     fun history(): List<JSONObject> = read(KEY_HISTORY)

@@ -1,78 +1,257 @@
 package com.xinghui.tv
 
+import android.content.Context
+import android.os.Environment
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
+import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
+import java.net.URLDecoder
 
 /**
- * 本地播放代理服务（对齐原版 server/process/Proxy.java + NanoHTTPD 9978）。
+ * 本地服务（对齐原版 server/Nano.java 的路由分派 + server/process/*）。
  *
- * csp / js 站播放接口常返回 `http://127.0.0.1:9978/proxy?do=xxx&...`：
- * 本服务解析 query 与 header 成 params，转发给 jar 内反射得到的 Proxy.proxy(Map)，
- * 再把返回的 {status, contentType, InputStream, headers} 写回播放器。
+ * 原版 Nano 在 serve() 里按路径前缀分派到 6 个 Process，再兜底当 assets 读：
+ *   /action   Action      —— 遥控/投屏动作
+ *   /cache    Cache       —— 缓存查询
+ *   /file     Local       —— 本地文件（支持 Range，播放器 seek 靠它）
+ *   /upload /newFolder /delFolder /delFile  Local —— 文件管理
+ *   /media    Media       —— 媒体信息
+ *   /parse    Parse       —— 解析
+ *   /proxy    Proxy       —— 播放/图片代理（csp 站核心）
+ *   /go       Go          —— 投屏
+ *   /tvbus    LiveConfig  —— 直播推送
+ *   /device   Device      —— 设备信息
+ *   兜底      getAssets   —— APK 内 assets 静态资源
  *
- * 与 CspLoader 的分工：
- * - CspLoader：负责 jar 加载与 Proxy.proxy 反射句柄（proxyLocal）
- * - ProxyServer：只负责 HTTP 服务与响应拼装
+ * 我们只需要三条：
+ *   /proxy  —— csp/js 站的代理地址，必须反射 jar 里的 Proxy.proxy(Map)
+ *   /file   —— file:// 与 clan:// 的落点，缺它播放器与图片加载器全是 404
+ *   兜底    —— local:// 与 assets:// 的落点，读 APK 内资源
+ *
+ * 其余（/action /media /parse /go /tvbus /device）属遥控投屏类功能，本项目不做，直接拒绝。
+ *
+ * 注意：本类不是 NanoHTTPD 子类，所有静态方法/嵌套类型都必须显式带 NanoHTTPD 前缀，
+ * 否则 Kotlin 编译报 Unresolved reference。
  */
 object ProxyServer {
+
+    private const val TAG = "XingHuiTV"
+    private const val PORT = 9978
 
     @Volatile
     private var http: NanoHTTPD? = null
 
-    /** 启动本地代理（幂等，端口 9978）；失败只记日志，不影响主流程 */
-    fun startServer() {
+    @Volatile
+    private var appCtx: Context? = null
+
+    /** 启动本地服务（幂等）。ctx 用于读 assets 与私有目录；缺失时 /file 仍可用，assets 兜底不可用。 */
+    fun startServer(ctx: Context? = null) {
+        ctx?.applicationContext?.let { appCtx = it }
         if (http != null) return
         synchronized(this) {
             if (http != null) return
-            val server = object : NanoHTTPD(9978) {
+            val server = object : NanoHTTPD(PORT) {
                 override fun serve(session: IHTTPSession): Response {
-                    if (session.uri != "/proxy") {
-                        return newFixedLengthResponse(
-                            Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found"
-                        )
-                    }
-                    val params = HashMap<String, String>()
-                    runCatching {
-                        session.parameters.forEach { (k, v) -> v.firstOrNull()?.let { params[k] = it } }
-                        session.headers?.forEach { (k, v) -> params[k] = v }
-                    }
-                    val rs = CspLoader.proxyLocal(params)
-                    if (rs == null || rs.isEmpty()) {
-                        Log.e("XingHuiTV", "[proxy.server] proxyLocal 返回空 params=$params")
-                        return newFixedLengthResponse(
-                            Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "proxy null"
-                        )
-                    }
-                    // 对齐原版 Proxy.doResponse：rs[0] 若是 Response 对象则直接透出
-                    val first = rs[0]
-                    if (first is NanoHTTPD.Response) return first
-                    return try {
-                        val status = (rs[0] as? Number)?.toInt() ?: 200
-                        val contentType = rs.getOrNull(1) as? String ?: "application/octet-stream"
-                        val stream = rs.getOrNull(2) as? InputStream
-                        val headers = rs.getOrNull(3) as? Map<*, *>
-                        val resp: Response = if (stream != null) {
-                            newChunkedResponse(Response.Status.lookup(status), contentType, stream)
-                        } else {
-                            newFixedLengthResponse(Response.Status.lookup(status), contentType, "")
-                        }
-                        headers?.forEach { (k, v) -> if (k is String && v is String) resp.addHeader(k, v) }
-                        resp
-                    } catch (e: Exception) {
-                        Log.e("XingHuiTV", "[proxy.server] 响应构造失败", e)
-                        newFixedLengthResponse(
-                            Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, e.toString()
-                        )
+                    val path = session.uri.substringBefore('?').trim()
+                    return when {
+                        path == "/proxy" -> handleProxy(session)
+                        path.startsWith("/file") -> handleFile(session, path)
+                        // 原版 /upload /newFolder /delFolder /delFile 也归 Local，但我们不做文件管理
+                        path.startsWith("/upload") || path.startsWith("/newFolder") ||
+                            path.startsWith("/delFolder") || path.startsWith("/delFile") ->
+                            newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not supported")
+                        // 原版兜底：任何未匹配路径都当 APK 内 assets 读
+                        else -> handleAssets(path)
                     }
                 }
             }
             runCatching { server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true) }
                 .onSuccess {
                     http = server
-                    Log.e("XingHuiTV", "[proxy.server] 已启动 127.0.0.1:9978")
+                    Log.e(TAG, "[proxy.server] 已启动 127.0.0.1:$PORT（/proxy + /file + assets）")
                 }
-                .onFailure { Log.e("XingHuiTV", "[proxy.server] 启动失败", it) }
+                .onFailure { Log.e(TAG, "[proxy.server] 启动失败", it) }
+        }
+    }
+
+    fun stopServer() {
+        runCatching { http?.stop() }
+        http = null
+    }
+
+    // ───────────────────────── /proxy ─────────────────────────
+
+    private fun handleProxy(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        val params = HashMap<String, String>()
+        runCatching {
+            session.parameters.forEach { (k, v) -> v.firstOrNull()?.let { params[k] = it } }
+            session.headers?.forEach { (k, v) -> params[k] = v }
+        }
+        val rs = CspLoader.proxyLocal(params)
+        if (rs == null || rs.isEmpty()) {
+            Log.e(TAG, "[proxy.server] proxyLocal 返回空 params=$params")
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, "proxy null"
+            )
+        }
+        // 对齐原版 Proxy.doResponse：rs[0] 若是 Response 对象则直接透出
+        val first = rs[0]
+        if (first is NanoHTTPD.Response) return first
+        return try {
+            val status = (rs[0] as? Number)?.toInt() ?: 200
+            val contentType = rs.getOrNull(1) as? String ?: "application/octet-stream"
+            val stream = rs.getOrNull(2) as? InputStream
+            val headers = rs.getOrNull(3) as? Map<*, *>
+            val resp: NanoHTTPD.Response = if (stream != null) {
+                NanoHTTPD.newChunkedResponse(NanoHTTPD.Response.Status.lookup(status), contentType, stream)
+            } else {
+                NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.lookup(status), contentType, "")
+            }
+            headers?.forEach { (k, v) -> if (k is String && v is String) resp.addHeader(k, v) }
+            resp
+        } catch (e: Exception) {
+            Log.e(TAG, "[proxy.server] 响应构造失败", e)
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, e.toString()
+            )
+        }
+    }
+
+    // ───────────────────────── /file ─────────────────────────
+
+    /**
+     * UrlConvert 把 file:// 改写成 http://127.0.0.1:9978/file/<path>，
+     * 这里把 <path> 还原成磁盘文件并按 HTTP Range 语义返回。
+     */
+    private fun handleFile(session: NanoHTTPD.IHTTPSession, path: String): NanoHTTPD.Response {
+        val file = resolveFile(path)
+        if (file == null) {
+            Log.e(TAG, "[proxy.server] /file 找不到 $path")
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.NOT_FOUND, NanoHTTPD.MIME_PLAINTEXT, "file not found"
+            )
+        }
+        return runCatching { streamFile(session, file, path) }
+            .getOrElse {
+                Log.e(TAG, "[proxy.server] /file 读取失败 $path", it)
+                NanoHTTPD.newFixedLengthResponse(
+                    NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, it.toString()
+                )
+            }
+    }
+
+    private fun resolveFile(path: String): File? {
+        val raw = path.removePrefix("/file").trimStart('/')
+        if (raw.isEmpty()) return null
+        val rel = runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+        // 1) 已经是绝对路径（file:// 常见写法 file:///storage/emulated/0/xxx）
+        File("/$rel").takeIf { it.isFile }?.let { return it }
+        // 2) 外部存储根（对齐原版 Path.root = Environment.getExternalStorageDirectory）
+        runCatching { File(Environment.getExternalStorageDirectory(), rel) }
+            .getOrNull()?.takeIf { it.isFile }?.let { return it }
+        // 3) 应用私有目录：Android 10+ 分区存储下外部根常常读不到
+        appCtx?.let { ctx ->
+            File(ctx.filesDir, rel).takeIf { it.isFile }?.let { return it }
+            ctx.getExternalFilesDir(null)?.let { ext -> File(ext, rel).takeIf { it.isFile }?.let { return it } }
+            File(ctx.cacheDir, rel).takeIf { it.isFile }?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * 文件流式响应。播放器 seek 会发 Range: bytes=start-end，
+     * 必须回 206 + Content-Range，否则拖动进度条会失败或整段重下。
+     */
+    private fun streamFile(
+        session: NanoHTTPD.IHTTPSession,
+        file: File,
+        path: String
+    ): NanoHTTPD.Response {
+        val len = file.length()
+        val mime = NanoHTTPD.getMimeTypeForFile(path)
+        val etag = Integer.toHexString((file.absolutePath + file.lastModified() + "" + len).hashCode())
+        val hIfNone = session.headers?.get("if-none-match")
+        if (hIfNone != null && (hIfNone == "*" || hIfNone == etag)) {
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.NOT_MODIFIED, mime, ""
+            ).also {
+                it.addHeader("Accept-Ranges", "bytes")
+                it.addHeader("ETag", etag)
+            }
+        }
+        var start = 0L
+        var end = len - 1
+        var hasRange = false
+        val range = session.headers?.get("range")
+        if (range != null && range.startsWith("bytes=")) {
+            hasRange = true
+            val spec = range.substring("bytes=".length)
+            val dash = spec.indexOf('-')
+            if (dash >= 0) {
+                spec.substring(0, dash).trim().toLongOrNull()?.let { start = it }
+                spec.substring(dash + 1).trim().toLongOrNull()?.let { end = it }
+            }
+        }
+        if (start < 0) start = 0
+        if (start >= len) {
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.RANGE_NOT_SATISFIABLE, NanoHTTPD.MIME_PLAINTEXT, ""
+            ).also {
+                it.addHeader("Content-Range", "bytes */$len")
+                it.addHeader("Accept-Ranges", "bytes")
+            }
+        }
+        if (end < 0 || end >= len) end = len - 1
+        if (end < start) end = len - 1
+        val contentLen = end - start + 1
+        val fis = FileInputStream(file)
+        if (start > 0) runCatching { fis.skip(start) }
+        return if (hasRange) {
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.PARTIAL_CONTENT, mime, fis, contentLen
+            ).also {
+                it.addHeader("Content-Length", "$contentLen")
+                it.addHeader("Content-Range", "bytes $start-$end/$len")
+                it.addHeader("Accept-Ranges", "bytes")
+                it.addHeader("ETag", etag)
+            }
+        } else {
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK, mime, fis, len
+            ).also {
+                it.addHeader("Content-Length", "$len")
+                it.addHeader("Accept-Ranges", "bytes")
+                it.addHeader("ETag", etag)
+            }
+        }
+    }
+
+    // ───────────────────── assets 兜底 ─────────────────────
+
+    /**
+     * 对齐原版 Nano.getAssets：未匹配的路径一律当 APK 内 assets 读。
+     * UrlConvert 把 local:// 与 assets:// 都改写成 http://127.0.0.1:9978/<path>，落点就是这里。
+     */
+    private fun handleAssets(path: String): NanoHTTPD.Response {
+        val ctx = appCtx
+        if (ctx == null) {
+            Log.e(TAG, "[proxy.server] assets 兜底缺 Context，path=$path")
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.NOT_FOUND, NanoHTTPD.MIME_PLAINTEXT, "no context"
+            )
+        }
+        val p = path.trimStart('/').ifEmpty { "index.html" }
+        return runCatching {
+            val ins = ctx.assets.open(p)
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK, NanoHTTPD.getMimeTypeForFile(p), ins, ins.available().toLong()
+            )
+        }.getOrElse {
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.NOT_FOUND, NanoHTTPD.MIME_PLAINTEXT, "not found"
+            )
         }
     }
 }
