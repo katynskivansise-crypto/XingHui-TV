@@ -144,7 +144,13 @@ public final class Bridge {
                 }
             }
 
-            p.put("timeout", client.readTimeoutMillis());
+            // 单请求硬上限 20s。spider 里不少调用点用的是默认 30s（compat 默认值），
+            // 而 ureq 是同步阻塞：一次首页/分类要串行发 N 个请求，30s × N 在真机上
+            // 就表现为"卡死"（原版 OkHttp 默认 10s，所以那边只是慢）。这里夹一层，
+            // 既保留调用方给的值，又不让单个请求把整条链路拖死。
+            long to = client.readTimeoutMillis();
+            if (to <= 0 || to > 20000L) to = 20000L;
+            p.put("timeout", to);
             // 对齐 okhttp：noRedirect 的 client 必须真的不跟随 302，
             // 部分站点靠拿 Location 拼真实地址。
             p.put("follow_redirects", client.followRedirects());

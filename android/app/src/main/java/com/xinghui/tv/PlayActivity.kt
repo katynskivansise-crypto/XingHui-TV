@@ -138,6 +138,7 @@ class PlayActivity : Activity() {
     private fun resolvePlay(fl: String, ep: String) {
         var url = ""
         var err = ""
+        var sniffTarget = ""
         var headers: Map<String, String> = emptyMap()
         qualities.clear()
         qualityIdx = 0
@@ -186,14 +187,32 @@ class PlayActivity : Activity() {
                 }
                 else -> url = ""
             }
-            if (parseFlag == 1 && !looksLikeMedia(url)) {
-                val pu = obj.optString("playUrl", "")
-                if (pu.isNotBlank()) {
-                    Log.e("XingHuiTV", "[play] parse=1 → playUrl 前缀拼接 ${pu.take(60)}")
-                    url = pu + url
-                    // 多清晰度也要一起拼前缀，否则切换清晰度会拿到未解析的地址
-                    for (i in urlPairs.indices) urlPairs[i] = urlPairs[i].first to (pu + urlPairs[i].second)
-                } else {
+            // 原版 ParseJob.setParse 的协议前缀识别（点播链路最后一环）：
+            //   playUrl 以 "json:" 开头  → type=1 JSON 解析（GET 前缀+url，返回 {"url":"真实m3u8"}）
+            //   playUrl 以 "parse:" 开头 → 使用指定名称的解析器
+            //   parse=1 且两者都没有 → 嗅探（type=0，需 WebView）
+            // 实测当前订阅：parses 共 29 条，24 条 type=0 需 WebView、4 条 type=1 站点已全部失联
+            // （pandown.pro / mfjx.iwsyy.xyz 拒连、api.tyun77.cn 403、zy.qiaoji8.com 404）、
+            // 1 条 type=3 依赖 jar，因此这里不做解析实现，只识别并给出准确原因，
+            // 避免"黑屏但不知道是解析站挂了"。
+            val playUrlRaw = obj.optString("playUrl", "")
+            when {
+                // json: / parse: 协议 → 实测订阅里这两类解析站全不可用，给准确原因即可
+                playUrlRaw.startsWith("json:") || playUrlRaw.startsWith("parse:") -> {
+                    err = "该片源需要解析接口（${playUrlRaw.take(40)}…），订阅里的解析站已失效"
+                    Log.e("XingHuiTV", "[play] 需要二次解析但解析站不可用 prefix=${playUrlRaw.take(60)}")
+                }
+                // playUrl 是普通 http 解析页 → type=0 嗅探：起 WebView 抓真实 m3u8（对齐原版 startWeb）
+                parseFlag == 1 && !looksLikeMedia(url) && playUrlRaw.startsWith("http") -> {
+                    sniffTarget = playUrlRaw + url
+                    Log.e("XingHuiTV", "[play] parse=1 且 playUrl 是网页 → 走嗅探 ${sniffTarget.take(100)}")
+                }
+                parseFlag == 1 && !looksLikeMedia(url) && playUrlRaw.isNotBlank() -> {
+                    Log.e("XingHuiTV", "[play] parse=1 → playUrl 前缀拼接 ${playUrlRaw.take(60)}")
+                    url = playUrlRaw + url
+                    for (i in urlPairs.indices) urlPairs[i] = urlPairs[i].first to (playUrlRaw + urlPairs[i].second)
+                }
+                parseFlag == 1 && !looksLikeMedia(url) -> {
                     Log.e("XingHuiTV", "[play] parse=1 但无 playUrl，按直链尝试 ${url.take(80)}")
                 }
             }
@@ -217,10 +236,26 @@ class PlayActivity : Activity() {
             } else if (url.isNotBlank() && qualities.isEmpty()) {
                 qualities.add("自动" to url)
             }
+            // 迅雷体系：magnet:?xt= / ed2k: / thunder: / magnet:///path?name=&index=（磁力中间态）
+            // 对齐原版 Source.getExtractor → Thunder：交给 libxl_thunder_sdk 起下载，
+            // 内部会返回 http://127.0.0.1:<port>/... 的本地直链，ExoPlayer 直接可播。
+            // 这一步会阻塞（等元信息/等任务启动，上限十几秒），当前在后台线程，安全。
+            if (ThunderPlay.match(url)) {
+                Log.e("XingHuiTV", "[play] 迅雷体系 → ${url.take(70)}")
+                url = ThunderPlay.resolve(url)
+                if (qualities.isEmpty()) qualities.add("自动" to url)
+            }
             flag = fl
             epUrl = ep
         }.onFailure { err = it.message ?: "解析失败" }
-        if (url.isBlank()) {
+        // 嗅探分支：url 不是媒体直链、playUrl 是解析页 → 交给 WebView 抓真实地址
+        if (sniffTarget.isNotBlank()) {
+            runOnUiThread { startSniff(sniffTarget, headers) }
+            return
+        }
+        if (url.isBlank() || (err.isNotBlank() && !looksLikeMedia(url))) {
+            // err 非空且 url 不是媒体直链：把"需要解析接口"这类原因直接抛给用户，
+            // 而不是硬塞一个网页地址给 ExoPlayer 变成无限转圈
             onPlayFail(if (err.isBlank()) "未解析到播放地址：$fl" else "解析失败[$fl]：$err")
             return
         }
@@ -233,6 +268,31 @@ class PlayActivity : Activity() {
     }
 
     /** 判断地址是否已经是可直接播放的媒体直链 */
+    private var sniffer: SniffWebView? = null
+
+    /**
+     * type=0 嗅探（对齐原版 ParseJob case 0 → CustomWebView）。
+     * 打开 解析页地址 = playUrl + 真实地址，从 WebView 的网络请求里截获 m3u8/mp4。
+     */
+    private fun startSniff(target: String, hdrs: Map<String, String>) {
+        sniffer?.cancel()
+        sniffer = SniffWebView(
+            this,
+            onFound = { u, h ->
+                runOnUiThread {
+                    val merged = if (hdrs.isEmpty()) h else hdrs + h
+                    playUrl(UrlConvert.convert(u), merged)
+                    updateQualityBtn()
+                    recordHistory()
+                }
+            },
+            onFail = { why ->
+                runOnUiThread { onPlayFail("嗅探失败[$flag]：$why") }
+            },
+        )
+        sniffer?.start(target, hdrs)
+    }
+
     private fun looksLikeMedia(u: String): Boolean {
         val lower = u.lowercase()
         return lower.contains(".m3u8") || lower.contains(".mp4") || lower.contains(".flv") ||
@@ -290,13 +350,25 @@ class PlayActivity : Activity() {
     /** 清晰度：点击循环档位（对齐原项目 setQualityActivated） */
     private fun toggleQuality() {
         if (qualities.size < 2 || PlayerManager.shouldUseMpv(this)) return // mpv 外部播放器由播放器控制
+        // 切档只换播放地址，但 headers 是在播放器构建时绑到数据源上的：
+        //   DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers)
+        // 直接 setMediaItem(fromUri(v)) 会绕过 headers 比较与字幕挂载，
+        // 换到不同 CDN 时新地址仍沿用旧数据源（或干脆没有 UA/Referer），
+        // 部分源表现为一直转圈或 403。这里补齐对齐，并保持当前进度不跳回续播点。
+        val pos = player?.currentPosition ?: 0L
+        val wasPlaying = player?.playWhenReady ?: true
         qualityIdx = (qualityIdx + 1) % qualities.size
         val v = qualities[qualityIdx].second
         updateQualityBtn()
+        val want = withUa(activeHeaders)
+        if (want != activeHeaders) rebuildPlayer(want)
         player?.apply {
-            setMediaItem(MediaItem.fromUri(v))
+            val b = MediaItem.Builder().setUri(v).setMediaId(v)
+            if (activeSubs.isNotEmpty()) b.setSubtitleConfigurations(activeSubs)
+            setMediaItem(b.build())
             prepare()
-            playWhenReady = true
+            if (pos > 0) seekTo(pos)
+            playWhenReady = wasPlaying
         }
     }
 
@@ -373,6 +445,15 @@ class PlayActivity : Activity() {
         HistoryStore(this).setPosition(vodId, epUrl, pos)
     }
 
+    /**
+     * 对齐原版 Players.java:605：headers 没带 UA 时补上用户设置的 UA。
+     * 注释见调用点——media3 默认 UA 是 "ExoPlayerLib/1.3.1"，多数采集站/CDN 见它直接 403。
+     * 抽成函数是为了让切档路径（toggleQuality）复用同一份判定，而不是各自写一遍。
+     */
+    private fun withUa(headers: Map<String, String>): Map<String, String> =
+        if (headers.keys.any { it.equals("User-Agent", true) }) headers
+        else Settings(this).ua.takeIf { it.isNotBlank() }?.let { headers + ("User-Agent" to it) } ?: headers
+
     private fun playUrl(url: String, headers: Map<String, String> = emptyMap()) {
         if (url.isBlank()) {
             Toast.makeText(this, "未解析到播放地址", Toast.LENGTH_LONG).show()
@@ -385,8 +466,7 @@ class PlayActivity : Activity() {
         // 播放接口通常只返回 Referer，没有 UA。media3 默认 UA 是 "ExoPlayerLib/1.3.1"，
         // 多数采集站/CDN 见到这个标识会直接 403，表现为"能进详情、播放器一直转圈"。
         // 原版走 OkHttpDataSource，继承的是用户设置的 UA，所以不会踩这个坑。
-        val effHeaders = if (headers.keys.any { it.equals("User-Agent", true) }) headers
-        else Settings(this).ua.takeIf { it.isNotBlank() }?.let { headers + ("User-Agent" to it) } ?: headers
+        val effHeaders = withUa(headers)
         // 续播：同一集上次看到哪儿，就绪后跳过去
         pendingSeek = HistoryStore(this).position(vodId, epUrl)
         lastSavedPos = 0
@@ -556,6 +636,8 @@ class PlayActivity : Activity() {
         saveHandler.removeCallbacks(saveRunnable)
         savePosition()
         super.onDestroy()
+        sniffer?.cancel()
+        sniffer = null
         player?.release()
         player = null
     }

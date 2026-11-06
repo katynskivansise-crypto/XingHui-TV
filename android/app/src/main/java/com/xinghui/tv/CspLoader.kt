@@ -462,6 +462,31 @@ object CspLoader {
 
     // ---------- 爬虫实例（对齐原版 getSpider） ----------
 
+    /**
+     * 释放全部缓存的 spider 实例。
+     *
+     * 每个实例都挂着自己的 DexClassLoader（jar 里的类全由它加载）和内部 OkHttpClient，
+     * 只增不清的话，反复切订阅/切站会让 ClassLoader 与连接池一路累积到进程结束。
+     * 释放前先调一次 spider 自己的 destroy()（原版 Spider 基类有这个可选钩子），
+     * 让内部线程/连接有机会收尾；没有这个方法就静默跳过。
+     *
+     * 注意不要挂在 Activity.onDestroy 上：缓存的存在意义就是"返回再进不必重解 jar"，
+     * 每次退出页面都清会让每个站重走一遍 30 万字的 dex 加载。只在换订阅/换 jar 时调。
+     */
+    fun destroy() {
+        val all = runCatching { spiders.values.toList() }.getOrDefault(emptyList())
+        runCatching { spiders.clear() }
+        baseCandidates = emptyList()
+        lastBaseInfo = ""
+        imageBase = ""
+        imageBaseSite = ""
+        all.forEach { s ->
+            runCatching { invoke(s, "destroy") }
+                .onFailure { Log.e(TAG, "[csp.destroy] spider.destroy 调用失败", it) }
+        }
+        Log.e(TAG, "[csp.destroy] 已释放 ${all.size} 个 spider 实例")
+    }
+
     private fun spider(context: Context, site: Site): Any? {
         val jar = jarOf(site)
         val dl = loadJar(context, jar) ?: run {
@@ -473,11 +498,13 @@ object CspLoader {
         val spKey = jarKey + site.key // 原版 spKey = md5(jar) + key
         spiders[spKey]?.let { cached ->
             // ★缓存命中也要再兜一次。原因：首次 init 时若 ext.site 第一项是已注销域名
-            // （荐片就是 www.whhyn.com，NXDOMAIN），spider 内部的探活循环会被外层 catch
-            // 整体中断，第二项 https://www.zxfmj.com 一次都没被试过 → 实例字段 a 留 null。
-            // 而实例一旦进 spiders 缓存，就会带着 null 的 a 活到进程结束，
-            // 分类页因此"永久 0 条且不发请求"。ensureBaseUrl 是幂等的（a 非空立即 return），
-            // 放在这里每次只多一次字段读取，却能把这种"缓存了残缺实例"救回来。
+            // （荐片就是 www.whhyn.com，NXDOMAIN），spider 内部那轮 HEAD 探活会失败；
+            // 它的 try 落在循环体内（只跳过当轮），所以第二项 zxfmj 仍会被试到，
+            // 但如果连 zxfmj 也没拿到 200（比如我们的兼容层把 HEAD 落成 code==0），
+            // 实例字段 a 就会留 null。而实例一旦进 spiders 缓存，就会带着 null 的 a
+            // 活到进程结束，分类页因此"永久 0 条且不发请求"。
+            // ensureBaseUrl 是幂等的（a 非空立即 return），放在这里每次只多一次字段读取，
+            // 却能把这种"缓存了残缺实例"救回来。
             ensureBaseUrl(site, cached)
             return cached
         }

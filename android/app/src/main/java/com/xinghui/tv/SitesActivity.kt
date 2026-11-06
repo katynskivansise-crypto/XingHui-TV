@@ -71,6 +71,9 @@ class SitesActivity : Activity() {
                     }
                     // 保存订阅 URL：drpy2.js 规则源（./js/*.js / ./lib/*.js）相对路径要基于它解析
                     store.setSubscribeUrl(url)
+                    // 换订阅=换 jar 与站点集合，旧的 spider 实例（各自挂着一个 DexClassLoader）
+                    // 再也不会被用到，必须在这里放掉，否则每换一次订阅就多留一整套类加载器。
+                    CspLoader.destroy()
                     refresh(tvCurrent, labelSites)
                     Toast.makeText(this, "已添加 ${sites.size} 个站点：${sites.joinToString("、") { it.name }}", Toast.LENGTH_LONG).show()
                 }
