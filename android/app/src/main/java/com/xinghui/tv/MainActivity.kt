@@ -1,9 +1,13 @@
 package com.xinghui.tv
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,6 +21,8 @@ import androidx.recyclerview.widget.RecyclerView
 import com.xinghui.tv.adapter.LibAdapter
 import org.json.JSONObject
 import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -64,6 +70,9 @@ class MainActivity : Activity() {
         // 本地服务（csp/js 站 /proxy 播放链路 + /file 本地文件 + assets 兜底）；启动失败不影响主流程
         runCatching { ProxyServer.startServer(this) }
             .onFailure { Log.e("XingHuiTV", "[proxy.server] startServer 异常", it) }
+        installCrashReporter()
+        ensureStoragePermission()
+        ensureTvBoxDir()
         setContentView(R.layout.activity_main)
         // 壁纸（对齐原版 BaseActivity.refreshWall：只设 window 背景，不额外加 View）
         runCatching { WallpaperStore.apply(this) }
@@ -142,6 +151,10 @@ class MainActivity : Activity() {
                 .onFailure { e -> Toast.makeText(this, "无法打开设置：${e.message}", Toast.LENGTH_LONG).show() }
         }
 
+        // 上次若崩过，启动时先弹一次摘要：避免"上次闪退了，这次进去看不出任何原因"
+        lastCrashSummary().takeIf { it.isNotBlank() }?.let { s ->
+            Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+        }
         loadQuickHistory()
         initEngine()
     }
@@ -564,20 +577,33 @@ class MainActivity : Activity() {
             return
         }
         Thread {
-            val json = CspLoader.action(this, site, vod.action)
+            // spider 的 action 会把真正的写入动作再丢进它自己的线程池（见 installCrashReporter 注释），
+            // 这里保护的是当前这条线程本身：反射路径上的 Error（NoSuchMethodError 等）一旦逃逸也是闪退。
+            val raw = runCatching { CspLoader.action(this, site, vod.action) }
+                .getOrElse { e ->
+                    JSONObject().put("code", -1)
+                        .put("msg", "action 异常：${e.javaClass.simpleName}: ${e.message}")
+                        .toString()
+                }
             runOnUiThread {
-                val o = runCatching { JSONObject(json) }.getOrNull()
-                val list = o?.optJSONArray("list")
-                if (list != null && list.length() > 0) {
-                    // action 返回了影片列表（少数站点用它做"更多"），直接铺到首页推荐区
-                    val parsed = Vod.parseList(json)
-                    recommends.clear()
-                    recommends.addAll(parsed)
-                    recommendAdapter.notifyDataSetChanged()
-                    showHomeHint("${vod.vodName}：返回 ${parsed.size} 条")
-                } else {
-                    val msg = o?.optString("msg").orEmpty().ifBlank { json.take(200) }
-                    showHomeHint("${vod.vodName}\n$msg")
+                runCatching {
+                    val o = runCatching { JSONObject(raw) }.getOrNull()
+                    val list = o?.optJSONArray("list")
+                    if (list != null && list.length() > 0) {
+                        // action 返回了影片列表（少数站点用它做"更多"），直接铺到首页推荐区
+                        val parsed = Vod.parseList(raw)
+                        recommends.clear()
+                        recommends.addAll(parsed)
+                        recommendAdapter.notifyDataSetChanged()
+                        showHomeHint("${vod.vodName}：返回 ${parsed.size} 条")
+                    } else {
+                        val msg = o?.optString("msg").orEmpty().ifBlank { raw.take(200) }
+                        // Config.action 恒返回空串（真正写入在它的异步 Runnable 里完成），
+                        // 空返回值不代表失败，给一句明确的"已提交"，比一片空白可读得多。
+                        showHomeHint(if (msg.isBlank()) "${vod.vodName}：已提交（该动作在站点内部异步执行）" else "${vod.vodName}\n$msg")
+                    }
+                }.onFailure { e ->
+                    showHomeHint("${vod.vodName}：结果显示失败 ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
         }.start()
@@ -904,6 +930,109 @@ class MainActivity : Activity() {
     }
 
     /** 首页提示行：复用 recommendRow/Label 位置，避免内容区纯黑无任何可读信息 */
+    /**
+     * 申请存储权限。
+     *
+     * 配置·中心的三类功能落点不同：
+     *   网盘线程 / GO 代理版本 → <filesDir>/Pizazz/config.json，私有目录，无权限也能写；
+     *   Cookie / Token          → /sdcard/TVBox 下的 quark_cookie.txt 等文本文件，
+     *                             spider 用 getExternalStorageDirectory() 拼路径。
+     * 缺 WRITE_EXTERNAL_STORAGE 时，输入框照常弹出、也照常提示保存成功，
+     * 但写文件那一步拿到的是 EACCES —— 结果就是"设置过了，实际一个字没写"。
+     * targetSdk 34 在 API 25 上同样走运行时权限，必须显式请求。
+     */
+    private fun ensureStoragePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val need = arrayOf(
+            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        )
+        if (need.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) return
+        runCatching { requestPermissions(need, 0x101) }
+            .onFailure { Log.e("XingHuiTV", "[perm] 存储权限申请失败", it) }
+    }
+
+    /**
+     * Cookie 的实际落点是 /sdcard/TVBox/<名字>.txt（spider 用 getExternalStorageDirectory() 拼），
+     * 目录不存在时它那侧写文件直接失败。宿主先把目录建好，省得第一次设置就写不进去。
+     */
+    @Suppress("DEPRECATION")
+    private fun ensureTvBoxDir() {
+        runCatching {
+            val d = File(Environment.getExternalStorageDirectory(), "TVBox")
+            if (!d.exists() && !d.mkdirs()) {
+                Log.e("XingHuiTV", "[perm] TVBox 目录创建失败（多半是还没授权存储权限）")
+            }
+        }.onFailure { Log.e("XingHuiTV", "[perm] 建 TVBox 目录异常", it) }
+    }
+
+    /**
+     * 崩溃现场留痕 + spider 后台线程异常兜底。
+     *
+     * 两件事必须分开看：
+     *  1) 盒子上没有 logcat 时，"点一下就闪退"等于零信息：进程被 ART 直接杀掉，
+     *     任何 Toast / 界面提示都来不及显示。所以先把线程名 + 完整堆栈落到 filesDir/crash.log。
+     *  2) csp_Config 这类站点的卡片 action 是异步的：Config.action 只有 12 个指令字，
+     *     真正的写入动作被包成 Runnable 丢进 spider 自己的 ExecutorService（Init.execute）。
+     *     那个线程不受宿主任何 try/catch 保护，一旦抛异常就是整进程闪退。
+     *     这里识别"栈里有 com.github.catvod 帧"的线程，记录后吞掉，让进程活下来，
+     *     并把失败原因贴到界面上 —— 否则用户只会看到"点了没反应然后退回桌面"。
+     */
+    private fun installCrashReporter() {
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            val trace = runCatching {
+                val sw = StringWriter()
+                e.printStackTrace(PrintWriter(sw))
+                sw.toString()
+            }.getOrDefault("")
+            runCatching {
+                File(filesDir, "crash.log").writeText(
+                    "time=" + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()) + "\n" +
+                        "thread=" + t.name + "\n" + trace
+                )
+            }
+            Log.e("XingHuiTV", "[crash] thread=${t.name}", e)
+
+            // 这条异常是 spider 内部线程抛的：宿主既改不了它的字节码，也包不住它的线程，
+            // 吞掉是唯一能让进程不倒的办法；原因回吐到界面上，不静默。
+            val fromSpider = e.stackTrace.any {
+                it.className.startsWith("com.github.catvod")
+            } || e.cause?.stackTrace?.any { it.className.startsWith("com.github.catvod") } == true
+            if (fromSpider) {
+                val msg = e.javaClass.simpleName + ": " + e.message
+                Handler(Looper.getMainLooper()).post {
+                    runCatching {
+                        Toast.makeText(
+                            this,
+                            "站点内部线程异常（已拦截，未闪退）\n$msg",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+                return@setDefaultUncaughtExceptionHandler
+            }
+            prev?.uncaughtException(t, e)
+        }
+    }
+
+    /** 上次崩溃摘要（无则空串）。只取异常类型行 + 第一处业务栈帧，避免整屏堆栈盖住界面 */
+    private fun lastCrashSummary(): String {
+        val f = File(filesDir, "crash.log")
+        if (!f.exists()) return ""
+        val lines = runCatching { f.readLines() }.getOrDefault(emptyList())
+        if (lines.isEmpty()) return ""
+        val typeLine = lines.firstOrNull {
+            it.startsWith("java.") || it.startsWith("kotlin.") ||
+                it.contains("Exception") || it.contains("Error")
+        } ?: return ""
+        val frame = lines.firstOrNull {
+            val s = it.trimStart()
+            s.startsWith("at com.xinghui") || s.startsWith("at com.github.catvod")
+        }?.trim()
+        return "上次崩溃：" + typeLine.trim() + (frame?.let { "\n  $it" } ?: "")
+    }
+
     private fun showHomeHint(text: String) {
         findViewById<View>(R.id.recommendRow)?.visibility = View.VISIBLE
         findViewById<TextView>(R.id.recommendLabel)?.text = text
@@ -923,8 +1052,36 @@ class MainActivity : Activity() {
         findViewById<TextView>(R.id.title).text = siteName
     }
 
+    /**
+     * 把海报加载结果直接写在「影片 N 条」那一行后面，截图就能判断，不用连 adb。
+     *
+     * 判据：
+     *   封面0          → 站点没给 vod_pic，加载器再改也没用，要回去查字段映射
+     *   封面N · 图0/N  → URL 有但一张都没下来，后面跟的首条失败原因说明卡在哪一步
+     *   图N/N          → 正常
+     */
+    private fun updatePosterDiag() {
+        runCatching {
+            val label = findViewById<TextView>(R.id.labelVod) ?: return
+            val withPic = vods.count { it.vodPic.isNotBlank() }
+            val sb = StringBuilder()
+            sb.append("影片 ${vods.size} 条 ｜ 封面$withPic · 图")
+            sb.append("${AsyncImageLoader.okCount}/${vods.size}")
+            if (AsyncImageLoader.failCount > 0) sb.append(" 失败${AsyncImageLoader.failCount}")
+            val reason = AsyncImageLoader.lastFailReason
+            if (reason.isNotBlank()) sb.append(" ｜ ${reason.take(50)}")
+            label.text = sb.toString()
+            Log.e("XingHuiTV", "[poster] 封面=$withPic/${vods.size} ok=${AsyncImageLoader.okCount} " +
+                "fail=${AsyncImageLoader.failCount} empty=${AsyncImageLoader.emptyCount} 首因=$reason")
+        }
+    }
+
     private fun parseCategory(json: String, append: Boolean = false) {
-        if (!append) vods.clear()
+        if (!append) {
+            vods.clear()
+            // 每页重新计数，否则诊断里的数字会跨页累加，看不出这一页的真实情况
+            AsyncImageLoader.resetDiag()
+        }
         val parsed = runCatching { Vod.parseList(json) }
             .onFailure { e -> Log.e("XingHuiTV", "[parseCategory] 解析失败 json前300: ${json.take(300)}", e) }
             .getOrElse { emptyList() }
@@ -962,6 +1119,11 @@ class MainActivity : Activity() {
         // 只在首页（非追加）时应用，避免翻页过程中反复改列数导致焦点跳动。
         if (!append && parsed.isNotEmpty()) applyPageStyle(parsed.first())
         findViewById<TextView>(R.id.labelVod).text = "影片 ${vods.size} 条"
+        // 海报诊断上屏。TV 上抓 logcat 麻烦，海报空白时最要紧的是分清两类失败：
+        //   vod_pic 本来是空的（数据侧，改加载器没用）
+        //   vod_pic 有值但一张没下来（加载侧，UA/防盗链/代理/解码）
+        // 延迟两秒再刷新，是因为图片下载在后台线程池里异步完成，立刻取只能全 0。
+        findViewById<TextView>(R.id.labelVod)?.postDelayed({ updatePosterDiag() }, 2500)
         // 空列表时把接口原始返回摘要直接显示在页面上。TV 上抓 logcat 麻烦，截图就能定位：
         //   code=-1 + msg=csp 未就绪     → jar/init 的问题，msg 里有 jar 路径
         //   code=-1 + msg=...返回空      → spider 该接口没给内容，msg 里有反射异常 / ext / 网络诊断

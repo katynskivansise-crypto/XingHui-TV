@@ -30,6 +30,29 @@ object AsyncImageLoader {
 
     private val placeHolder = ColorDrawable(0xFF1A1A1A.toInt())
 
+    // ---------------- 诊断计数器 ----------------
+    // TV 上抓 logcat 麻烦，海报空白时最要紧的是分清两类完全不同的失败：
+    //   ① vodPic 本来就是空的    → 数据侧，spider 没给图，壳侧怎么修都没用
+    //   ② vodPic 有值但一张没下来 → 加载侧，UA / 防盗链 / 代理 / 解码
+    // 三个计数由 MainActivity 拼进「影片 N 条」那一行，截图就能判断，不用连 adb。
+    @Volatile var okCount = 0          // 成功上屏的
+    @Volatile var failCount = 0        // 下载 / 解码失败的
+    @Volatile var emptyCount = 0       // url 本身就是空的
+    @Volatile var lastFailReason = ""  // 首条失败原因（带 url 尾巴），点开分类就能看到
+
+    fun resetDiag() {
+        okCount = 0
+        failCount = 0
+        emptyCount = 0
+        lastFailReason = ""
+    }
+
+    private fun noteFail(reason: String, url: String) {
+        failCount++
+        // 只留首条，避免被后续重复失败覆盖成噪音；URL 取尾巴 60 字符，够认出是哪张图
+        if (lastFailReason.isEmpty()) lastFailReason = "$reason@${url.takeLast(60)}"
+    }
+
     // 并发要够：一屏 20+ 张海报，4 线程时每张都得等前面排队，
     // 表现为"从左到右慢慢填、大部分长时间空白"。8 线程配合下面的短超时后基本秒出。
     private val pool = Executors.newFixedThreadPool(8)
@@ -51,7 +74,11 @@ object AsyncImageLoader {
     fun load(view: ImageView, url: String) {
         view.setImageDrawable(placeHolder)
         view.tag = url
-        if (url.isBlank()) return
+        if (url.isBlank()) {
+            // 站点压根没给封面。这类"空白"改加载器是白费劲，要回头查 vod_pic 映射
+            emptyCount++
+            return
+        }
         // TVBox 站的封面地址会把 header 内嵌在 URL 尾巴上（对齐原版 ImgUtil.getUrl 的四类后缀）：
         //   https://x.jpg@Referer=https://y/@User-Agent=Mozilla...
         //   不拆出来的话，@Referer=... 会被当成路径的一部分 → 服务器 404 → 海报永远空白。
@@ -66,6 +93,7 @@ object AsyncImageLoader {
                 if (bmp != null) {
                     cache.put(url, bmp)
                     view.setImageBitmap(bmp)
+                    okCount++
                 }
             }
             return
@@ -76,6 +104,7 @@ object AsyncImageLoader {
 
         cache.get(url)?.let { bmp ->
             view.setImageBitmap(bmp)
+            okCount++
             return
         }
 
@@ -95,22 +124,30 @@ object AsyncImageLoader {
                 val bytes = readDisk(ctx, url)
                     ?: localBytes(ctx, cleanUrl)?.also { writeDisk(ctx, url, it) }
                     ?: fetch(ctx, realUrl, extraHeaders)?.also { writeDisk(ctx, url, it) }
-                if (bytes == null || bytes.isEmpty()) return@execute
+                if (bytes == null || bytes.isEmpty()) {
+                    noteFail("下载为空", url)
+                    return@execute
+                }
                 val bmp = decodeSampled(bytes, reqW, reqH)
                 if (bmp == null) {
                     // 磁盘里存的可能是错误页/半截数据（例如 CDN 返回的 HTML），
                     // 不清掉的话这张海报会永久空白——删掉让下次重新下载
                     runCatching { diskFile(ctx, url).delete() }
+                    noteFail("解码失败 len=${bytes.size}", url)
                     Log.e("XingHuiTV", "[image] 解码失败，已清除缓存 len=${bytes.size} url=$url")
                     return@execute
                 }
                 cache.put(url, bmp)
                 view.post {
                     // 控件已被复用绑定到别的 url 时，丢弃这次结果
-                    if (view.tag == url) view.setImageBitmap(bmp)
+                    if (view.tag == url) {
+                        view.setImageBitmap(bmp)
+                        okCount++
+                    }
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
                 // 占位图已设置，静默失败（catch Throwable：解码 OOM 也不该让进程崩）
+                noteFail("异常 ${e.javaClass.simpleName}", url)
             }
         }
     }

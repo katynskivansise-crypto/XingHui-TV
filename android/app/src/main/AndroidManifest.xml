@@ -3,6 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 配置·中心的三类功能落盘位置不同，权限要求也不同：
+         网盘线程 / GO 代理版本 → <filesDir>/Pizazz/config.json，应用私有目录，不需要任何权限；
+         Cookie / Token          → /sdcard/TVBox/*.txt，走外部存储
+                                   （spider 的 merge/m/k.b(String) = new File(getExternalStorageDirectory(), "TVBox")）。
+         少了这两条就是 EACCES：界面上"输入框填了、提示保存成功"，文件其实一个字都没写进去。
+         targetSdk 34 在 API 25 设备上仍然按运行时权限模型走，所以还得在代码里动态申请。 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
