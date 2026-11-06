@@ -76,11 +76,7 @@ class MainActivity : Activity() {
 
         // 右侧影片网格
         vodAdapter = VideoAdapter(vods) { vod ->
-            runCatching {
-                startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
-            }.onFailure { e ->
-                Toast.makeText(this, "无法打开详情：${e.message}", Toast.LENGTH_LONG).show()
-            }
+            openVod(vod, "无法打开详情")
         }
         vodList = findViewById<RecyclerView>(R.id.vodList).apply {
             layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
@@ -101,11 +97,7 @@ class MainActivity : Activity() {
         // 形态按 Style.list() → rect 0.75、列数 = uiColumns()，宽度由 VideoAdapter 按 Product.getSpec 计算；
         // 之前用 LibAdapter + item_lib.xml（200dp 死宽 / 250dp 死高），卡片既不随屏幕也不随列数变化。
         recommendAdapter = VideoAdapter(recommends, columns = uiColumns()) { vod ->
-            runCatching {
-                startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
-            }.onFailure { e ->
-                Toast.makeText(this@MainActivity, "无法打开详情：${e.message}", Toast.LENGTH_LONG).show()
-            }
+            openVod(vod, "无法打开详情")
         }
         findViewById<RecyclerView>(R.id.recommendList).apply {
             layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
@@ -539,6 +531,58 @@ class MainActivity : Activity() {
     }
 
     /** 空状态提示（空串则隐藏） */
+    /**
+     * 影片卡片点击分派 —— 严格按原版 VodFragment.onItemClick 的优先级：
+     *   1) isAction → 调 spider.action()，把返回内容当提示展示（配置类站点的功能入口）
+     *   2) isFolder → 是下一级分类，不是影片；二级导航未实现，给出明确提示而不是打开空白详情
+     *   3) 其余     → 正常打开详情
+     * 不做这三段判断时，配置·中心的"检查更新/导出配置"会被当影片打开详情页，永远空白。
+     */
+    private fun openVod(vod: Vod, failTip: String) {
+        if (vod.isAction()) {
+            runCspAction(vod)
+            return
+        }
+        if (vod.isFolder()) {
+            Toast.makeText(this, "「${vod.vodName}」是分类目录（二级导航暂未实现），不是影片", Toast.LENGTH_LONG).show()
+            return
+        }
+        runCatching {
+            startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
+        }.onFailure { e ->
+            Toast.makeText(this, "$failTip：${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** 执行站点 action 并展示结果（多数 action 返回 {"list":[...]} 或纯文本提示） */
+    private fun runCspAction(vod: Vod) {
+        val site = runCatching {
+            SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
+        }.getOrNull()
+        if (site == null || !site.isCsp()) {
+            Toast.makeText(this, "该功能仅 csp 站点支持（api=${site?.api.orEmpty()}）", Toast.LENGTH_LONG).show()
+            return
+        }
+        Thread {
+            val json = CspLoader.action(this, site, vod.action)
+            runOnUiThread {
+                val o = runCatching { JSONObject(json) }.getOrNull()
+                val list = o?.optJSONArray("list")
+                if (list != null && list.length() > 0) {
+                    // action 返回了影片列表（少数站点用它做"更多"），直接铺到首页推荐区
+                    val parsed = Vod.parseList(json)
+                    recommends.clear()
+                    recommends.addAll(parsed)
+                    recommendAdapter.notifyDataSetChanged()
+                    showHomeHint("${vod.vodName}：返回 ${parsed.size} 条")
+                } else {
+                    val msg = o?.optString("msg").orEmpty().ifBlank { json.take(200) }
+                    showHomeHint("${vod.vodName}\n$msg")
+                }
+            }
+        }.start()
+    }
+
     private fun showEmpty(msg: String) {
         findViewById<TextView>(R.id.tvEmpty)?.apply {
             text = msg
@@ -657,11 +701,13 @@ class MainActivity : Activity() {
             }
             if (groups.isNotEmpty()) {
                 filtersByType[tid] = groups
-                // 对齐原版 Class.getExtend：带 init 的筛选组默认就计入请求参数。
-                // 不带的话首次进分类页的请求比原版少几个参数，部分站点（如 AppDrama）
-                // 会因此返回字段残缺的数据 —— 表现为标题/角标正常但海报整片空白。
                 val sel = selectedFilters.getOrPut(tid) { mutableMapOf() }
-                groups.forEach { g -> if (g.init.isNotBlank()) sel.putIfAbsent(g.key, g.init) }
+                // 1) 先恢复用户上次在该分类选过的条件（原版从 SharedPreferences 读回 activated 状态）
+                restoreFilterSelection(tid, groups, sel)
+                // 2) 没恢复到的组，再用 init 默认值补（对齐原版 Class.getExtend）
+                groups.forEach { g ->
+                    if (sel[g.key].isNullOrBlank() && g.init.isNotBlank()) sel.putIfAbsent(g.key, g.init)
+                }
             }
         }
         Log.e("XingHuiTV", "[filters] 解析到 ${filtersByType.size} 个分类的筛选项，" +
@@ -707,12 +753,46 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle(g.name)
             .setItems(labels.toTypedArray()) { _, which ->
-                selectedFilters.getOrPut(tid) { mutableMapOf() }[g.key] = g.values[which].second
+                val v = g.values[which].second
+                val m = selectedFilters.getOrPut(tid) { mutableMapOf() }
+                // 对齐原版 VodFragment.setClick：选中才 put，取消要 remove。
+                // 原版靠 Value.setActivated 的切换语义实现"取消"（再点一次变 false → mExtends.remove），
+                // 而"全部"这类项的值通常就是空串。无条件 put 会让 extend 里出现 key=""，
+                // 站点收到空参数可能直接返回空列表 —— 这就是筛选后"影片 0 条"的来源之一。
+                if (v.isBlank()) m.remove(g.key) else m[g.key] = v
+                saveFilterSelection(tid, m)
                 renderFilters(tid)
                 onCategory(tid)
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    // ---------- 筛选条件持久化（对齐原版 Prefers "filter_<站key>_<分类tid>"） ----------
+    // 原版 HomeActivity:216 / VodActivity:56 把 homeContent 返回的 filters（含 activated 标记）
+    // 整个序列化进 SharedPreferences，下次进同一分类直接读回来，用户的选择不会丢。
+    private fun filterPrefKey(tid: String): String = "filter_${siteKey}_$tid"
+
+    private fun saveFilterSelection(tid: String, sel: Map<String, String>) {
+        runCatching {
+            val o = JSONObject()
+            sel.forEach { (k, v) -> if (v.isNotBlank()) o.put(k, v) }
+            getSharedPreferences("xinghui_filters", MODE_PRIVATE)
+                .edit().putString(filterPrefKey(tid), o.toString()).apply()
+        }
+    }
+
+    /** 恢复上次的选择；只保留当前 values 里确实存在的值（站点改版后旧值会失效） */
+    private fun restoreFilterSelection(tid: String, groups: List<FilterGroup>, sel: MutableMap<String, String>) {
+        runCatching {
+            val raw = getSharedPreferences("xinghui_filters", MODE_PRIVATE)
+                .getString(filterPrefKey(tid), null) ?: return
+            val o = JSONObject(raw)
+            groups.forEach { g ->
+                val v = o.optString(g.key, "")
+                if (v.isNotBlank() && g.values.any { it.second == v }) sel[g.key] = v
+            }
+        }
     }
 
     private fun parseHome(json: String) {
@@ -870,20 +950,23 @@ class MainActivity : Activity() {
         // 只在首页（非追加）时应用，避免翻页过程中反复改列数导致焦点跳动。
         if (!append && parsed.isNotEmpty()) applyPageStyle(parsed.first())
         findViewById<TextView>(R.id.labelVod).text = "影片 ${vods.size} 条"
-        // 空列表时把接口原始返回摘要直接显示在页面上。
-        // TV 上抓 logcat 麻烦，截图即可区分三种情况：
-        //   list.len=-1  → 返回体里根本没有 list 字段（站点的 categoryContent 没按 TVBox 格式返回）
-        //   list.len=0   → 接口确实返回空（配置型/搜索型站点的正常表现）
-        //   code!=0      → 接口报错，msg 会带原因
+        // 空列表时把接口原始返回摘要直接显示在页面上。TV 上抓 logcat 麻烦，截图就能定位：
+        //   code=-1 + msg=csp 未就绪     → jar/init 的问题，msg 里有 jar 路径
+        //   code=-1 + msg=...返回空      → spider 该接口没给内容，msg 里有反射异常 / ext / 网络诊断
+        //   list.len=0 code=0            → 接口正常但该分类确实为空（网盘/配置类站点的正常表现）
+        //   raw=...                      → 返回体连 JSON 都不是
         if (vods.isEmpty()) {
             val diag = runCatching {
                 val o = JSONObject(json)
                 val n = o.optJSONArray("list")?.length() ?: -1
                 val code = o.optInt("code", 0)
                 val msg = o.optString("msg")
-                "list.len=$n code=$code" + (if (msg.isNotBlank()) " msg=${msg.take(60)}" else "")
-            }.getOrDefault("raw=${json.take(80)}")
-            showEmpty("该分类暂无内容（接口返回空）\n$diag")
+                // 放宽到 200 字：诊断里要能放下 invoke 异常、init 原因和网络诊断，截 60 会丢关键信息
+                "list.len=$n code=$code" + (if (msg.isNotBlank()) "\nmsg=${msg.take(200)}" else "")
+            }.getOrDefault("raw=${json.take(80).ifBlank { "（空字符串）" }}")
+            // 实测结论：若 invoke=无异常却始终为空，绝大多数是该站点 ext 里配置的上游源已失效
+            // （荐片 csp_JianPian 配的两个磁力站：一个 HTTP 000 拒连，一个返回 {"code":0,"data":""}）
+            showEmpty("该分类暂无内容（接口返回空）\n$diag\n\n若上面 invoke=无异常，多为该站点配置的上游源已失效，不是解析问题")
         } else {
             showEmpty("")
         }

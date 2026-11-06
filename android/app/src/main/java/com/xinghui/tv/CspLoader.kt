@@ -450,9 +450,8 @@ object CspLoader {
      * 形如 {"year":"2024","area":"大陆"}，原样交给 spider.categoryContent 的第 4 个参数。
      *
      * 第 3 个参数 filter 必须传 true（对齐原版 VodFragment:184 / TypeFragment:157）。
-     * 之前传 false 会让 jar 内部走"不带筛选"的另一个接口分支，
-     * 部分站点（AppDrama 等）该分支返回的条目缺少封面字段 —— 表现为分类页标题/角标正常、
-     * 海报整片空白，而同站首页（走 homeContent）图片正常。
+     * 空返回时带上失败原因，避免壳侧只能显示"接口返回空"——那样分不清是
+     * spider 抛异常、init 失败（ext 没配好）还是站点该分类确实没内容。
      */
     fun category(
         context: Context,
@@ -461,27 +460,100 @@ object CspLoader {
         pg: String,
         extend: Map<String, String> = emptyMap()
     ): String {
-        val s = spider(context, site) ?: return ""
-        return str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
+        val s = spider(context, site)
+            ?: return JSONObject().put("code", -1)
+                .put(
+                    "msg",
+                    "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}，原因未记录" }}）"
+                ).toString()
+        lastInvokeError = ""
+        val r = str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
+        if (r.isBlank()) {
+            return JSONObject().put("code", -1)
+                .put(
+                    "msg",
+                    "categoryContent 返回空（tid=$tid pg=$pg）"
+                        + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                        + (if (lastJarError.isNotBlank()) " | init=$lastJarError" else "")
+                        + " | ext=" + site.ext.take(80)
+                        + okhttp3.internal.Bridge.diag()
+                ).toString()
+        }
+        return r
+    }
+
+    /**
+     * 执行站点 action（对齐原版 Spider.action / SiteViewModel.action）。
+     * 配置类站点（csp_Config 等）的首页返回的不是影片，而是一堆 {"action":"..."} 功能入口，
+     * 原版 VodFragment.onItemClick 最先判断 isAction → 调这个方法 → 把结果当 Result 展示。
+     */
+    fun action(context: Context, site: Site, action: String): String {
+        val s = spider(context, site)
+            ?: return JSONObject().put("code", -1)
+                .put("msg", "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}" }}）").toString()
+        lastInvokeError = ""
+        val r = str(invoke(s, "action", action))
+        if (r.isBlank()) {
+            return JSONObject().put("code", -1)
+                .put("msg", "action 返回空（action=$action）"
+                    + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                    + " | 该站点可能未实现 action 接口")
+                .toString()
+        }
+        return r
     }
 
     /** 详情页（ids 为 vod_id） */
     fun detail(context: Context, site: Site, ids: String): String {
-        val s = spider(context, site) ?: return ""
+        val s = spider(context, site)
+            ?: return JSONObject().put("code", -1)
+                .put("msg", "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}" }}）").toString()
+        lastInvokeError = ""
         val idList: List<String> = if (ids.isBlank()) emptyList() else listOf(ids)
-        return str(invoke(s, "detailContent", idList))
+        val r = str(invoke(s, "detailContent", idList))
+        if (r.isBlank()) {
+            return JSONObject().put("code", -1)
+                .put("msg", "detailContent 返回空（ids=$ids）"
+                    + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                    + okhttp3.internal.Bridge.diag())
+                .toString()
+        }
+        return r
     }
 
     /** 搜索 */
     fun search(context: Context, site: Site, key: String): String {
-        val s = spider(context, site) ?: return ""
-        return str(invoke(s, "searchContent", key, false))
+        val s = spider(context, site)
+            ?: return JSONObject().put("code", -1)
+                .put("msg", "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}" }}）").toString()
+        lastInvokeError = ""
+        val r = str(invoke(s, "searchContent", key, false))
+        if (r.isBlank()) {
+            return JSONObject().put("code", -1)
+                .put("msg", "searchContent 返回空（key=$key）"
+                    + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                    + okhttp3.internal.Bridge.diag())
+                .toString()
+        }
+        return r
     }
 
     /** 播放信息：返回含 url / header 的 JSON（原版 Result 结构） */
     fun player(context: Context, site: Site, flag: String, id: String): String {
-        val s = spider(context, site) ?: return ""
-        return str(invoke(s, "playerContent", flag, id, listOf<String>()))
+        val s = spider(context, site)
+            ?: return JSONObject().put("code", -1)
+                .put("msg", "csp 未就绪（${lastJarError.ifBlank { "jar=${jarOf(site).take(60)}" }}）").toString()
+        lastInvokeError = ""
+        val r = str(invoke(s, "playerContent", flag, id, listOf<String>()))
+        if (r.isBlank()) {
+            return JSONObject().put("code", -1)
+                .put("msg", "playerContent 返回空（flag=$flag id=$id）"
+                    + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                    + " | ext=" + site.ext.take(60)
+                    + okhttp3.internal.Bridge.diag())
+                .toString()
+        }
+        return r
     }
 
     /** 从 playerContent 结果里取 header 映射（User-Agent / Referer 等），空则返回空 map */

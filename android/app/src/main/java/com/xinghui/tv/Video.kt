@@ -28,6 +28,15 @@ data class Vod(
     val land: Int = 0,
     val circle: Int = 0,
     val ratio: Float = 0f,
+    // ---------- folder / action 判定（对齐原版 bean/Vod） ----------
+    // 原版 VodFragment.onItemClick 最先判断 isAction，再 isFolder，最后才当影片打开详情：
+    //   isAction()  = !getAction().isEmpty()            → 调 spider.action(action)，配置类站点的功能入口
+    //   isFolder()  = "folder".equals(vodTag) || cate!=null → 该条目其实是下一级分类，不是影片
+    // 缺这两个判定时，配置·中心的"检查更新/导出配置"之类会被当影片打开详情页（永远空白），
+    // 层级分类条目同理。这里补上字段与判定，点击时按原版优先级分派。
+    val vodTag: String = "",
+    val action: String = "",
+    val hasCate: Boolean = false,
 ) {
     companion object {
         fun fromJson(o: JSONObject): Vod = Vod(
@@ -62,6 +71,10 @@ data class Vod(
             land = o.optInt("land", 0),
             circle = o.optInt("circle", 0),
             ratio = o.optDouble("ratio", 0.0).toFloat(),
+            vodTag = o.optString("vod_tag"),
+            action = o.optString("action"),
+            // 原版 isFolder() 里 cate != null 也算：cate 只带 land/circle/ratio 三个样式字段
+            hasCate = o.has("cate") && !o.isNull("cate"),
         )
 
         /** 从引擎返回的 {list:[...]} 解析影片列表 */
@@ -75,9 +88,17 @@ data class Vod(
         }
     }
 
+    /** 原版 Vod.isAction()：有 action 字段的条目是功能入口，不能当影片打开 */
+    fun isAction(): Boolean = action.isNotBlank()
+
+    /** 原版 Vod.isFolder()：folder 标签或带 cate 的条目是下一级分类 */
+    fun isFolder(): Boolean = vodTag.equals("folder", true) || hasCate
+
+    /** 原版 Vod.isManga()：漫画条目（vod_tag=manga），当前只用于显示角标，不参与播放 */
+    fun isManga(): Boolean = vodTag.equals("manga", true)
+
     /** 播放线路（引擎 vod_lines 优先，缺失时本地解析） */
-    fun lines(): List<PlayLine> {
-        if (vodLinesJson.isNotBlank()) {
+    fun lines(): List<PlayLine> {        if (vodLinesJson.isNotBlank()) {
             val parsed = runCatching {
                 val arr = JSONArray(vodLinesJson)
                 (0 until arr.length()).mapNotNull { i ->
