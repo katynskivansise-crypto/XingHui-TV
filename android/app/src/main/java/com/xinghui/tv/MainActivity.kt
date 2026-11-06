@@ -610,6 +610,11 @@ class MainActivity : Activity() {
         lastEmptyPage = 0
         vods.clear()
         vodAdapter.notifyDataSetChanged()
+        // 清列表时必须同步清掉「影片 N 条」和上一站/上一分类留下的空态提示。
+        // 否则 vods 已经清成 0 条，界面还挂着旧的「影片 48 条」+ 旧提示，
+        // 看起来像"有 48 条但一条都不显示"，实际是 0 条。
+        findViewById<TextView>(R.id.labelVod).text = "影片 0 条"
+        showEmpty("")
         loadCategoryPage(tid, 1, append = false)
     }
 
@@ -673,7 +678,10 @@ class MainActivity : Activity() {
         val key: String,
         val name: String,
         val values: List<Pair<String, String>>,  // (显示名, 传给站点的值)
-        val init: String = ""                    // 原版 Filter.init：该组的默认选中值
+        val init: String = "",                   // 原版 Filter.init：该组的默认选中值
+        // 原版 Class.getExtend 的判断是 filter.getInit() != null，
+        // 这和"init 的值是空字符串"是两回事：有 init 但值为空串，同样要 put 进 extend。
+        val hasInit: Boolean = false
     )
 
     private val filtersByType = mutableMapOf<String, List<FilterGroup>>()
@@ -697,7 +705,8 @@ class MainActivity : Activity() {
                         va.optJSONObject(j)?.let { v -> v.optString("n") to v.optString("v") }
                     }
                 } ?: emptyList()
-                FilterGroup(key, f.optString("name").ifBlank { key }, vals, f.optString("init"))
+                FilterGroup(key, f.optString("name").ifBlank { key }, vals,
+                    f.optString("init"), f.has("init"))
             }
             if (groups.isNotEmpty()) {
                 filtersByType[tid] = groups
@@ -705,8 +714,11 @@ class MainActivity : Activity() {
                 // 1) 先恢复用户上次在该分类选过的条件（原版从 SharedPreferences 读回 activated 状态）
                 restoreFilterSelection(tid, groups, sel)
                 // 2) 没恢复到的组，再用 init 默认值补（对齐原版 Class.getExtend）
+                //    原版是无条件 extend.put(key, init)：只要该组有 init 字段就写进去，
+                //    哪怕 init 是空字符串。空串和"没有这个 key"对站点是两种不同的参数组合，
+                //    所以这里不能因为 init 为空就跳过，否则 extend 会缺键。
                 groups.forEach { g ->
-                    if (sel[g.key].isNullOrBlank() && g.init.isNotBlank()) sel.putIfAbsent(g.key, g.init)
+                    if (sel[g.key] == null && g.hasInit) sel.putIfAbsent(g.key, g.init)
                 }
             }
         }

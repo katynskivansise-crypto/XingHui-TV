@@ -37,6 +37,15 @@ object CspLoader {
     @Volatile
     private var defaultJar: String = ""
 
+    /**
+     * spider.jar 内 `Init.saveConfig()` 的默认配置原文（反汇编逐个键值取出，437 字符 19 键）。
+     *
+     * 为什么不直接调 `Init.init` 让它自己写：见 loadJar 里的说明——那是个防二次打包校验器，
+     * 命中后会起后台线程延迟结束进程，我们的签名 DN恰好命中黑名单。所以只复刻写盘动作。
+     */
+    private const val DEFAULT_SPIDER_CONFIG =
+        """{"version":"2.0","update":"关闭","danmuColor":"默认","danmuSearch":"开启","aliQuality":"阿里原画","quarkQuality":"夸克无限","ucQuality":"UC无限","baiduQuality":"百度无限","123Quality":"123无限","proxyMode":"Go多线程","pansouUrl":"https://so.252035.xyz","panView":"文件夹视图","panOrder":"百度,夸克,UC,迅雷,光鸭,天翼,123,阿里,移动","homePage":"猜你喜欢,热门电影,热播剧集,热门动漫,热播综艺,电影筛选,电视筛选,电影榜单,电视剧榜单","aliThread":"64","quarkThread":"16","ucThread":"自动","baiduThread":"16","xunleiThread":"10"}"""
+
     /** 最近一次 jar 加载失败的具体原因，透传到首页提示，免去没有 logcat 时盲猜 */
     @Volatile
     private var lastJarError: String = ""
@@ -96,6 +105,9 @@ object CspLoader {
         // 不设置的话 AppDrama 一碰文件或配置就 NoClassDefFoundError/NPE。
         runCatching { com.github.catvod.Init.set(context) }
             .onFailure { Log.e(TAG, "[csp.prepare] Init.set 失败", it) }
+        // ★必须先于一切 spider 调用：Config/网盘配置页的 categoryContent 全靠这份 config.json，
+        // 缺失则整段 catch 成空，分类页永远 0 条。幂等，命中缓存 jar 也照样保证它在。
+        ensureSpiderConfig(context)
         val key = md5Of(jar) // 原版 parseJar(Util.md5(jar), jar)
         loaders[key]?.let { return it }
         synchronized(lock) {
@@ -251,6 +263,62 @@ object CspLoader {
     }
 
     /**
+     * 复刻 spider.jar 内 `Init.saveConfig()` 的产物：`<filesDir>/Pizazz/config.json`。
+     *
+     * 反汇编确认的调用链（这是「配置·中心 影片 0 条」的真正根因）：
+     *   Config.categoryContent(tid) 里每个分支的 Quality/Thread 卡片，以及 tid="other"
+     *   分支的 proxyMode / pansouUrl / panView 三张卡片，都是
+     *       k.d("/config.json") → k.a(file) → JsonParser.parse(...).getAsJsonObject()
+     *           .get("pansouUrl").getAsString()
+     *   而 k.d 的路径基址是 `new File(Init.context().getFilesDir(), "Pizazz")`。
+     *   文件不存在 → k.a 读空串 → parse("") 抛 → **整个 categoryContent 被 catch 成 ""** →
+     *   分类页恒定「影片 0 条」。原版能出 8 格，唯一差别就是原版 Init.init 里跑过 saveConfig。
+     *
+     * 注意不能“文件存在就不管”：旧版本可能只写了部分键，缺键照样 NPE。所以按**补键**处理，
+     * 已有值（用户自己改过的）一律保留，只补缺失项。
+     */
+    private fun ensureSpiderConfig(context: Context) {
+        runCatching {
+            val dir = File(context.filesDir, "Pizazz")
+            if (!dir.exists() && !dir.mkdirs()) {
+                Log.e(TAG, "[csp.config] 创建目录失败 ${dir.absolutePath}")
+                return@runCatching
+            }
+            val f = File(dir, "config.json")
+            val tpl = JSONObject(DEFAULT_SPIDER_CONFIG)
+            if (f.exists() && f.length() > 2) {
+                val cur = runCatching { JSONObject(f.readText()) }.getOrNull()
+                if (cur == null) {
+                    // 文件损坏（半截 JSON 之类）：备份后整份重写，避免永久卡在空分类
+                    val bak = File(dir, "config.json.bak")
+                    runCatching { f.copyTo(bak, overwrite = true) }
+                    f.writeText(DEFAULT_SPIDER_CONFIG, Charsets.UTF_8)
+                    Log.e(TAG, "[csp.config] 原配置无法解析，已备份到 ${bak.name} 并重写默认")
+                    return@runCatching
+                }
+                var added = 0
+                tpl.keys().forEach { key ->
+                    if (!cur.has(key)) {
+                        cur.put(key, tpl.get(key))
+                        added++
+                    }
+                }
+                if (added > 0) {
+                    f.writeText(cur.toString(), Charsets.UTF_8)
+                    Log.e(TAG, "[csp.config] 已有配置补键 $added 个 → ${f.absolutePath}")
+                } else {
+                    Log.e(TAG, "[csp.config] 配置完整（${cur.length()} 键），保留不动")
+                }
+            } else {
+                f.writeText(DEFAULT_SPIDER_CONFIG, Charsets.UTF_8)
+                Log.e(TAG, "[csp.config] 已写入默认配置 ${f.absolutePath} len=${f.length()} 键=${tpl.length()}")
+            }
+        }.onFailure { e ->
+            Log.e(TAG, "[csp.config] 写入默认配置失败", e)
+        }
+    }
+
+    /**
      * 准备全局默认 jar（幂等，按 md5 缓存）。
      * 站点自带 jar 时由 spider() 按需懒加载，无需逐个调本方法。
      */
@@ -347,7 +415,16 @@ object CspLoader {
         val jarKey = md5Of(jar)
         recentJarKey = jarKey
         val spKey = jarKey + site.key // 原版 spKey = md5(jar) + key
-        spiders[spKey]?.let { return it }
+        spiders[spKey]?.let { cached ->
+            // ★缓存命中也要再兜一次。原因：首次 init 时若 ext.site 第一项是已注销域名
+            // （荐片就是 www.whhyn.com，NXDOMAIN），spider 内部的探活循环会被外层 catch
+            // 整体中断，第二项 https://www.zxfmj.com 一次都没被试过 → 实例字段 a 留 null。
+            // 而实例一旦进 spiders 缓存，就会带着 null 的 a 活到进程结束，
+            // 分类页因此"永久 0 条且不发请求"。ensureBaseUrl 是幂等的（a 非空立即 return），
+            // 放在这里每次只多一次字段读取，却能把这种"缓存了残缺实例"救回来。
+            ensureBaseUrl(site, cached)
+            return cached
+        }
         return try {
             val clsName = "com.github.catvod.spider." + site.api.removePrefix("csp_")
             val clz = dl.loadClass(clsName)
@@ -366,6 +443,12 @@ object CspLoader {
                 Log.e(TAG, "[csp.spider] init 失败 ${site.key} ext=${site.ext.take(100)}", real)
             }
             spiders[spKey] = inst
+            // init 之后 spider 内部会留下若干 String 字段（如 JianPian 的 a/b），
+            // 它们承载 base 地址与分类父级 id。这些字段一旦为 null，
+            // categoryContent 里 String.replace(占位符, null) 会直接抛 NPE 并被 spider 自己吞掉，
+            // 表现就是"分类页永远空、而且根本没发出请求"。这里把真实值打出来。
+            dumpStringFields(site, inst)
+            ensureBaseUrl(site, inst)
             inst
         } catch (e: Throwable) {
             // 对齐原版 catch Throwable：NoClassDefFoundError / ExceptionInInitializerError 也要接住
@@ -378,6 +461,107 @@ object CspLoader {
     /** csp_AppDrama → com.github.catvod.spider.AppDrama，仅用于日志/提示 */
     private fun clsNameOf(site: Site): String =
         "com.github.catvod.spider." + site.api.removePrefix("csp_")
+
+    /**
+     * 打印 spider 实例上所有 String 字段的真实值（含父类）。
+     * 用途：init 不抛异常不代表初始化成功 —— 它可能把站点地址/父级 id 存进字段，
+     * 而某个分支失败时会留下 null，后续接口再拿这个 null 去拼 URL 就静默返回空。
+     * 这段只读字段、不写任何东西，避免把 host/publicKey 之类一起写脏。
+     */
+    private fun dumpStringFields(site: Site, inst: Any) {
+        runCatching {
+            val sb = StringBuilder()
+            var c: Class<*>? = inst.javaClass
+            var depth = 0
+            while (c != null && depth < 4) {
+                for (f in c.declaredFields) {
+                    if (f.type != String::class.java) continue
+                    try {
+                        f.isAccessible = true
+                        val v = f.get(inst) as String?
+                        sb.append(f.name).append('=').append(v ?: "null").append("  ")
+                    } catch (t: Throwable) {
+                        sb.append(f.name).append("=读取失败  ")
+                    }
+                }
+                c = c.superclass
+                depth++
+            }
+            Log.e(TAG, "[csp.fields] ${site.key} ${site.api} → ${sb.toString().trim()}")
+        }.onFailure { Log.e(TAG, "[csp.fields] 读取失败 ${site.key}", it) }
+    }
+
+    /**
+     * 补齐 spider 的 base 地址字段（JianPian 的 String a）。
+     *
+     * 实测语义：JianPian.init 会对 ext.site 里每个地址发 HEAD，只把第一个返回 2xx/3xx 的写进 a，
+     * 写成功后立刻 return；其中任何一个地址若 DNS 解析失败并抛出异常，整个循环会被 catch 掉并 return，
+     * 后面的地址根本不再尝试。a 一旦留成 null，categoryContent 的第一条实质指令就是
+     * StringBuilder.append(this.a)，NPE 被 spider 自己吞掉，表现就是「分类页永远空、而且一个请求都没发」。
+     * 现网订阅 ext.site 的第一个域名已注销（NXDOMAIN），所以这条兜底是必需的。
+     */
+    private fun ensureBaseUrl(site: Site, inst: Any) {
+        runCatching {
+            val f = inst.javaClass.getDeclaredField("a")
+            f.isAccessible = true
+            val cur = f.get(inst) as String?
+            if (!cur.isNullOrBlank()) {
+                Log.e(TAG, "[csp.base] ${site.key} a=$cur（init 已设置，无需补齐）")
+                return
+            }
+            val arr = runCatching { JSONObject(site.ext).optJSONArray("site") }.getOrNull()
+            if (arr == null) {
+                Log.e(TAG, "[csp.base] ${site.key} ext 无 site 数组，跳过")
+                return
+            }
+            for (i in 0 until arr.length()) {
+                val u = arr.optString(i).trim()
+                if (u.isEmpty()) continue
+                val code = runCatching { probeHead(u) }.getOrDefault(-1)
+                Log.e(TAG, "[csp.base] ${site.key} 探活 $u → $code")
+                if (code in 200..399) {
+                    f.set(inst, u)
+                    Log.e(TAG, "[csp.base] ${site.key} 手工补齐 a=$u")
+                    return
+                }
+            }
+            Log.e(TAG, "[csp.base] ${site.key} ext.site 全部不可达，a 仍为 null")
+        }.onFailure { Log.e(TAG, "[csp.base] 补齐失败 ${site.key}", it) }
+    }
+
+    /** HEAD 探活，返回状态码；连不上返回 -1。超时压到 5s，避免启动被死域名拖住。 */
+    /**
+     * 探活一个 base 地址，返回 HTTP 状态码；任何异常一律 -1（调用方据此跳过）。
+     *
+     * ★这里刻意用 GET 而不是 HEAD，原因是实测出来的：
+     *   `JianPian.init` 自己探活用的是 HEAD。它在循环里对 ext.site 逐项 `execute().code()`，
+     *   而订阅里的 site 数组第一项是 https://www.whhyn.com —— **该域名已注销（NXDOMAIN）**，
+     *   `execute()` 抛 UnknownHostException，被 spider 自己的外层 catch 吞掉，**整个循环就此中断**，
+     *   第二项 https://www.zxfmj.com 一次都没被试过，于是 `a` 永远是 null。
+     *   `categoryContent` 第一条实质指令就是 `StringBuilder.append(this.a)` → NPE → 被自己 catch
+     *   → 返回 "" → 分类页恒「影片 0 条」，而且**一个请求都不会发出去**。
+     *
+     *   而 zxfmj 本身是活的：GET /api/crumb/list?fcate_pid=1&... → 200 / 4855 B
+     *   {"code":1,"msg":"获取筛选页数据成功","data":[{"id":2023,"title":"地..."}]}
+     *   HEAD 根路径也是 200。所以只要绕开 whhyn 那一项、把 a 补成 zxfmj，分类就能出内容。
+     *
+     *   这里不用 HEAD 的第二个原因：我们的 okhttp3 兼容层走 Rust 引擎，HEAD 的状态码
+     *   在部分服务上会丢失，Bridge 里 code==0 直接抛 IOException，探活全部变成 -1，
+     *   兜底等于没做。GET 没有这个毛病。
+     */
+    private fun probeHead(url: String): Int {
+        val client = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .readTimeout(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build()
+        val req = okhttp3.Request.Builder().url(url).method("GET", null).build()
+        val resp = client.newCall(req).execute()
+        return try {
+            resp.code()
+        } finally {
+            runCatching { resp.close() }
+        }
+    }
 
     @Suppress("UNCHECKED_CAST")
     private fun invoke(obj: Any, name: String, vararg args: Any?): Any? {
@@ -468,6 +652,9 @@ object CspLoader {
                 ).toString()
         lastInvokeError = ""
         val r = str(invoke(s, "categoryContent", tid, pg, true, HashMap(extend)))
+        // spider 返回非空但列表为空时，问题在它内部的解析/解密，不在我们的参数；
+        // 这条日志把 spider 的真实原文留下来，真机上直接看就知道它给了什么。
+        Log.e(TAG, "[csp.category] tid=$tid pg=$pg extend=$extend len=${r.length} 原文=${r.take(300)}")
         if (r.isBlank()) {
             return JSONObject().put("code", -1)
                 .put(
