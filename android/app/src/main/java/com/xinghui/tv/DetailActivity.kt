@@ -69,7 +69,7 @@ class DetailActivity : Activity() {
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
 
-        findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
+        // 返回按钮按原版去掉（原版 VodActivity 靠系统返回键），布局里也不再声明
         findViewById<View>(R.id.btnFav).setOnClickListener { toggleFav() }
         findViewById<View>(R.id.btnDesc).setOnClickListener { showDescDialog() }
         findViewById<View>(R.id.btnSource).setOnClickListener { switchSource() }
@@ -103,8 +103,13 @@ class DetailActivity : Activity() {
         // 原版同一个站点有多个播放源时，某个源播不动会自动切下一个
         player?.addListener(object : androidx.media3.common.Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，尝试自动换源")
-                autoSwitchSource()
+                // 同一个错误可能连发，800ms 内只处理一次，避免疯狂切源
+                val now = System.currentTimeMillis()
+                if (now - lastErrorMs < 800) return
+                lastErrorMs = now
+                Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，走自动换源")
+                handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
+                    reason = "播放器错误 ${error.errorCodeName}", depth = 0)
             }
 
             override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -191,6 +196,25 @@ class DetailActivity : Activity() {
         findViewById<RecyclerView>(R.id.detailList)?.let { rv ->
             rv.post { rv.requestFocus() }
         }
+        // 对齐原版：VideoActivity 打开即 onRefresh 起播当前集，不是等用户点。
+        // 迅雷单条要先等展开结果，展开完再起播。
+        val autoOnly = episodes.singleOrNull()
+        if (autoOnly != null && ThunderPlay.match(autoOnly.second)) {
+            autoPlayAfterExpand = true
+        } else {
+            autoPlayFromHistory()
+        }
+    }
+
+    /** 详情报自动起播：优先上次看到的那一集，没有记录就第 1 集 */
+    private fun autoPlayFromHistory() {
+        if (autoStarted) return
+        autoStarted = true
+        val last = runCatching { HistoryStore(this).epUrlOf(vod?.vodId.orEmpty()) }.getOrDefault("")
+        val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == last }
+            .takeIf { it >= 0 } ?: 0
+        Log.e("XingHuiTV", "[detail] 自动起播 idx=$idx 共${episodes.size}集")
+        playInline(idx, auto = true)
     }
 
     /** 显示当前线路的集数列表 */
@@ -230,12 +254,23 @@ class DetailActivity : Activity() {
                 applyEpisodeGrid()
                 rebuildGroups()
                 showGroup(0)
+                if (autoPlayAfterExpand) {
+                    autoPlayAfterExpand = false
+                    autoStarted = true
+                    playInline(0, auto = true)
+                }
             }
         }.apply { isDaemon = true }.start()
     }
 
     /** 每次渲染线路自增，用于丢弃过期的异步展开结果 */
     private var episodeSeq = 0
+
+    /** 详情页自动起播只做一次（换线路/换源由各自逻辑负责） */
+    private var autoStarted = false
+
+    /** 迅雷单条：等磁力/种子展开完成后再起播 */
+    private var autoPlayAfterExpand = false
 
     /**
      * 集数网格：列数与行高都照原版 VideoActivity.setEpisodeAdapter 的算法
@@ -326,31 +361,41 @@ class DetailActivity : Activity() {
         currentLine = line
         val keep = playingIdx
         renderEpisodes(line)
-        if (keep >= 0) playInline(keep.coerceIn(0, (line.episodes.size - 1).coerceAtLeast(0)))
+        if (keep >= 0) playInline(keep.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
     }
 
-    /** 播放失败自动换下一个源（原版同一站点多源自动切换） */
-    private var sourceTried = 0
-    private fun autoSwitchSource() {
+    /**
+     * 起播失败统一入口（对齐原版 VideoActivity.startFlow → checkFlag）：
+     * 原版任何失败都走这里 —— 先 checkParse 轮解析源，再 checkFlag 逐条往后换线路，
+     * 走到最后一条才 checkSearch 跨站。
+     *
+     * 我们之前只在 onPlayerError 里换源，而「解析返回空 url」「内核不支持该源」这两种
+     * 失败发生在起播之前，根本触发不到 onPlayerError，所以自动换源永远不生效、只能手动点。
+     */
+    private var lastErrorMs = 0L
+    private fun handlePlayFailure(idx: Int, auto: Boolean, reason: String, depth: Int) {
         val v = vod ?: return
         val lines = v.parseLines()
-        if (lines.size <= 1) {
-            Toast.makeText(this, "该片只有一个源，播放失败", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (sourceTried >= lines.size - 1) {
-            sourceTried = 0
-            Toast.makeText(this, "所有源都播放失败", Toast.LENGTH_SHORT).show()
-            return
-        }
+        Log.e("XingHuiTV", "[detail] 起播失败 depth=$depth：$reason（当前 ${(currentLine?.name ?: "?")}，共 ${lines.size} 条线路）")
         val cur = lines.indexOfFirst { it.name == currentLine?.name }.let { if (it < 0) 0 else it }
-        val next = lines[(cur + 1) % lines.size]
-        sourceTried++
-        Toast.makeText(this, "「${next.name}」重试", Toast.LENGTH_SHORT).show()
-        currentLine = next
-        renderEpisodes(next)
-        val idx = playingIdx.coerceAtLeast(0)
-        playInline(idx.coerceIn(0, (next.episodes.size - 1).coerceAtLeast(0)))
+        if (cur < lines.size - 1 && depth < lines.size) {
+            val next = lines[cur + 1]
+            // 对齐原版 Notify.show(getString(R.string.play_switch_flag, flag.getFlag()))
+            Toast.makeText(this, "正在切换到「${next.name}」", Toast.LENGTH_SHORT).show()
+            currentLine = next
+            renderEpisodes(next)
+            val i = idx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+            playInline(i, auto = auto, depth = depth + 1)
+            return
+        }
+        // 走完最后一条线路：原版继续 checkSearch 跨站搜索，本工程暂不做跨站
+        Log.e("XingHuiTV", "[detail] 全部 ${lines.size} 条线路均失败")
+        if (auto) {
+            Toast.makeText(this, "所有线路都播放失败，可手动换源", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "内嵌全部线路失败，转播放页", Toast.LENGTH_SHORT).show()
+            openPlayPage(idx)
+        }
     }
 
     /**
@@ -453,14 +498,18 @@ class DetailActivity : Activity() {
         renderEpisodes(next)
         Toast.makeText(this, "已换源：${next.name}", Toast.LENGTH_SHORT).show()
         // 正在播就接着播同一集号的另一线路，否则只切换集数列表
-        if (playingIdx >= 0) playInline(playingIdx)
+        if (playingIdx >= 0) playInline(playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
     }
 
     /** 当前线路的第 idx 集（对齐原版 setEpisodeActivated → onRefresh） */
-    private fun playInline(idx: Int) {
+    private fun playInline(idx: Int, auto: Boolean = false, depth: Int = 0) {
         val v = vod ?: return
         val line = currentLine ?: v.parseLines().firstOrNull() ?: return
-        val ep = line.episodes.getOrNull(idx) ?: return
+        // 集数列表以「当前展示的 episodes」为准：磁力/种子被 expandThunder 展开后，
+        // line.episodes 还是原始未展开的那份，用它会取错集或越界（点了不播）。
+        val ep = episodes.getOrNull(idx)
+            ?: line.episodes.getOrNull(idx)
+            ?: run { Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}"); return }
         playingIdx = idx
         inlineView.visibility = View.VISIBLE
         findViewById<View>(R.id.detailImage)?.visibility = View.GONE
@@ -485,14 +534,24 @@ class DetailActivity : Activity() {
             }.onFailure { err = it.message ?: it.javaClass.simpleName }
             runOnUiThread {
                 if (url.isBlank()) {
-                    // 解析不出来就退回独立播放器，让它走完整的嗅探/迅雷链路
-                    Toast.makeText(this, "内嵌解析失败（$err），转播放页", Toast.LENGTH_SHORT).show()
-                    openPlayPage(idx)
+                    // 解析失败也走自动换源（原版 startFlow 就是解析失败和播放失败同一个入口）
+                    handlePlayFailure(idx, auto, "解析失败：$err", depth)
                     return@runOnUiThread
                 }
-                player?.setMediaItem(MediaItem.Builder().setUri(url).build())
-                player?.prepare()
-                player?.play()
+                // ExoPlayer 缺扩展模块时会抛 IllegalStateException（No suitable media source factory），
+                // 以前没兜住，换到 m3u8 源就直接闪退回主页。这里失败就转独立播放页走完整链路。
+                val ok = runCatching {
+                    player?.setMediaItem(MediaItem.Builder().setUri(url).build())
+                    player?.prepare()
+                    player?.play()
+                    true
+                }.getOrElse { e ->
+                    Log.e("XingHuiTV", "[detail] 内嵌播放源不被支持 $url", e)
+                    false
+                }
+                if (!ok) {
+                    handlePlayFailure(idx, auto, "内核不支持该地址（$url）", depth)
+                }
             }
         }.start()
     }
@@ -559,7 +618,7 @@ class DetailActivity : Activity() {
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT
         )
-        listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.GONE
         }
@@ -573,7 +632,7 @@ class DetailActivity : Activity() {
         val box = findViewById<FrameLayout>(R.id.playerBox)
         // 还原进全屏时保存的那份参数（类型与父容器天然匹配，不做任何强转）
         savedBoxParams?.let { box.layoutParams = it }
-        listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.VISIBLE
         }

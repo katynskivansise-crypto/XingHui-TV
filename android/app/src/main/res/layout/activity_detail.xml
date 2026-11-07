@@ -122,24 +122,7 @@
         android:textSize="16sp"
         android:text="简介" />
 
-    <!-- 返回键：原版没有（靠系统返回），我们摆右上角不挡画面 -->
-    <TextView
-        android:id="@+id/btnBack"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_alignParentEnd="true"
-        android:layout_marginTop="20dp"
-        android:layout_marginEnd="24dp"
-        android:focusable="true"
-        android:clickable="true"
-        android:background="@drawable/selector_tv_btn"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
-        android:textColor="@color/white"
-        android:textSize="16sp"
-        android:text="← 返回" />
+    <!-- 返回按钮已去掉：原版 VodActivity 没有这个按钮，返回靠系统返回键 -->
 
     <!-- 简介/收藏/换源：原版 row2 与播放器框底边对齐，右移一列 -->
     <LinearLayout

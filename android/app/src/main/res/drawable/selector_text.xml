@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 原版 leanback/res/drawable/selector_text.xml：聚焦 blue_500 实底，常态 grey_600 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/shape_text_focused" android:state_focused="true" />
+    <item android:drawable="@drawable/shape_text_activated" android:state_activated="true" />
+    <item android:drawable="@drawable/shape_text_normal" />
+</selector>

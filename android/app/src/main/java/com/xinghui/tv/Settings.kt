@@ -144,7 +144,7 @@ class Settings(context: Context) {
 
     /** 设置项的中文名称，用于设置界面展示 */
     fun kernelLabel(): String =
-        if (playerKernel == KERNEL_MPV) "mpv（外部播放器）" else "ExoPlayer（内置）"
+        if (playerKernel == KERNEL_MPV) "mpv（内置）" else "ExoPlayer（内置）"
 
     companion object {
         const val KERNEL_EXO = "exo"

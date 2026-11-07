@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 原版 leanback/res/drawable/shape_controller.xml 同值：底部控制条渐变 + 顶部圆角 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <gradient
+        android:angle="270"
+        android:endColor="@color/black_50"
+        android:startColor="@color/black_20"
+        android:type="linear" />
+
+    <corners
+        android:topLeftRadius="8dp"
+        android:topRightRadius="8dp" />
+
+</shape>

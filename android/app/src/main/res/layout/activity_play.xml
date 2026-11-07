@@ -1,132 +1,344 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 播放页：全屏播放器 + 返回 + 片名 -->
+<!-- 播放页：全屏播放器 + 底部控制条（结构照原版 leanback/res/layout/view_control_vod.xml）
+     - 控制条默认隐藏，遥控器 ↓/↑ 或菜单键呼出，5 秒无操作自动收起（原版 Constant.INTERVAL_HIDE）
+     - 控制条隐藏时：OK = 暂停/继续，←/→ = 快退/快进 10 秒（对齐原版 CustomKeyDownVod）
+     - 按钮顺序与文案也是原版顺序：下集 上集 选集 刷新 EXO 硬解 1.00 原始 字幕 音轨 视轨 片头 片尾 弹幕搜索 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/transparent">
+    android:background="@android:color/black">
 
+    <!-- 属性对齐原版 styles.xml 的 Player 样式：
+         resize_mode=fit / use_controller=false / auto_show=false -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/playView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@android:color/black" />
+        android:background="@android:color/black"
+        app:auto_show="false"
+        app:resize_mode="fit"
+        app:shutter_background_color="@android:color/black"
+        app:use_controller="false" />
 
-    <TextView
-        android:id="@+id/btnBack"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:padding="14dp"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp"
-        android:focusable="true"
-        android:clickable="true"
-        android:background="@drawable/selector_tv_btn"
-        android:text="← 返回" />
-
-    <!-- 顶部控制：上/下集 + 倍速 + 缩放（对齐原项目 control.prev/next/speed/scale） -->
-    <LinearLayout
-        android:id="@+id/controlPanel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:orientation="vertical"
-        android:padding="6dp"
-        android:background="#66000000">
-
-        <TextView
-            android:id="@+id/btnPrev"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:text="上一集" />
-
-        <TextView
-            android:id="@+id/btnNext"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:text="下一集" />
-
-        <TextView
-            android:id="@+id/btnSpeed"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:text="倍速 1.0x" />
-
-        <TextView
-            android:id="@+id/btnScale"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:text="缩放 等比" />
-
-        <TextView
-            android:id="@+id/btnQuality"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:text="清晰度 自动"
-            android:visibility="gone" />
-    </LinearLayout>
-
-    <!-- 解析源（对齐原版 view_control_vod.xml 的那一行 parse）：有解析配置且本站没给 playUrl 时才显示。
-         原版是控制条最顶部的横向列表，我们控制条在右上角，这里放在底部、片名上方，横向可滚动。 -->
-    <HorizontalScrollView
-        android:id="@+id/parseBar"
+    <!-- 内嵌 mpv 的画面层：与 playView 二选一显示。
+         setZOrderMediaOverlay(true) 已由 MpvPlayer 设置，否则原生 surface 会把控制条盖住 -->
+    <SurfaceView
+        android:id="@+id/mpvView"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:layout_marginBottom="44dp"
-        android:background="#66000000"
-        android:paddingStart="16dp"
-        android:paddingEnd="16dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp"
-        android:scrollbars="none"
-        android:visibility="gone">
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:visibility="gone" />
 
-        <LinearLayout
-            android:id="@+id/parseRow"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal" />
-    </HorizontalScrollView>
-
+    <!-- 片名：原版顶部 info（view_widget_vod），跟随控制条显隐 -->
     <TextView
         android:id="@+id/playTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:background="#66000000"
+        android:paddingStart="12dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:text="播放中"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp" />
+
+    <!-- 底部控制条 -->
+    <LinearLayout
+        android:id="@+id/controlBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:padding="12dp"
-        android:textColor="#FFFFFF"
-        android:textSize="15sp"
-        android:background="#66000000"
-        android:text="播放中" />
+        android:background="@drawable/shape_controller"
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingTop="18dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <!-- 解析源（原版控制条最上一行 parse） -->
+        <HorizontalScrollView
+            android:id="@+id/parseBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/parseRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <!-- 按钮行：横向可滚动 -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/actionLayout"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnNext"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="下集"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnPrev"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="上集"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnEpisodes"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="选集"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnReset"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="刷新"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnPlayer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="EXO"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnDecode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="硬解"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnSpeed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="1.00"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnScale"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="原始"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnTrackText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="字幕"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnTrackAudio"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="音轨"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnTrackVideo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="视轨"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnOpening"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="片头"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnEnding"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="片尾"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnDanmu"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="弹幕搜索"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnLoop"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="循环"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <!-- 清晰度：原版控制条没有独立按钮，多清晰度时才显示（保留功能） -->
+            <TextView
+                android:id="@+id/btnQuality"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="清晰度"
+                android:textColor="@color/white"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- 时间栏（原版 view_control_seek.xml）：位置 / 进度条 / 时长 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/timePos"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="00:00"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <androidx.media3.ui.DefaultTimeBar
+                android:id="@+id/timeBar"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:focusable="true"
+                android:nextFocusUp="@id/btnNext" />
+
+            <TextView
+                android:id="@+id/timeDur"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="00:00"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+        </LinearLayout>
+    </LinearLayout>
 
 </FrameLayout>

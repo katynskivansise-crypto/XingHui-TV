@@ -7,12 +7,10 @@ import android.widget.Toast
 
 /**
  * 播放内核统一入口。
- * 根据设置决定使用内置 ExoPlayer 还是调用外部 mpv-android（is.xyz.mpv）。
  *
- * 说明：真正把 libmpv 内嵌进 APK 需要在 CI 里交叉编译 ffmpeg+libmpv，
- * 体积与稳定性风险都很高。本实现采用 TVBox 生态通用的做法 ——
- * 安装 mpv-android（is.xyz.mpv）后，通过 Intent 把解析出的播放地址交给它播放，
- * 未安装或启动失败时自动回退到内置 ExoPlayer。
+ * 本版本已把 libmpv 内嵌进 APK（mpv-android 官方 arm64 构建，见 MpvPlayer.kt），
+ * 设置里选 mpv 时，播放走本进程内的 libmpv + SurfaceView，控制条可以直接控它，
+ * 不再需要用 Intent 拉起外部 mpv-android。外部调用仅作为兜底的兼容路径保留。
  */
 object PlayerManager {
 
@@ -27,12 +25,13 @@ object PlayerManager {
         false
     }
 
-    /** 是否应使用 mpv（设置在 mpv 内核 且 已安装 mpv-android） */
+    /** 是否应使用 mpv：只看设置，内嵌内核不依赖外部 app 是否安装 */
     fun shouldUseMpv(context: Context): Boolean =
-        Settings(context).playerKernel == Settings.KERNEL_MPV && isMpvInstalled(context)
+        Settings(context).playerKernel == Settings.KERNEL_MPV
 
     /**
-     * 启动 mpv-android 播放。
+     * 兼容路径：把地址交给外部 mpv-android（内嵌内核不可用时兜底）。
+     * 正常情况下 PlayActivity 走 MpvPlayer，不再调用这里。
      * @return true=成功交给 mpv；false=失败（未安装/无法启动），调用方应回退 ExoPlayer
      */
     fun launchMpv(context: Context, url: String, title: String?): Boolean {
