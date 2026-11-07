@@ -37,17 +37,16 @@ class HistoryActivity : Activity() {
             items,
             { vod ->
                 runCatching {
-                    if (vod.vodFlag.isNotBlank() && vod.vodEpUrl.isNotBlank()) {
-                        startActivity(Intent(this, PlayActivity::class.java).apply {
-                            putExtra("vod_id", vod.vodId)
-                            putExtra("vod_name", vod.vodName)
-                            putExtra("vod_pic", vod.vodPic)
-                            putExtra("flag", vod.vodFlag)
-                            putExtra("ep_url", vod.vodEpUrl)
-                        })
-                    } else {
-                        startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
-                    }
+                    // 对齐原版 HistoryActivity.onItemClick → VideoActivity.start：
+                    // 点历史一律进播放页续播，不因为线路名/集地址缺失就改跳详情页。
+                    // 缺失的字段播放页会自己拉详情回落到第一集（fetchAndPlay 里做）。
+                    startActivity(Intent(this, PlayActivity::class.java).apply {
+                        putExtra("vod_id", vod.vodId)
+                        putExtra("vod_name", vod.vodName)
+                        putExtra("vod_pic", vod.vodPic)
+                        putExtra("flag", vod.vodFlag)
+                        putExtra("ep_url", vod.vodEpUrl)
+                    })
                 }.onFailure { e ->
                     Toast.makeText(this, "打开失败：${e.message}", Toast.LENGTH_LONG).show()
                 }

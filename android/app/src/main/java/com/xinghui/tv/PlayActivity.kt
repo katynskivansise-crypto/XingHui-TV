@@ -146,6 +146,8 @@ class PlayActivity : Activity() {
 
     /** 拉详情（取线路列表）→ 解析指定线路/集播放 */
     private fun fetchAndPlay(vid: String, fl: String, ep: String) {
+        var playFlag = fl
+        var playEp = ep
         runCatching {
             val store = SubscriptionStore(this)
             val site = store.sites().firstOrNull { it.key == siteKey }
@@ -156,8 +158,16 @@ class PlayActivity : Activity() {
             }
             val v = Vod.parseList(detail).firstOrNull()
             v?.let { vodLines = it.lines() }
+            // 从历史点进来时，线路名/集地址可能有缺（老记录、站点改过线路名）。
+            // 原版 VideoActivity 拿不到也会自己回落到第一集，这里做同样的事，
+            // 否则 resolvePlay 会把影片 id 当成集地址去请求，直接解析失败。
+            val line = vodLines.firstOrNull { it.name == playFlag } ?: vodLines.firstOrNull()
+            if (line != null) {
+                if (playFlag.isBlank()) playFlag = line.name
+                if (playEp.isBlank()) playEp = line.episodes.firstOrNull()?.second.orEmpty()
+            }
         }
-        resolvePlay(fl, ep)
+        resolvePlay(playFlag, playEp)
     }
 
     /** 调用引擎 player 接口解析出播放地址；csp_ 源走壳侧并带 header；失败进入自动换源重试链 */
