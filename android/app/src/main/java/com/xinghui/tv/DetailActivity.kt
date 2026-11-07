@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.drawable.Drawable
+import android.view.KeyEvent
 import android.os.Bundle
 import android.text.method.LinkMovementMethod
 import android.util.Log
@@ -40,6 +42,8 @@ class DetailActivity : Activity() {
     private var inlineFullscreen = false
     /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
     private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
+    /** 进全屏前小窗上的焦点边框（selector_video），退出全屏时原样还原 */
+    private var savedBoxForeground: Drawable? = null
     /** 当前正在播放的集下标；-1 表示还没起播 */
     private var playingIdx = -1
     /** 当前线路的集数数组，供"点当前那集进全屏"判断用 */
@@ -555,6 +559,12 @@ class DetailActivity : Activity() {
                 }
                 if (!ok) {
                     handlePlayFailure(idx, auto, "内核不支持该地址（$url）", depth)
+                } else {
+                    // 原版 VideoActivity:1269 一进播放就把 History 建好。详情页内嵌播放器
+                    // 以前完全不写历史，「好多看过的片在历史里没有」就是这么来的。
+                    runCatching {
+                        HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)
+                    }
                 }
             }
         }.start()
@@ -618,6 +628,11 @@ class DetailActivity : Activity() {
         inlineView.visibility = View.VISIBLE
         val box = findViewById<FrameLayout>(R.id.playerBox)
         savedBoxParams = box.layoutParams
+        // 对齐原版 VideoActivity.enterFullscreen():853 —— mBinding.video.setForeground(null)。
+        // 小窗挂的 selector_video 聚焦时画的是 shape_video_focused（1.5dp 纯白描边），
+        // 全屏时不去掉，四周就留一整圈白线，也就是一直在说的「四周白条」。
+        savedBoxForeground = box.foreground
+        box.foreground = null
         box.layoutParams = android.widget.RelativeLayout.LayoutParams(
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT
@@ -636,11 +651,45 @@ class DetailActivity : Activity() {
         val box = findViewById<FrameLayout>(R.id.playerBox)
         // 还原进全屏时保存的那份参数（类型与父容器天然匹配，不做任何强转）
         savedBoxParams?.let { box.layoutParams = it }
+        // 对齐原版 exitFullscreen():866 —— setForeground(selector_video) 还原小窗焦点边框
+        box.foreground = savedBoxForeground ?: runCatching {
+            getDrawable(R.drawable.selector_video)
+        }.getOrNull()
         listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.VISIBLE
         }
         findViewById<View>(R.id.detailList).requestFocus()
+    }
+
+    /**
+     * 菜单键（原版 VideoActivity.dispatchKeyEvent:1686-1687 只在全屏时分流）。
+     * 详情页内嵌播放器没有原版那套控制条 UI，所以菜单键直接把当前集转独立播放页
+     * PlayActivity —— 那才是原版 VideoActivity 的形态，控制条、选集、选轨全都在。
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val menu = event.keyCode == KeyEvent.KEYCODE_MENU
+        if (inlineFullscreen && menu) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                openPlayPageFromCurrent()
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    /** 把当前正在播的这一集原样交给独立播放页 */
+    private fun openPlayPageFromCurrent() {
+        val v = vod ?: return
+        val line = currentLine ?: return
+        val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
+        startActivity(Intent(this, PlayActivity::class.java).apply {
+            putExtra("vod_id", v.vodId)
+            putExtra("vod_name", v.vodName)
+            putExtra("vod_pic", v.vodPic)
+            putExtra("flag", line.name)
+            putExtra("ep_url", ep.second)
+        })
     }
 
     override fun onBackPressed() {

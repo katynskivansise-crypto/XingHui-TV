@@ -170,47 +170,13 @@ class MainActivity : Activity() {
      * 往 ListRow 里加 R.string.home_history（简中 = 最近观看），内容是 History.get() 全量。
      * 卡片尺寸走 HistoryPresenter.setLayoutSize()，与历史页 HistoryAdapter 完全同一套。
      */
+    /**
+     * 首页历史横排。原版 HomeFragment:117 会摆一行「最近观看」（R.string.home_history）。
+     * 按用户当前口径改为：首页不摆这一行，只保留顶部「历史」入口进 HistoryActivity。
+     * 观看记录本身照常写入、历史页照常显示。
+     */
     private fun loadQuickHistory() {
-        val quickRow = findViewById<View>(R.id.quickRow)
-        if (!Settings(this).isHomeHistory) {
-            quickRow.visibility = View.GONE
-            return
-        }
-        val hist = HistoryStore(this).history().map { Vod.fromJson(it) }
-        if (hist.isEmpty()) {
-            quickRow.visibility = View.GONE
-            return
-        }
-        // 分类页态不显示首页历史横排（它在 openCategoryPage 里已被隐藏，
-        // 这里无条件 VISIBLE 会把它重新点亮，和列表区叠在一起）
-        val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
-        quickRow.visibility = if (onHome) View.VISIBLE else View.GONE
-
-        val column = ProductColumn.of(this)
-        val (cw, ch) = ProductColumn.cell(this, column)
-        findViewById<RecyclerView>(R.id.quickList).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
-            adapter = LibAdapter(hist, { vod ->
-                runCatching {
-                    if (vod.vodFlag.isNotBlank() && vod.vodEpUrl.isNotBlank()) {
-                        startActivity(Intent(this@MainActivity, PlayActivity::class.java).apply {
-                            putExtra("vod_id", vod.vodId)
-                            putExtra("vod_name", vod.vodName)
-                            putExtra("vod_pic", vod.vodPic)
-                            putExtra("flag", vod.vodFlag)
-                            putExtra("ep_url", vod.vodEpUrl)
-                        })
-                    } else {
-                        startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
-                    }
-                }.onFailure { e ->
-                    Toast.makeText(this@MainActivity, "打开失败：${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }, { vod ->
-                HistoryStore(this@MainActivity).removeHistory(vod.vodId)
-                loadQuickHistory()
-            }, null, cw, ch)
-        }
+        findViewById<View>(R.id.quickRow)?.visibility = View.GONE
     }
 
     override fun onResume() {

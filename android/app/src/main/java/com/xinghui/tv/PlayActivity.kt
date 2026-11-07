@@ -1146,18 +1146,28 @@ class PlayActivity : Activity() {
         return String.format(java.util.Locale.US, "%02d:%02d", t / 60, t % 60)
     }
 
-    /** 菜单键候选。原版只认 KEYCODE_MENU（KeyUtil.isMenuKey:35），国产盒子常发 TV_CONTENTS_MENU */
-    private fun isMenuKeyCode(code: Int): Boolean =
-        code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_TV_CONTENTS_MENU
+    /** 对齐原版 KeyUtil.isMenuKey:35 —— 只判 KEYCODE_MENU */
+    private fun isMenuKeyCode(code: Int): Boolean = code == KeyEvent.KEYCODE_MENU
 
     /**
      * 菜单键动作（原版 VideoActivity:1686-1687 两分支）：
      * Setting.getFullscreenMenuKey() == 0 → onToggle() 切控制栏显隐
      * == 1 → onEpisodes() 弹选集并收起控制栏
      */
+    private var lastMenuKeyMs = 0L
+
+    /** 400ms 内只触发一次，避免 DOWN/UP 双入口把动作做两遍 */
+    private fun fireMenuKeyOnce() {
+        val now = System.currentTimeMillis()
+        if (now - lastMenuKeyMs < 400) return
+        lastMenuKeyMs = now
+        handleMenuKey()
+    }
+
     private fun handleMenuKey() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
-        Log.i("XingHuiTV", "[key] 菜单键生效 → ${if (toEpisodes) "选集" else "控制栏"}")
+        // 短提示：既让操作有反馈，也能一眼确认「遥控器这个键到底有没有送到播放页」
+        Toast.makeText(this, if (toEpisodes) "菜单键：选集" else "菜单键：控制栏", Toast.LENGTH_SHORT).show()
         if (toEpisodes) {
             hideControl()
             openEpisodes()
@@ -1170,14 +1180,6 @@ class PlayActivity : Activity() {
      * 双入口兜底：极少数 ROM 的按键不经过 Activity.dispatchKeyEvent 直接落到 onKeyDown，
      * 这里再认一次菜单键。dispatchKeyEvent 已经 return true 时不会走到这里，所以不会双触发。
      */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (isMenuKeyCode(keyCode)) {
-            handleMenuKey()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
     /** 呼出控制条（原版 onKeyDown/onKeyUp → showInfo + showControl） */
     private fun showControl() {
         controlBar?.visibility = View.VISIBLE
@@ -1307,16 +1309,15 @@ class PlayActivity : Activity() {
         //   == 1 → onEpisodes()：弹选集，并收起控制栏
         // 原版放在 dispatchKeyEvent 而不是 onKeyDown，因为控制栏显示时按键会先被 mKeyDown 分支接走
         // 原版 KeyUtil.isMenuKey:35 判的是 ACTION_UP + KEYCODE_MENU（VideoActivity:1686-1687 两分支）。
-        // 但斐讯 T1 这类盒子的遥控器菜单键实测不一定发 KEYCODE_MENU，有的发 KEYCODE_TV_CONTENTS_MENU，
-        // 有的 DOWN/UP 不成对（UP 被上游吃掉就静默无反应）。
-        // 所以这里统一在 ACTION_DOWN 触发一次、UP 直接吞掉（防双触发），
-        // 语义仍与原版一致：档位 0 → 切控制栏显隐；档位 1 → 弹选集并收起控制栏。
-        // 全量按键日志（只在首次按下打，避免连发刷屏），抓一次日志就能看到遥控器真实键码
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            Log.i("XingHuiTV", "[key] down code=${event.keyCode} name=${KeyEvent.keyCodeToString(event.keyCode)}")
-        }
+        // 语义与原版一致：档位 0 → 切控制栏显隐；档位 1 → 弹选集并收起控制栏。
         if (isMenuKeyCode(event.keyCode)) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) handleMenuKey()
+            // 原版 KeyUtil.isMenuKey:35 只认 ACTION_UP。这里 DOWN/UP 都接、400ms 内只算一次：
+            // 只发 UP 的遥控器能响应，只发 DOWN 的也能响应，正常成对的不会双触发。
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount == 0) fireMenuKeyOnce()
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                fireMenuKeyOnce()
+            }
             return true
         }
         val shown = controlBar?.visibility == View.VISIBLE
@@ -1360,16 +1361,7 @@ class PlayActivity : Activity() {
                 return true
             }
             KeyEvent.KEYCODE_BACK -> return super.dispatchKeyEvent(event)
-            else -> {
-                // 遥控器键码各家不同：控制条隐藏时，任何未识别的非方向键在 ACTION_DOWN 就呼出控制条，
-                // 对齐原版「非方向键 → 显示控制」的兜底意图，同时把码打出来便于定位。
-                // 这样即使遥控器的菜单键不是 KEYCODE_MENU，按下去也一定能出控制条。
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    Log.i("XingHuiTV", "[key] 未识别按键 code=${event.keyCode}，呼出控制条")
-                    showControl()
-                }
-                return true
-            }
+            else -> return super.dispatchKeyEvent(event)
         }
         return super.dispatchKeyEvent(event)
     }
