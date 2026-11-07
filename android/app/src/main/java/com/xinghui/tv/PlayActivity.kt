@@ -1261,6 +1261,19 @@ class PlayActivity : Activity() {
      *   控制条显示时 → 交给系统做焦点导航，并重置 4 秒自动收起
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686 + KeyUtil.isMenuKey:35 的 ACTION_UP 判定）
+        //   Setting.getFullscreenMenuKey() == 0 → onToggle()：控制栏显示/隐藏
+        //   == 1 → onEpisodes()：弹选集，并收起控制栏
+        // 原版放在 dispatchKeyEvent 而不是 onKeyDown，因为控制栏显示时按键会先被 mKeyDown 分支接走
+        if (event.action == KeyEvent.ACTION_UP && event.keyCode == KeyEvent.KEYCODE_MENU) {
+            if (Settings(this).fullscreenMenuKey == 1) {
+                hideControl()
+                openEpisodes()
+            } else {
+                toggleControl()
+            }
+            return true
+        }
         val shown = controlBar?.visibility == View.VISIBLE
         if (shown) {
             uiHandler.removeCallbacks(autoHide)
@@ -1384,13 +1397,20 @@ class PlayActivity : Activity() {
         }, clIdx, ce).show()
     }
 
-    /** 菜单键 → 控制条开关（对齐原版 dispatchKeyEvent: Setting.getFullscreenMenuKey()==0 → onToggle） */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_MENU) {
-            toggleControl()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
+    /**
+     * 窗口重新获得焦点就重设一次沉浸式。
+     * 原版 BaseActivity:136-139 就是这么做的 —— IMMERSIVE_STICKY 的 flag 在窗口失焦后会被系统清掉，
+     * 只在 onCreate 设一次的话，弹过系统框、切过页面回来就成了非全屏，画面被压缩、四周露出边。
+     */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyImmersive()
+    }
+
+    /** 原版 BaseActivity:130-133：HDMI 分辨率/HDR 等配置变化后也要重设一次 */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyImmersive()
     }
 
     /** 切后台/被遮挡时立即落盘，避免只靠 15 秒定时那一次丢掉最后片段 */

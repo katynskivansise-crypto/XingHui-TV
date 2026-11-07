@@ -299,9 +299,13 @@ class DetailActivity : Activity() {
                     outRect: android.graphics.Rect, view: View,
                     parent: RecyclerView, state: RecyclerView.State
                 ) {
+                    // 原版 VideoActivity.setEpisodeView(): setHorizontalSpacing(8dp) + setVerticalSpacing(8dp)
+                    // 相邻两格各摊一半，正好 8dp
                     val half = dp(4)
                     outRect.left = half
                     outRect.right = half
+                    outRect.top = half
+                    outRect.bottom = half
                 }
             })
         }

@@ -96,7 +96,7 @@
             android:name=".PlayActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode|density|colorMode"
-            android:theme="@android:style/Theme.Black.NoTitleBar" />
+            android:theme="@style/Theme.TVBox" />
 
         <!-- 搜索 -->
         <activity
