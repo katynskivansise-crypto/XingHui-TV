@@ -473,6 +473,98 @@ object CspLoader {
      * 注意不要挂在 Activity.onDestroy 上：缓存的存在意义就是"返回再进不必重解 jar"，
      * 每次退出页面都清会让每个站重走一遍 30 万字的 dex 加载。只在换订阅/换 jar 时调。
      */
+    /**
+     * 网络自检：用与 spider 完全相同的 compat 客户端（okhttp3 自研层 → Bridge → Rust 引擎）
+     * 请求各网盘取 token 的接口，把 code / 字节数 / 异常类型直接上屏。
+     *
+     * 为什么需要它：百度能弹二维码是因为 `buildBaiduQrInfo` 只有 4 条指令、纯静态拼 URL、
+     * 零请求；而夸克（79 条）/ 迅雷（73 条）/ 光鸭 / 阿里 都是先请求取 token 再拼二维码，
+     * 失败时被 `merge/k/c.a()` 的 catch 吞成空对象，界面上什么都不发生——完全不可观测。
+     * 这里把同一类请求单独跑一遍，就能区分「站点拒绝」「DNS 失败」「TLS 失败」「引擎返回空」，
+     * 这四种故障的修法完全不同，不靠猜。
+     */
+    fun netProbe(): String {
+        val targets = listOf(
+            Triple("夸克token", "GET", "https://uop.quark.cn/cas/ajax/getTokenForQrcodeLogin?client_id=532&v=1.2"),
+            Triple("迅雷device", "POST", "https://xluser-ssl.xunlei.com/v1/auth/device/code")
+        )
+        val sb = StringBuilder()
+        val client = okhttp3.OkHttpClient.Builder().build()
+        targets.forEach { (name, method, url) ->
+            var code = -1
+            var len = 0
+            var err = ""
+            val t0 = System.currentTimeMillis()
+            runCatching {
+                val b = okhttp3.Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0")
+                val req = if (method == "POST") {
+                    b.header("Content-Type", "application/x-www-form-urlencoded")
+                        .post(
+                            okhttp3.RequestBody.create(
+                                okhttp3.MediaType.parse("application/x-www-form-urlencoded"),
+                                "client_id=XW-G4v1H72tgfJym&scope="
+                            )
+                        )
+                        .build()
+                } else b.build()
+                val resp = client.newCall(req).execute()
+                code = resp.code()
+                val body = resp.body()?.string() ?: ""
+                len = body.length
+                resp.close()
+            }.onFailure {
+                code = -1
+                err = "${it.javaClass.simpleName}: ${it.message}"
+            }
+            val ms = System.currentTimeMillis() - t0
+            val ok = if (code in 200..399 && len > 0) "通" else "败"
+            sb.append(name).append(ok).append(" code=").append(code).append(" len=").append(len)
+                .append(" ").append(ms).append("ms")
+            if (err.isNotBlank()) sb.append(" [").append(err.take(70)).append("]")
+            sb.append("；")
+            Log.e(TAG, "[netprobe] $name → code=$code len=$len ${ms}ms $err")
+        }
+        return sb.toString()
+    }
+
+    /** 探活单个 URL：与 spider 用同一套 compat 客户端，把「点了没反应」变成具体 code/耗时/异常 */
+    fun probeUrl(url: String, method: String = "GET"): String {
+        if (url.isBlank()) return ""
+        var code = -1
+        var len = 0
+        var err = ""
+        val t0 = System.currentTimeMillis()
+        runCatching {
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+            val b = okhttp3.Request.Builder().url(url).header("User-Agent", "Mozilla/5.0")
+            val req = if (method == "POST") {
+                b.post(
+                    okhttp3.RequestBody.create(
+                        okhttp3.MediaType.parse("application/json"), "{}"
+                    )
+                ).build()
+            } else b.build()
+            val resp = client.newCall(req).execute()
+            code = resp.code()
+            val body = resp.body()?.string() ?: ""
+            len = body.length
+            resp.close()
+        }.onFailure {
+            code = -1
+            err = "${it.javaClass.simpleName}: ${it.message}"
+        }
+        val ms = System.currentTimeMillis() - t0
+        val sb = StringBuilder()
+        sb.append("code=").append(code).append(" len=").append(len).append(" ").append(ms).append("ms")
+        if (err.isNotBlank()) sb.append(" [").append(err.take(80)).append("]")
+        Log.e(TAG, "[probe] $url → code=$code len=$len ${ms}ms $err")
+        return sb.toString()
+    }
+
     fun destroy() {
         val all = runCatching { spiders.values.toList() }.getOrDefault(emptyList())
         runCatching { spiders.clear() }
@@ -922,9 +1014,14 @@ object CspLoader {
         lastInvokeError = ""
         val r = str(invoke(s, "action", action))
         if (r.isBlank()) {
+            // 之前这里只说「可能未实现 action」，等于没有任何信息。
+            // 现在顺手探活该站 api：能区分「域名打不通 / 通了但返回空 / 抛异常」。
+            val api = site.api.ifBlank { imageBase }.ifBlank { lastBaseInfo.substringBefore(' ') }
+            val probe = if (api.isNotBlank()) runCatching { probeUrl(api) }.getOrDefault("") else ""
             return JSONObject().put("code", -1)
                 .put("msg", "action 返回空（action=$action）"
                     + (if (lastInvokeError.isNotBlank()) " | invoke=$lastInvokeError" else " | invoke=无异常")
+                    + (if (probe.isNotBlank()) " | 探活 ${api.take(48)} → $probe" else " | 探活=无 api")
                     + " | 该站点可能未实现 action 接口")
                 .toString()
         }
