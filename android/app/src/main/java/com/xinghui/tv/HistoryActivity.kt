@@ -115,7 +115,10 @@ class HistoryActivity : Activity() {
         items.clear()
         items.addAll(store.history().map { Vod.fromJson(it) })
         adapter.notifyDataSetChanged()
-        findViewById<TextView>(R.id.libCount).text =
+        findViewById<TextView>(R.id.libCount).text = if (items.isEmpty()) {
+            "共 0 条 —— 还没记录到任何播放，去随便点开一部看几秒就会出现在这里"
+        } else {
             "共 ${items.size} 条（点击续播 / 长按删除）"
+        }
     }
 }

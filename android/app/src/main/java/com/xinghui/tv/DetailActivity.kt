@@ -523,6 +523,11 @@ class DetailActivity : Activity() {
         findViewById<View>(R.id.detailImage)?.visibility = View.GONE
         showVodInfo(ep.first)
         Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
+        // 对齐原版 VideoActivity:1269 —— 起播之前就把 History 建好，不看解析成败。
+        // 放在解析之后写的话，解析慢、解析失败、看两眼就退出，三种情况都不留记录。
+        runCatching {
+            HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)
+        }
         Thread {
             var url = ""
             var err = ""
@@ -559,12 +564,6 @@ class DetailActivity : Activity() {
                 }
                 if (!ok) {
                     handlePlayFailure(idx, auto, "内核不支持该地址（$url）", depth)
-                } else {
-                    // 原版 VideoActivity:1269 一进播放就把 History 建好。详情页内嵌播放器
-                    // 以前完全不写历史，「好多看过的片在历史里没有」就是这么来的。
-                    runCatching {
-                        HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)
-                    }
                 }
             }
         }.start()

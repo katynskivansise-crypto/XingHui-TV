@@ -23,14 +23,18 @@ class HistoryStore(context: Context) {
         epUrl: String = "",
         position: Long = 0,
     ) {
-        if (vodId.isBlank()) return
+        // 原版 History.createHistory 从不会因为 id 为空就跳过（Room 的 key 由 cid + 片名组合）。
+        // 这里原来是一句 `if (vodId.isBlank()) return` —— 详情接口不返回 vod_id 的站点，
+        // 看多少遍都不会留下一条记录，而且没有任何报错。这就是「好多看过的都没有」的静默原因。
+        val key = vodId.ifBlank { name }
+        if (key.isBlank()) return
         // 起播时 recordHistory() 会走到这里：它是"记录这部片看过"，不是"位置归零"。
         // 不沿用旧值的话，每次起播都会把续播位置和片头片尾一起冲掉。
-        val old = history().firstOrNull { it.optString("vod_id") == vodId }
+        val old = history().firstOrNull { it.optString("vod_id") == key }
         val keepPos = if (position > 0) position else (old?.optLong("position", 0) ?: 0)
-        val list = history().filterNot { it.optString("vod_id") == vodId }.toMutableList()
+        val list = history().filterNot { it.optString("vod_id") == key }.toMutableList()
         list.add(0, JSONObject().apply {
-            put("vod_id", vodId)
+            put("vod_id", key)
             put("vod_name", name)
             put("vod_pic", pic)
             put("vod_remarks", remarks)
