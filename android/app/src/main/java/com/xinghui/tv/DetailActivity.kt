@@ -214,7 +214,9 @@ class DetailActivity : Activity() {
     private fun autoPlayFromHistory() {
         if (autoStarted) return
         autoStarted = true
-        val last = runCatching { HistoryStore(this).epUrlOf(vod?.vodId.orEmpty()) }.getOrDefault("")
+        val v0 = vod
+        val hKey = (v0?.vodId.orEmpty()).ifBlank { v0?.vodName.orEmpty() }
+        val last = runCatching { HistoryStore(this).epUrlOf(hKey) }.getOrDefault("")
         val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == last }
             .takeIf { it >= 0 } ?: 0
         Log.e("XingHuiTV", "[detail] 自动起播 idx=$idx 共${episodes.size}集")
@@ -523,6 +525,12 @@ class DetailActivity : Activity() {
         findViewById<View>(R.id.detailImage)?.visibility = View.GONE
         showVodInfo(ep.first)
         Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
+        // 续播：原版 VideoActivity 打开即 setPosition(Math.max(opening, history.position))。
+        // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
+        // 换集就是从 0 开始，不会出现点第 3 集跳到第 1 集进度的情况。
+        val resumeMs = runCatching {
+            HistoryStore(this).position(v.vodId.ifBlank { v.vodName }, ep.second)
+        }.getOrDefault(0L)
         // 对齐原版 VideoActivity:1269 —— 起播之前就把 History 建好，不看解析成败。
         // 放在解析之后写的话，解析慢、解析失败、看两眼就退出，三种情况都不留记录。
         runCatching {
@@ -556,6 +564,7 @@ class DetailActivity : Activity() {
                 val ok = runCatching {
                     player?.setMediaItem(MediaItem.Builder().setUri(url).build())
                     player?.prepare()
+                    if (resumeMs > 1000) player?.seekTo(resumeMs)
                     player?.play()
                     true
                 }.getOrElse { e ->
@@ -700,7 +709,25 @@ class DetailActivity : Activity() {
         super.onBackPressed()
     }
 
+    /** 把内嵌播放器当前进度写回历史（原版 updateHistory 里 setPosition 那条） */
+    private fun saveInlinePosition() {
+        val v = vod ?: return
+        val ep = episodes.getOrNull(playingIdx) ?: return
+        val pos = runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
+        if (pos > 1000) runCatching {
+            HistoryStore(this).setPosition(v.vodId.ifBlank { v.vodName }, ep.second, pos)
+        }
+        Log.i("XingHuiTV", "[detail] 保存进度 ${pos}ms ep=${ep.first}")
+    }
+
+    override fun onPause() {
+        // 退到后台、按返回、切播放页，都先落一次进度；否则只有正常看完才记得住
+        saveInlinePosition()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        saveInlinePosition()
         player?.release()
         player = null
         super.onDestroy()
