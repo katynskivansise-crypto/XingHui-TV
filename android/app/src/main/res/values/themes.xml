@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 主主题：纯黑、无标题栏、全屏（兼容斐讯T1 等旧安卓盒子） -->
+    <!-- 主主题。逐项对齐原版 leanback/res/values/styles.xml 的 BaseTheme：
+         原版 BaseTheme parent=Theme.MaterialComponents.Light.NoActionBar，
+         这里 parent 换成原生全屏主题（本工程不引 MaterialComponents），其余 item 保持一致。
+
+         最容易漏的是 windowTranslucentStatus / windowTranslucentNavigation 两条：
+         原版全屏并不是只靠 windowFullscreen，而是这两条让 DecorView 不再 fitsSystemWindows，
+         内容才真正从屏幕 (0,0) 起算、铺满整块屏。少了它们，部分 ROM（斐讯 T1 这种）
+         会保留一条 insets，播放页画面四周就露出一圈窗口背景（浅色时看着就是"白条"）。 -->
     <style name="Theme.TVBox" parent="android:Theme.Black.NoTitleBar.Fullscreen">
+        <item name="android:windowFullscreen">true</item>
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
     </style>
 </resources>

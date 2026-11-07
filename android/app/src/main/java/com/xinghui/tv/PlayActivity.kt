@@ -1141,6 +1141,38 @@ class PlayActivity : Activity() {
         return String.format(java.util.Locale.US, "%02d:%02d", t / 60, t % 60)
     }
 
+    /** 菜单键候选。原版只认 KEYCODE_MENU（KeyUtil.isMenuKey:35），国产盒子常发 TV_CONTENTS_MENU */
+    private fun isMenuKeyCode(code: Int): Boolean =
+        code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_TV_CONTENTS_MENU
+
+    /**
+     * 菜单键动作（原版 VideoActivity:1686-1687 两分支）：
+     * Setting.getFullscreenMenuKey() == 0 → onToggle() 切控制栏显隐
+     * == 1 → onEpisodes() 弹选集并收起控制栏
+     */
+    private fun handleMenuKey() {
+        val toEpisodes = Settings(this).fullscreenMenuKey == 1
+        Log.i("XingHuiTV", "[key] 菜单键生效 → ${if (toEpisodes) "选集" else "控制栏"}")
+        if (toEpisodes) {
+            hideControl()
+            openEpisodes()
+        } else {
+            toggleControl()
+        }
+    }
+
+    /**
+     * 双入口兜底：极少数 ROM 的按键不经过 Activity.dispatchKeyEvent 直接落到 onKeyDown，
+     * 这里再认一次菜单键。dispatchKeyEvent 已经 return true 时不会走到这里，所以不会双触发。
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (isMenuKeyCode(keyCode)) {
+            handleMenuKey()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     /** 呼出控制条（原版 onKeyDown/onKeyUp → showInfo + showControl） */
     private fun showControl() {
         controlBar?.visibility = View.VISIBLE
@@ -1274,19 +1306,12 @@ class PlayActivity : Activity() {
         // 有的 DOWN/UP 不成对（UP 被上游吃掉就静默无反应）。
         // 所以这里统一在 ACTION_DOWN 触发一次、UP 直接吞掉（防双触发），
         // 语义仍与原版一致：档位 0 → 切控制栏显隐；档位 1 → 弹选集并收起控制栏。
-        val menuLike = event.keyCode == KeyEvent.KEYCODE_MENU ||
-            event.keyCode == KeyEvent.KEYCODE_TV_CONTENTS_MENU
-        if (menuLike) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                val toEpisodes = Settings(this).fullscreenMenuKey == 1
-                Log.i("XingHuiTV", "[key] 菜单键 code=${event.keyCode} → ${if (toEpisodes) "选集" else "控制栏"}")
-                if (toEpisodes) {
-                    hideControl()
-                    openEpisodes()
-                } else {
-                    toggleControl()
-                }
-            }
+        // 全量按键日志（只在首次按下打，避免连发刷屏），抓一次日志就能看到遥控器真实键码
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            Log.i("XingHuiTV", "[key] down code=${event.keyCode} name=${KeyEvent.keyCodeToString(event.keyCode)}")
+        }
+        if (isMenuKeyCode(event.keyCode)) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) handleMenuKey()
             return true
         }
         val shown = controlBar?.visibility == View.VISIBLE
@@ -1354,10 +1379,11 @@ class PlayActivity : Activity() {
             // 硬设窗口 flag（theme 的 windowFullscreen 在部分 ROM 上会被 DecorView insets 覆盖）：
             // FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算，FLAG_LAYOUT_NO_LIMITS 允许溢出系统栏区域。
             // 这两条配合 hideSystemUI 的 LAYOUT_FULLSCREEN，才能真正做到「内容区 = 整块屏幕」。
+            // 只保留两条：FLAG_FULLSCREEN 兜住 hide 系统栏，FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算。
+            // 上一轮加的 FLAG_LAYOUT_NO_LIMITS 是对悬浮窗用的，加在 Activity 上会让窗口尺寸计算异常，已移除。
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_FULLSCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
             )
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
