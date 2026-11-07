@@ -31,6 +31,8 @@ class HistoryActivity : Activity() {
         store = HistoryStore(this)
         findViewById<TextView>(R.id.libTitle).text = "历史记录"
 
+        val column = ProductColumn.of(this)
+        val (cw, ch) = ProductColumn.cell(this, column)
         adapter = LibAdapter(
             items,
             { vod ->
@@ -56,9 +58,13 @@ class HistoryActivity : Activity() {
                 if (items.isEmpty()) exitDeleteMode()
             },
             { enterDeleteMode() },
+            cw, ch,
         )
         findViewById<RecyclerView>(R.id.libList).apply {
-            layoutManager = GridLayoutManager(this@HistoryActivity, 4)
+            // 原版 HistoryActivity.setRecyclerView():
+            //   GridLayoutManager(Product.getColumn()) + SpaceItemDecoration(列数, 16dp)
+            layoutManager = GridLayoutManager(this@HistoryActivity, column)
+            addItemDecoration(SpaceItemDecoration(column, 16))
             adapter = this@HistoryActivity.adapter
         }
 

@@ -271,7 +271,7 @@
                     android:padding="6dp"
                     android:textColor="@android:color/white"
                     android:textSize="14sp"
-                    android:text="历史记录 · 点击续播" />
+                    android:text="最近观看" />
 
                 <androidx.recyclerview.widget.RecyclerView
                     android:id="@+id/quickList"

@@ -1,60 +1,62 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 历史/收藏卡片：海报 + 片名 + 备注 + 删除按钮
-     宽度改 match_parent，由 GridLayoutManager 分配到列宽；海报高度由 LibAdapter
-     按「宽 / 0.75」实时计算（对齐原版 style/Style.getRatio 的 rect 默认值）。
-     此前写死 200dp × 250dp，换屏或换列数时既不铺满也不保持比例。 -->
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:padding="6dp"
+<!-- 历史/收藏卡片：结构照原版 leanback/res/layout/adapter_vod.xml
+     （海报铺满整卡 + 片名压在底部 + 备注压在片名上方 + 删除整卡遮罩）。
+     卡片的宽高由 LibAdapter 按原版 HistoryAdapter.setLayoutSize() 算好传进来，
+     所以根布局不再写死尺寸。 -->
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="150dp"
+    android:layout_height="200dp"
     android:focusable="true"
-    android:clickable="true"
-    android:background="@drawable/item_focus">
+    android:focusableInTouchMode="true">
 
-    <LinearLayout
+    <ImageView
+        android:id="@+id/libImage"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#16161C"
+        android:scaleType="centerCrop" />
+
+    <TextView
+        android:id="@+id/libName"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:layout_alignParentBottom="true"
+        android:background="@drawable/bg_vod_name"
+        android:ellipsize="marquee"
+        android:gravity="center"
+        android:padding="6dp"
+        android:singleLine="true"
+        android:textColor="@android:color/white"
+        android:textSize="16sp" />
 
-        <ImageView
-            android:id="@+id/libImage"
-            android:layout_width="match_parent"
-            android:layout_height="250dp"
-            android:scaleType="centerCrop"
-            android:background="#16161C" />
-
-        <TextView
-            android:id="@+id/libName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:maxLines="1"
-            android:ellipsize="end"
-            android:paddingTop="4dp"
-            android:textColor="#FFFFFF"
-            android:textSize="15sp" />
-
-        <TextView
-            android:id="@+id/libInfo"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:maxLines="1"
-            android:ellipsize="end"
-            android:textColor="#80FFFFFF"
-            android:textSize="12sp" />
-
-    </LinearLayout>
+    <TextView
+        android:id="@+id/libInfo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_above="@id/libName"
+        android:background="@drawable/bg_remark_tag"
+        android:ellipsize="marquee"
+        android:padding="4dp"
+        android:singleLine="true"
+        android:textColor="@android:color/white"
+        android:textSize="14sp" />
 
     <TextView
         android:id="@+id/libDel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:padding="6dp"
-        android:textColor="#FFFFFF"
-        android:textSize="13sp"
-        android:focusable="true"
-        android:clickable="true"
-        android:background="#99000000"
-        android:text="删除" />
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#8C000000"
+        android:gravity="center"
+        android:singleLine="true"
+        android:text="删除"
+        android:textColor="@android:color/white"
+        android:textSize="22sp"
+        android:visibility="gone" />
 
-</FrameLayout>
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/item_focus"
+        android:duplicateParentState="true" />
+
+</RelativeLayout>

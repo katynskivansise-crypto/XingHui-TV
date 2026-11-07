@@ -130,6 +130,11 @@ class PlayActivity : Activity() {
         // 清晰度切换（对齐原项目 QualityAdapter/setQualityActivated）
         findViewById<View>(R.id.btnQuality).setOnClickListener { toggleQuality() }
 
+        // 原版 VideoActivity:1269-1271 在起播前就把 History 建好（createHistory / updateHistory），
+        // 不依赖抖源解析成功。之前只在各条「解析成功」分支里记，解析慢或中途退出就漏记，
+        // 「看过的片子历史里没有」就是这么来的。
+        if (vodId.isNotBlank() && vodName.isNotBlank()) recordHistory()
+
         // 直播直链：直接播放；影片：先拉详情拿线路（供选集面板），再解析播放
         if (directUrl.isNotBlank()) {
             playUrl(directUrl)

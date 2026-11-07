@@ -21,6 +21,9 @@ class LibAdapter(
     private val onClick: (Vod) -> Unit,
     private val onDelete: (Vod) -> Unit,
     private val onLongClick: (() -> Unit)? = null,
+    /** 卡片宽高（px），由 ProductColumn.cell 算好传入，对齐原版 HistoryAdapter.setLayoutSize() */
+    private val cellWidth: Int = 0,
+    private val cellHeight: Int = 0,
 ) : RecyclerView.Adapter<LibAdapter.VH>() {
 
     var deleteMode = false
@@ -38,6 +41,9 @@ class LibAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val root = LayoutInflater.from(parent.context).inflate(R.layout.item_lib, parent, false)
+        if (cellWidth > 0 && cellHeight > 0) {
+            root.layoutParams = RecyclerView.LayoutParams(cellWidth, cellHeight)
+        }
         root.isFocusable = true
         root.isClickable = true
         return VH(root)
@@ -48,20 +54,8 @@ class LibAdapter(
         holder.name.text = vod.vodName
         holder.info.text = vod.vodRemarks.ifBlank { " " }
         AsyncImageLoader.load(holder.image, vod.vodPic)
-        // 海报高度按「格宽 / 0.75」实时算（对齐原版 Product.getSpec: height = width / ratio）
-        holder.root.post {
-            val density = holder.root.resources.displayMetrics.density
-            val w = holder.root.width - (12 * density).toInt()
-            if (w > 0) {
-                val h = (w / 0.75f).toInt()
-                holder.image.layoutParams?.let { lp ->
-                    if (lp.height != h) {
-                        lp.height = h
-                        holder.image.layoutParams = lp
-                    }
-                }
-            }
-        }
+        // 卡宽高由调用方按原版算法传入，海报铺满整卡（原版 adapter_vod.xml 的 image 也是 match_parent）
+
         // 删除角标
         holder.del.visibility = if (deleteMode) View.VISIBLE else View.GONE
         holder.del.setOnClickListener { onDelete(vod) }

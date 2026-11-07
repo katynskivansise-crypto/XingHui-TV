@@ -165,7 +165,11 @@ class MainActivity : Activity() {
         initEngine()
     }
 
-    /** 首页是否显示历史横排（对齐原项目 SettingCustom 的 homeHistory） */
+    /**
+     * 首页「最近观看」横排。原版：HomeFragment:117 在 Setting.isHomeHistory() 为 true 时
+     * 往 ListRow 里加 R.string.home_history（简中 = 最近观看），内容是 History.get() 全量。
+     * 卡片尺寸走 HistoryPresenter.setLayoutSize()，与历史页 HistoryAdapter 完全同一套。
+     */
     private fun loadQuickHistory() {
         val quickRow = findViewById<View>(R.id.quickRow)
         if (!Settings(this).isHomeHistory) {
@@ -181,6 +185,9 @@ class MainActivity : Activity() {
         // 这里无条件 VISIBLE 会把它重新点亮，和列表区叠在一起）
         val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
         quickRow.visibility = if (onHome) View.VISIBLE else View.GONE
+
+        val column = ProductColumn.of(this)
+        val (cw, ch) = ProductColumn.cell(this, column)
         findViewById<RecyclerView>(R.id.quickList).apply {
             layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
             adapter = LibAdapter(hist, { vod ->
@@ -202,7 +209,7 @@ class MainActivity : Activity() {
             }, { vod ->
                 HistoryStore(this@MainActivity).removeHistory(vod.vodId)
                 loadQuickHistory()
-            })
+            }, null, cw, ch)
         }
     }
 

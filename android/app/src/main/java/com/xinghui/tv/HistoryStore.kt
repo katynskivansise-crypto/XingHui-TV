@@ -13,7 +13,7 @@ class HistoryStore(context: Context) {
     private val prefs =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /** 记录播放历史（去重，上限 50 条，最新在前）。flag/epUrl 用于续播。 */
+    /** 记录播放历史（去重，最新在前）。flag/epUrl 用于续播。 */
     fun addHistory(
         vodId: String,
         name: String,
@@ -44,7 +44,8 @@ class HistoryStore(context: Context) {
                 if (old.has("scale")) put("scale", old.optInt("scale"))
             }
         })
-        save(KEY_HISTORY, list.take(50))
+        // 原版 History 是 Room 表、不设条数上限，这里原来只留 50 条，看得多的会被顶掉
+        save(KEY_HISTORY, list.take(200))
     }
 
     /**

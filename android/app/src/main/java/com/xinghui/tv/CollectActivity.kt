@@ -28,6 +28,8 @@ class CollectActivity : Activity() {
         store = HistoryStore(this)
         findViewById<TextView>(R.id.libTitle).text = "收藏"
 
+        val column = ProductColumn.of(this)
+        val (cw, ch) = ProductColumn.cell(this, column)
         adapter = LibAdapter(items, { vod ->
             runCatching {
                 startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
@@ -38,9 +40,10 @@ class CollectActivity : Activity() {
             store.toggleFavorite(vod.vodId, vod.vodName, vod.vodPic, vod.vodRemarks)
             refresh()
             Toast.makeText(this, "已取消收藏：${vod.vodName}", Toast.LENGTH_SHORT).show()
-        })
+        }, null, cw, ch)
         findViewById<RecyclerView>(R.id.libList).apply {
-            layoutManager = GridLayoutManager(this@CollectActivity, 4)
+            layoutManager = GridLayoutManager(this@CollectActivity, column)
+            addItemDecoration(SpaceItemDecoration(column, 16))
             adapter = this@CollectActivity.adapter
         }
 
