@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 与原版 com.fongmi.android.tv 同名同值：黑/白 + 两级半透明底 -->
+<resources>
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+    <color name="black_20">#33000000</color>
+    <color name="black_40">#66000000</color>
+</resources>

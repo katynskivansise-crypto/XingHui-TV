@@ -1,119 +1,170 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 详情页：海报 + 信息 + 简介 + 线路/集数列表 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- 详情页：按原版 activity_video.xml 的数值逐项对齐
+     video 400x225dp(marginStart 24/marginTop 24) / name 24sp bold 右侧 / 三按钮贴框底
+     flag 线路行在框下方 / 集数网格 paddingStart 24 -->
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="#000000"
-    android:padding="24dp">
+    android:background="@android:color/transparent">
 
-    <TextView
-        android:id="@+id/btnBack"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:padding="10dp"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp"
+    <!-- 播放器小窗：原版是固定 400x225dp（16:9 硬尺寸），不是按 weight 撑开 -->
+    <FrameLayout
+        android:id="@+id/playerBox"
+        android:layout_width="400dp"
+        android:layout_height="225dp"
+        android:layout_marginStart="24dp"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="12dp"
+        android:background="@color/black"
         android:focusable="true"
-        android:clickable="true"
-        android:background="@drawable/selector_tv_btn"
-        android:text="← 返回" />
+        android:focusableInTouchMode="true"
+        android:foreground="@drawable/selector_video">
 
+        <ImageView
+            android:id="@+id/detailImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitCenter" />
+
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/inlinePlayer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone"
+            app:resize_mode="fit"
+            app:use_controller="false" />
+        <!-- 起播浮层：原版 view_widget_vod 的 info，标题 20sp、分辨率 16sp，带阴影 -->
+        <RelativeLayout
+            android:id="@+id/vodInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/vodInfoTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:layout_marginTop="16dp"
+                android:layout_marginEnd="16dp"
+                android:letterSpacing="0.02"
+                android:shadowColor="#FF212121"
+                android:shadowDx="2"
+                android:shadowDy="2"
+                android:shadowRadius="1"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:textColor="@color/white"
+                android:textSize="20sp" />
+
+            <TextView
+                android:id="@+id/vodInfoSize"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_below="@id/vodInfoTitle"
+                android:layout_alignStart="@id/vodInfoTitle"
+                android:layout_marginBottom="16dp"
+                android:shadowColor="#FF212121"
+                android:shadowDx="2"
+                android:shadowDy="2"
+                android:shadowRadius="1"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+        </RelativeLayout>
+
+    </FrameLayout>
+
+    <!-- 标题：原版 24sp bold，紧贴播放器框右侧 -->
     <TextView
         android:id="@+id/detailName"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="10dp"
-        android:textColor="#FFFFFF"
-        android:textSize="22sp"
+        android:layout_toEndOf="@id/playerBox"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:layout_marginTop="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="24sp"
+        android:textStyle="bold"
         android:text="影片详情" />
 
-    <LinearLayout
+    <!-- 站源/年份/地区/更新：原版 row1，16sp，各项间隔 12dp -->
+    <TextView
+        android:id="@+id/detailInfo"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_below="@id/detailName"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:text="年份 · 地区 · 备注" />
+
+    <TextView
+        android:id="@+id/detailDesc"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/detailInfo"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
+        android:ellipsize="end"
+        android:lineSpacingExtra="4dp"
+        android:maxLines="4"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:text="简介" />
+
+    <!-- 返回键：原版没有（靠系统返回），我们摆右上角不挡画面 -->
+    <TextView
+        android:id="@+id/btnBack"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_marginTop="20dp"
+        android:layout_marginEnd="24dp"
+        android:focusable="true"
+        android:clickable="true"
+        android:background="@drawable/selector_tv_btn"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:text="← 返回" />
+
+    <!-- 简介/收藏/换源：原版 row2 与播放器框底边对齐，右移一列 -->
+    <LinearLayout
+        android:id="@+id/row2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignStart="@id/detailName"
+        android:layout_alignBottom="@id/playerBox"
         android:orientation="horizontal">
-
-        <!-- 对齐原版 VideoActivity：这里是播放器小窗，点它进全屏。
-             海报压在同一格里，起播前显示海报，起播后被播放器覆盖。 -->
-        <FrameLayout
-            android:id="@+id/playerBox"
-            android:layout_width="0dp"
-            android:layout_height="270dp"
-            android:layout_weight="1.2"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:background="#1A1A1A">
-
-            <ImageView
-                android:id="@+id/detailImage"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:scaleType="centerCrop" />
-
-            <androidx.media3.ui.PlayerView
-                android:id="@+id/inlinePlayer"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:visibility="gone"
-                app:use_controller="false" />
-
-        </FrameLayout>
-
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:orientation="vertical"
-            android:paddingLeft="16dp">
-
-            <TextView
-                android:id="@+id/detailInfo"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingBottom="8dp"
-                android:textColor="#B0FFFFFF"
-                android:textSize="15sp"
-                android:text="年份 · 地区 · 备注" />
-
-            <TextView
-                android:id="@+id/detailDesc"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:maxLines="6"
-                android:ellipsize="end"
-                android:textColor="#CCFFFFFF"
-                android:textSize="14sp"
-                android:lineSpacingExtra="3dp"
-                android:text="简介" />
-
-        </LinearLayout>
-
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingTop="14dp"
-        android:paddingBottom="8dp">
 
         <TextView
             android:id="@+id/btnDesc"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginEnd="16dp"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:drawableStart="@drawable/ic_detail_desc"
-            android:drawableTint="#FFFFFF"
+            android:background="@drawable/selector_item"
             android:drawablePadding="6dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:singleLine="true"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:drawableStart="@drawable/ic_detail_desc"
+            android:drawableTint="@color/white"
             android:text="简介" />
 
         <TextView
@@ -121,67 +172,81 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginEnd="16dp"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:drawableStart="@drawable/ic_detail_keep_off"
-            android:drawableTint="#FFFFFF"
+            android:background="@drawable/selector_item"
             android:drawablePadding="6dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:singleLine="true"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:drawableStart="@drawable/ic_detail_keep_off"
+            android:drawableTint="@color/white"
             android:text="收藏" />
 
         <TextView
             android:id="@+id/btnSource"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
-            android:drawableStart="@drawable/ic_detail_change"
-            android:drawableTint="#FFFFFF"
+            android:background="@drawable/selector_item"
             android:drawablePadding="6dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:singleLine="true"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:drawableStart="@drawable/ic_detail_change"
+            android:drawableTint="@color/white"
             android:text="换源" />
 
     </LinearLayout>
 
-    <!-- 线路名（原版这一行就是「瓜子视频」本身，黄色） -->
-    <TextView
-        android:id="@+id/detailListLabel"
-        android:layout_width="wrap_content"
+    <!-- 播放源 tab：原版 flag 位于播放器框正下方，左右各留 24dp -->
+    <HorizontalScrollView
+        android:id="@+id/flagRow"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingTop="12dp"
-        android:paddingBottom="6dp"
-        android:textColor="#FFCC00"
-        android:textSize="16sp"
-        android:text="播放线路" />
+        android:layout_below="@id/playerBox"
+        android:layout_marginBottom="12dp"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:scrollbars="none">
 
-    <!-- 倒序 + 分段（对齐原版「倒序 → 1-40 41-80 81-102」） -->
+        <LinearLayout
+            android:id="@+id/flagItems"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
+
+    </HorizontalScrollView>
+
+    <!-- 倒序 + 分段：1-40 / 41-80 / 81-102 -->
     <LinearLayout
         android:id="@+id/groupRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
+        android:layout_below="@id/flagRow"
+        android:layout_marginBottom="12dp"
         android:gravity="center_vertical"
-        android:paddingBottom="6dp">
+        android:orientation="horizontal"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp">
 
         <TextView
             android:id="@+id/btnOrder"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:paddingStart="10dp"
-            android:paddingEnd="10dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp"
-            android:textColor="#FFFFFF"
-            android:textSize="15sp"
+            android:background="@drawable/selector_item"
             android:focusable="true"
             android:clickable="true"
-            android:background="@drawable/selector_tv_btn"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:textColor="@color/white"
+            android:textSize="16sp"
             android:text="倒序" />
 
         <TextView
@@ -189,8 +254,8 @@
             android:layout_height="wrap_content"
             android:paddingStart="8dp"
             android:paddingEnd="16dp"
-            android:textColor="#FFFFFF"
-            android:textSize="15sp"
+            android:textColor="@color/white"
+            android:textSize="16sp"
             android:text="→" />
 
         <LinearLayout
@@ -205,8 +270,11 @@
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/detailList"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:clipToPadding="false" />
+        android:layout_height="match_parent"
+        android:layout_below="@id/groupRow"
+        android:layout_marginBottom="12dp"
+        android:clipToPadding="false"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp" />
 
-</LinearLayout>
+</RelativeLayout>

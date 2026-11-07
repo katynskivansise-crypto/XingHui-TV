@@ -24,12 +24,22 @@ class ListAdapter(
         val tv = LayoutInflater.from(parent.context)
             .inflate(android.R.layout.simple_list_item_1, parent, false) as TextView
         tv.setTextColor(android.graphics.Color.WHITE)
-        tv.textSize = 15f
+        tv.textSize = 16f
         tv.setPadding(16, 12, 16, 12)
         tv.isFocusable = true
         tv.isClickable = true
+        // 对齐原版适配器 adapter_episode：半透明黑底 + 4dp 圆角，聚焦时白色 1.5dp 描边
+        tv.gravity = android.view.Gravity.CENTER
+        tv.background = tv.context.getDrawable(R.drawable.selector_item)
         // 横向 tab（如点播页分类条）：simple_list_item_1 默认 match_parent，横排会撑满导致只显示一项
         val lm = (parent as? RecyclerView)?.layoutManager
+        if (lm is androidx.recyclerview.widget.GridLayoutManager) {
+            val m = (tv.context.resources.displayMetrics.density * 4).toInt()
+            tv.layoutParams = RecyclerView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(m, m, m, m) }
+        }
         if (lm is androidx.recyclerview.widget.LinearLayoutManager &&
             lm.orientation == androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL
         ) {
@@ -59,9 +69,8 @@ class ListAdapter(
                     if (has) focusTextColor else android.graphics.Color.WHITE
                 )
             }
-            v.setBackgroundColor(
-                if (has) 0xFF335588.toInt() else android.graphics.Color.TRANSPARENT
-            )
+            // 之前这里用 0xFF335588 铺实心青块，真机上看就是「焦点格一块蓝」，原版没有填充色
+            (v as TextView).isActivated = has
         }
     }
 

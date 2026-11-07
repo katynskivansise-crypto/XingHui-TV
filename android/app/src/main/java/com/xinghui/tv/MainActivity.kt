@@ -73,6 +73,8 @@ class MainActivity : Activity() {
         installCrashReporter()
         ensureStoragePermission()
         ensureTvBoxDir()
+        // 原版 BaseActivity.refreshWall：首页同样是 window 层壁纸，布局透明透出来
+        runCatching { window.setBackgroundDrawableResource(R.drawable.wallpaper_1) }
         setContentView(R.layout.activity_main)
         // 壁纸（对齐原版 BaseActivity.refreshWall：只设 window 背景，不额外加 View）
         runCatching { WallpaperStore.apply(this) }
@@ -171,7 +173,10 @@ class MainActivity : Activity() {
             quickRow.visibility = View.GONE
             return
         }
-        quickRow.visibility = View.VISIBLE
+        // 分类页态不显示首页历史横排（它在 openCategoryPage 里已被隐藏，
+        // 这里无条件 VISIBLE 会把它重新点亮，和列表区叠在一起）
+        val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
+        quickRow.visibility = if (onHome) View.VISIBLE else View.GONE
         findViewById<RecyclerView>(R.id.quickList).apply {
             layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
             adapter = LibAdapter(hist, { vod ->
@@ -319,6 +324,14 @@ class MainActivity : Activity() {
                 if (site.isDrpy() || site.ext.startsWith("http")) continue
                 if (registerSite(site, site.key, dir, ua, proxy)) registered.add(site.key)
             }
+
+            // 4) 网络自检：用与 spider 相同的 compat 客户端探测各网盘「取 token」接口。
+            //    百度能弹二维码是因为它纯静态拼 URL、零请求；夸克/迅雷/光鸭/阿里都要先取 token，
+            //    失败会被 spider 自己 catch 吞掉，界面无任何痕迹。这里把结果直接弹出来，
+            //    让故障从「不弹」变成「第几步、什么原因」。
+            val probe = runCatching { CspLoader.netProbe() }.getOrElse { "自检异常：${it.message}" }
+            Log.e("XingHuiTV", "[netprobe] 汇总 $probe")
+            runOnUiThread { Toast.makeText(this, "网络自检：$probe", Toast.LENGTH_LONG).show() }
         }.start()
     }
 
@@ -903,7 +916,12 @@ class MainActivity : Activity() {
         updateTitle()
 
         if (recommends.isNotEmpty()) {
-            findViewById<View>(R.id.recommendRow)?.visibility = View.VISIBLE
+            // 只有首页态才点亮推荐区：分类页里 mainBody 才是主体。
+            // 这里无条件 VISIBLE 会在「进点播 → 返回 → 首页在后台刷新完成」时
+            // 把推荐区和列表区同时打开，屏幕上就是上半屏首页推荐 + 下半屏分类列表拼一起。
+            val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
+            findViewById<View>(R.id.recommendRow)?.visibility =
+                if (onHome) View.VISIBLE else View.GONE
             findViewById<TextView>(R.id.recommendLabel).text = "更新推荐 · 共 ${recommends.size} 部"
         } else {
             // 首页无推荐时的可读提示（区分「站点没给推荐」与「接口没通」）
@@ -1034,7 +1052,9 @@ class MainActivity : Activity() {
     }
 
     private fun showHomeHint(text: String) {
-        findViewById<View>(R.id.recommendRow)?.visibility = View.VISIBLE
+        // 同 parseHome：分类页态不点亮首页提示区，否则会和列表区叠在一起
+        val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
+        findViewById<View>(R.id.recommendRow)?.visibility = if (onHome) View.VISIBLE else View.GONE
         findViewById<TextView>(R.id.recommendLabel)?.text = text
     }
 

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.text.method.LinkMovementMethod
+import android.util.Log
 import android.view.View
 import android.view.Window
 import android.widget.FrameLayout
@@ -47,6 +48,8 @@ class DetailActivity : Activity() {
     private var activeSection = 0
     /** 原版每段 40 集（1-40 / 41-80 / 81-102） */
     private val GROUP_SIZE = 40
+    /** 播放器框的 16:9 高度（退出全屏时按这个恢复） */
+    private var boxH = 0
 
     private val pairs = mutableListOf<Pair<String, String>>() // (key, 显示名)
     private lateinit var adapter: ListAdapter
@@ -81,8 +84,33 @@ class DetailActivity : Activity() {
         // 我们是 DetailActivity + PlayActivity 两页，就在这里补上同样的直达：
         // 点海报→播第一集，点任意集数→直接全屏播那一集（省掉「先看详情、再点进去」这一步）。
         // 对齐原版 VideoActivity：视频框和集数在同一页，点框进全屏（onVideo 的语义）
+        // 原版 BaseActivity.refreshWall：壁纸设在 window 层，布局透明透出来
+        runCatching { window.setBackgroundDrawableResource(R.drawable.wallpaper_1) }
         inlineView = findViewById(R.id.inlinePlayer)
         player = ExoPlayer.Builder(this).build().also { inlineView.player = it }
+        // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
+        // 比例约 2.6:1，画面只能居中留大黑边（真机上看着就是「缩放不对」）。
+        findViewById<View>(R.id.playerBox)?.let { boxView ->
+            boxView.post {
+                boxH = boxView.width * 9 / 16
+                boxView.layoutParams = boxView.layoutParams.apply { height = boxH }
+            }
+        }
+        // 原版同一个站点有多个播放源时，某个源播不动会自动切下一个
+        player?.addListener(object : androidx.media3.common.Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，尝试自动换源")
+                autoSwitchSource()
+            }
+
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                val w = videoSize.width
+                val h = videoSize.height
+                if (w > 0 && h > 0) {
+                    findViewById<TextView>(R.id.vodInfoSize)?.text = "$w x $h"
+                }
+            }
+        })
         findViewById<View>(R.id.playerBox).setOnClickListener {
             if (!inlineFullscreen) enterInlineFullscreen()
         }
@@ -126,11 +154,11 @@ class DetailActivity : Activity() {
         // 之前用「 · 」拼成一行，读不出哪段是什么。
         val siteName = SubscriptionStore(this).currentSite()?.name.orEmpty()
         val info = buildString {
-            if (siteName.isNotBlank()) append("站源: ").append(siteName)
-            if (v.vodYear.isNotBlank()) { if (isNotEmpty()) append("    "); append("年份: ").append(v.vodYear) }
-            if (v.vodArea.isNotBlank()) { if (isNotEmpty()) append("    "); append("地区: ").append(v.vodArea) }
+            if (siteName.isNotBlank()) append("站源：").append(siteName)
+            if (v.vodYear.isNotBlank()) { if (isNotEmpty()) append("    "); append("年份：").append(v.vodYear) }
+            if (v.vodArea.isNotBlank()) { if (isNotEmpty()) append("    "); append("地区：").append(v.vodArea) }
             if (v.vodRemarks.isNotBlank() && v.vodRemarks != v.vodYear) {
-                if (isNotEmpty()) append("    "); append("更新: ").append(v.vodRemarks)
+                if (isNotEmpty()) append("    "); append("更新：").append(v.vodRemarks)
             }
         }
         findViewById<TextView>(R.id.detailInfo).text = info.ifBlank { "暂无信息" }
@@ -145,7 +173,7 @@ class DetailActivity : Activity() {
         if (lines.isEmpty()) {
             showLines = true
             pairs.add("none" to "无播放线路")
-            findViewById<TextView>(R.id.detailListLabel).text = "播放线路（0）"
+            buildFlags(emptyList())
             findViewById<RecyclerView>(R.id.detailList).layoutManager = LinearLayoutManager(this)
             adapter.notifyDataSetChanged()
             return
@@ -154,6 +182,7 @@ class DetailActivity : Activity() {
         // 按确认即起播。原版没有「先选线路、再选集数」这一层，多条线路用「换源」切换。
         currentLine = lines.first()
         showLines = false
+        buildFlags(lines)
         renderEpisodes(lines.first())
         findViewById<RecyclerView>(R.id.detailList)?.let { rv ->
             rv.post { rv.requestFocus() }
@@ -163,11 +192,92 @@ class DetailActivity : Activity() {
     /** 显示当前线路的集数列表 */
     private fun renderEpisodes(line: PlayLine) {
         episodes = line.episodes
-        // 原版这一行的文案就是线路名本身（截图里的「瓜子视频」），不是「集数（...）」
-        findViewById<TextView>(R.id.detailListLabel).text = line.name
+        // 原版这一行是线路 tab（超级无敌4K / 高清4K / …），选中项标黄
+        markActiveFlag(line.name)
         findViewById<RecyclerView>(R.id.detailList).layoutManager = GridLayoutManager(this, 4)
         rebuildGroups()
         showGroup(0)
+    }
+
+    /** 播放器框内起播浮层（原版 view_widget_vod 的 info），3 秒后自动收起 */
+    private fun showVodInfo(title: String) {
+        val info = findViewById<View>(R.id.vodInfo) ?: return
+        val name = findViewById<TextView>(R.id.vodInfoTitle) ?: return
+        name.text = if (currentLine != null) "${currentLine!!.name} · $title" else title
+        info.visibility = View.VISIBLE
+        info.postDelayed({ info.visibility = View.GONE }, 3000)
+    }
+
+    /** 填充播放源 tab：原版 flag 行就是同一站点的全部播放源（超级无敌4K / 高清4K / …） */
+    private fun buildFlags(lines: List<PlayLine>) {
+        val box = findViewById<android.widget.LinearLayout>(R.id.flagItems) ?: return
+        box.removeAllViews()
+        val row = findViewById<View>(R.id.flagRow)
+        if (lines.isEmpty()) {
+            row?.visibility = View.GONE
+            return
+        }
+        row?.visibility = View.VISIBLE
+        lines.forEach { line ->
+            val tv = TextView(this).apply {
+                text = line.name
+                textSize = 16f
+                // 原版 flag 行每项之间 8dp（CustomHorizontalGridView.setHorizontalSpacing(8)）
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                isFocusable = true
+                isClickable = true
+                background = getDrawable(R.drawable.selector_item)
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = dp(8) }
+                setOnClickListener { switchToLine(line) }
+            }
+            box.addView(tv)
+        }
+        markActiveFlag(currentLine?.name.orEmpty())
+    }
+
+    /** 选中的源标黄（原版 setFlagActivated 的观感） */
+    private fun markActiveFlag(name: String) {
+        val box = findViewById<android.widget.LinearLayout>(R.id.flagItems) ?: return
+        for (i in 0 until box.childCount) {
+            val tv = box.getChildAt(i) as? TextView ?: continue
+            tv.setTextColor(if (tv.text.toString() == name) 0xFFFFCC00.toInt() else 0xFFFFFFFF.toInt())
+        }
+    }
+
+    /** 切到指定源，保持当前集号接着播 */
+    private fun switchToLine(line: PlayLine) {
+        if (line.name == currentLine?.name) return
+        currentLine = line
+        val keep = playingIdx
+        renderEpisodes(line)
+        if (keep >= 0) playInline(keep.coerceIn(0, (line.episodes.size - 1).coerceAtLeast(0)))
+    }
+
+    /** 播放失败自动换下一个源（原版同一站点多源自动切换） */
+    private var sourceTried = 0
+    private fun autoSwitchSource() {
+        val v = vod ?: return
+        val lines = v.parseLines()
+        if (lines.size <= 1) {
+            Toast.makeText(this, "该片只有一个源，播放失败", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (sourceTried >= lines.size - 1) {
+            sourceTried = 0
+            Toast.makeText(this, "所有源都播放失败", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cur = lines.indexOfFirst { it.name == currentLine?.name }.let { if (it < 0) 0 else it }
+        val next = lines[(cur + 1) % lines.size]
+        sourceTried++
+        Toast.makeText(this, "「${next.name}」重试", Toast.LENGTH_SHORT).show()
+        currentLine = next
+        renderEpisodes(next)
+        val idx = playingIdx.coerceAtLeast(0)
+        playInline(idx.coerceIn(0, (next.episodes.size - 1).coerceAtLeast(0)))
     }
 
     /** 重建分段按钮：原版按 40 集一段（1-40 / 41-80 / 81-102），集数少就不显示这一行 */
@@ -263,7 +373,6 @@ class DetailActivity : Activity() {
         val next = lines[(cur + 1) % lines.size]
         currentLine = next
         renderEpisodes(next)
-        findViewById<TextView>(R.id.detailListLabel).text = next.name
         Toast.makeText(this, "已换源：${next.name}", Toast.LENGTH_SHORT).show()
         // 正在播就接着播同一集号的另一线路，否则只切换集数列表
         if (playingIdx >= 0) playInline(playingIdx)
@@ -276,6 +385,8 @@ class DetailActivity : Activity() {
         val ep = line.episodes.getOrNull(idx) ?: return
         playingIdx = idx
         inlineView.visibility = View.VISIBLE
+        findViewById<View>(R.id.detailImage)?.visibility = View.GONE
+        showVodInfo(ep.first)
         Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
         Thread {
             var url = ""
@@ -364,7 +475,7 @@ class DetailActivity : Activity() {
             android.widget.LinearLayout.LayoutParams.MATCH_PARENT
         )
         listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
-            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.detailListLabel, R.id.detailList).forEach {
+            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.GONE
         }
         box.requestFocus()
@@ -376,10 +487,10 @@ class DetailActivity : Activity() {
         inlineFullscreen = false
         val box = findViewById<FrameLayout>(R.id.playerBox)
         box.layoutParams = android.widget.LinearLayout.LayoutParams(
-            0, (270 * resources.displayMetrics.density).toInt(), 1.2f
+            0, if (boxH > 0) boxH else (270 * resources.displayMetrics.density).toInt(), 1.2f
         )
         listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
-            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.detailListLabel, R.id.detailList).forEach {
+            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.VISIBLE
         }
         findViewById<View>(R.id.detailList).requestFocus()
