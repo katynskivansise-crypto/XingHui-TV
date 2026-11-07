@@ -67,6 +67,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 进程级 Init.context()：迅雷 SDK（XLDownloadManager 构造里直接 context.getFilesDir()）
+        // 与 catvod 的 Path/Prefers 都依赖它。原版在 App.onCreate 里做，本工程没有 Application 类，
+        // 之前只在加载 spider.jar 时设置 → 纯 JSON 订阅下点磁力会 NPE 闪退。这里无条件设一次。
+        runCatching { com.github.catvod.Init.set(applicationContext) }
+            .onFailure { Log.e("XingHuiTV", "[init] Init.set 失败", it) }
         // 本地服务（csp/js 站 /proxy 播放链路 + /file 本地文件 + assets 兜底）；启动失败不影响主流程
         runCatching { ProxyServer.startServer(this) }
             .onFailure { Log.e("XingHuiTV", "[proxy.server] startServer 异常", it) }
@@ -252,6 +257,12 @@ class MainActivity : Activity() {
             // 兜底：jar 缺失 / 非 http 地址 / csp 站点未 attach jar → 强制从订阅重解析并写回。
             // 旧版界面导入的订阅可能存了相对路径 "./jar/spider.jar"，loadJar 会下载失败 → 所有 csp 站空白，
             // 只判 isBlank() 会漏掉这种"非空但无效"的脏值，所以这里连同"站点未 attach"一起判。
+            // 进程重启后恢复嗅探规则（rules/ads）：订阅原文已持久化，这里重新喂给 SnifferRules
+            store.subscriptionText().takeIf { it.isNotBlank() }?.let {
+                ParseSources.load(it)
+                SnifferRules.load(it)
+                Log.e("XingHuiTV", "[rules] 启动恢复完成")
+            }
             val cspSites = store.sites().filter { it.isCsp() }
             val jarBad = store.jar().let { it.isBlank() || !it.startsWith("http") }
             val siteJarBad = cspSites.any { it.jar.isBlank() || !it.jar.startsWith("http") }

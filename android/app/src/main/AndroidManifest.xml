@@ -59,6 +59,21 @@
 
         <!-- 设置 -->
         <activity
+            android:name=".SettingsPlayerActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <activity
+            android:name=".SettingsCustomActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <activity
+            android:name=".SettingsDanmuActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Black.NoTitleBar" />
+
+        <activity
             android:name=".SettingsActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Black.NoTitleBar" />

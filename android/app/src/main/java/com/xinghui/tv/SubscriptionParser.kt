@@ -21,6 +21,12 @@ object SubscriptionParser {
         // 这一步覆盖的不只是 spider/jar，还包括站点 ext、lives、parses 里的相对地址。
         val trimmed = absolutize(text.trim(), subscribeUrl)
         if (trimmed.isEmpty()) return sites
+        // 订阅顶层的 rules / ads 一并载入（原版 VodConfig.getRules / getAds）：
+        // 嗅探判定、点击脚本、广告阻断都依赖它，之前完全没接，导致嗅探几乎必然空手。
+        SnifferRules.load(text)
+        // 订阅顶层的 parses 一并载入（原版 VodConfig.getParses）。type=0 的 24 条解析源
+        // 是「站点没配 playUrl」时唯一能救场的路径，之前完全没接。
+        ParseSources.load(text)
 
         // 1) / 2) 整体 JSON
         try {

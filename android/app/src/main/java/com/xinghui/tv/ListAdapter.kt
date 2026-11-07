@@ -34,11 +34,13 @@ class ListAdapter(
         // 横向 tab（如点播页分类条）：simple_list_item_1 默认 match_parent，横排会撑满导致只显示一项
         val lm = (parent as? RecyclerView)?.layoutManager
         if (lm is androidx.recyclerview.widget.GridLayoutManager) {
-            val m = (tv.context.resources.displayMetrics.density * 4).toInt()
+            // 集数格：原版 adapter_episode 是无 padding 的 TextView，行高由 VerticalGridView 固定 44dp。
+            // 之前这里 padding 12dp + 四边 margin 4dp，格子被撑到 45dp 以上，格子间隔看着很大。
+            val h = (tv.context.resources.displayMetrics.density * 44 + 0.5f).toInt()
+            tv.setPadding(0, 0, 0, 0)
             tv.layoutParams = RecyclerView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(m, m, m, m) }
+                ViewGroup.LayoutParams.MATCH_PARENT, h
+            )
         }
         if (lm is androidx.recyclerview.widget.LinearLayoutManager &&
             lm.orientation == androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL

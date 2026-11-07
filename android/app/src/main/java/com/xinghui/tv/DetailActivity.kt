@@ -38,6 +38,8 @@ class DetailActivity : Activity() {
     private var player: ExoPlayer? = null
     private lateinit var inlineView: PlayerView
     private var inlineFullscreen = false
+    /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
+    private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
     /** 当前正在播放的集下标；-1 表示还没起播 */
     private var playingIdx = -1
     /** 当前线路的集数数组，供"点当前那集进全屏"判断用 */
@@ -193,12 +195,81 @@ class DetailActivity : Activity() {
 
     /** 显示当前线路的集数列表 */
     private fun renderEpisodes(line: PlayLine) {
+        episodeSeq++          // 切线路/重渲染即作废上一轮异步展开
         episodes = line.episodes
         // 原版这一行是线路 tab（超级无敌4K / 高清4K / …），选中项标黄
         markActiveFlag(line.name)
-        findViewById<RecyclerView>(R.id.detailList).layoutManager = GridLayoutManager(this, 4)
+        applyEpisodeGrid()
         rebuildGroups()
         showGroup(0)
+        // 迅雷体系：磁力/ed2k/thunder/种子在详情阶段就展开成文件列表
+        // （对齐原版 player/Source.parse → Thunder.Parser.call）。
+        // 种子解析要等元信息，可能要几秒，所以放后台线程，回来后替换集数列表。
+        val only = episodes.singleOrNull()
+        if (only != null && ThunderPlay.match(only.second)) {
+            ThunderPlay.ensureInit(this)
+            expandThunder(only.second)
+        }
+    }
+
+    /** 异步展开磁力/种子；返回空列表（无做种等）时保留原样，点进去由播放页直接解析 */
+    private fun expandThunder(url: String) {
+        Log.e("XingHuiTV", "[detail] 迅雷体系，开始展开 ${url.take(70)}")
+        val seq = episodeSeq
+        Thread {
+            val list = runCatching { ThunderPlay.expand(url) }.getOrDefault(emptyList())
+            if (list.isEmpty()) {
+                Log.e("XingHuiTV", "[detail] 展开无结果，保持单条")
+                return@Thread
+            }
+            runOnUiThread {
+                // 用户可能已经切到别的线路/退出，序号不匹配就不覆盖
+                if (seq != episodeSeq || isFinishing) return@runOnUiThread
+                Log.e("XingHuiTV", "[detail] 展开完成，共 ${list.size} 个文件")
+                episodes = list
+                applyEpisodeGrid()
+                rebuildGroups()
+                showGroup(0)
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** 每次渲染线路自增，用于丢弃过期的异步展开结果 */
+    private var episodeSeq = 0
+
+    /**
+     * 集数网格：列数与行高都照原版 VideoActivity.setEpisodeAdapter 的算法
+     * （VideoActivity.java 686-712 行实读）：
+     *   numColumns 默认 10，按「集数名称最大长度」逐档降到 1/2/3/4/6/8；
+     *   行高固定 44dp，列间隙 8dp（原版 colWidth = (屏宽-48dp-(cols-1)*8dp)/cols）。
+     * 之前是硬编码 GridLayoutManager(this, 4)，且空格子靠 padding 12dp 撑，所以格距显得很大。
+     */
+    private fun applyEpisodeGrid() {
+        val rv = findViewById<RecyclerView>(R.id.detailList)
+        val len = episodes.maxOfOrNull { it.first.length } ?: 0
+        val cols = when {
+            len > 40 -> 1
+            len > 30 -> 2
+            len > 15 -> 3
+            len > 10 -> 4
+            len > 6 -> 6
+            len > 4 -> 8
+            else -> 10
+        }
+        rv.layoutManager = GridLayoutManager(this, cols)
+        if (rv.itemDecorationCount == 0) {
+            // 列间隙 8dp：左右各 4dp，相邻两格加起来正好 8dp（对齐原版 colWidth 的扣减方式）
+            rv.addItemDecoration(object : RecyclerView.ItemDecoration() {
+                override fun getItemOffsets(
+                    outRect: android.graphics.Rect, view: View,
+                    parent: RecyclerView, state: RecyclerView.State
+                ) {
+                    val half = dp(4)
+                    outRect.left = half
+                    outRect.right = half
+                }
+            })
+        }
     }
 
     /** 播放器框内起播浮层（原版 view_widget_vod 的 info），3 秒后自动收起 */
@@ -471,15 +542,22 @@ class DetailActivity : Activity() {
         })
     }
 
-    /** 进全屏：播放器铺满整页，其余区域隐藏（对齐原版 enterFullscreen） */
+    /**
+     * 进全屏：播放器铺满整页，其余区域隐藏（对齐原版 enterFullscreen）。
+     * ★ 这里必须用 RelativeLayout.LayoutParams：playerBox 的父容器是 activity_detail 的根 RelativeLayout，
+     *   之前赋的是 LinearLayout.LayoutParams，运行时被父容器强转成 RelativeLayout 的参数 →
+     *   ClassCastException: LinearLayout$LayoutParams cannot be cast to RelativeLayout$LayoutParams，
+     *   表现就是「点方框或点集数，一全屏就闪退回首页」。
+     */
     private fun enterInlineFullscreen() {
         if (inlineFullscreen) return
         inlineFullscreen = true
         inlineView.visibility = View.VISIBLE
         val box = findViewById<FrameLayout>(R.id.playerBox)
-        box.layoutParams = android.widget.LinearLayout.LayoutParams(
-            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-            android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+        savedBoxParams = box.layoutParams
+        box.layoutParams = android.widget.RelativeLayout.LayoutParams(
+            android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
+            android.widget.RelativeLayout.LayoutParams.MATCH_PARENT
         )
         listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
@@ -493,9 +571,8 @@ class DetailActivity : Activity() {
         if (!inlineFullscreen) return
         inlineFullscreen = false
         val box = findViewById<FrameLayout>(R.id.playerBox)
-        box.layoutParams = android.widget.LinearLayout.LayoutParams(
-            0, if (boxH > 0) boxH else (270 * resources.displayMetrics.density).toInt(), 1.2f
-        )
+        // 还原进全屏时保存的那份参数（类型与父容器天然匹配，不做任何强转）
+        savedBoxParams?.let { box.layoutParams = it }
         listOf(R.id.btnBack, R.id.detailName, R.id.detailInfo, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.VISIBLE

@@ -95,6 +95,29 @@
             android:visibility="gone" />
     </LinearLayout>
 
+    <!-- 解析源（对齐原版 view_control_vod.xml 的那一行 parse）：有解析配置且本站没给 playUrl 时才显示。
+         原版是控制条最顶部的横向列表，我们控制条在右上角，这里放在底部、片名上方，横向可滚动。 -->
+    <HorizontalScrollView
+        android:id="@+id/parseBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="44dp"
+        android:background="#66000000"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/parseRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
+    </HorizontalScrollView>
+
     <TextView
         android:id="@+id/playTitle"
         android:layout_width="match_parent"

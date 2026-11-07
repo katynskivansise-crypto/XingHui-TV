@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 对齐原版 drawable/selector_text.xml（解析源那一行用的就是这个）：
+     focused = blue_500，activated / normal = grey_600，4dp 圆角，padding 8dp/12dp -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/blue_500" />
+            <corners android:radius="4dp" />
+            <padding android:bottom="8dp" android:left="12dp" android:right="12dp" android:top="8dp" />
+        </shape>
+    </item>
+    <item android:state_activated="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/grey_600" />
+            <corners android:radius="4dp" />
+            <padding android:bottom="8dp" android:left="12dp" android:right="12dp" android:top="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/grey_600" />
+            <corners android:radius="4dp" />
+            <padding android:bottom="8dp" android:left="12dp" android:right="12dp" android:top="8dp" />
+        </shape>
+    </item>
+</selector>

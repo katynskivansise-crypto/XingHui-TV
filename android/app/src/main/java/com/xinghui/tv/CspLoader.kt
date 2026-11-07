@@ -565,6 +565,26 @@ object CspLoader {
         return sb.toString()
     }
 
+    /**
+     * 供 ParseJob 反射 jar 内的解析器类（原版 JarLoader.jsonExt / jsonExtMix 的同类做法）。
+     *
+     * 原版是按 `loaders.get(recent).loadClass("com.github.catvod.parser.Json" + key)`；
+     * 我们没维护 `recent`，直接按顺序试所有已加载的 jar —— 多个 jar 里同名类的概率极低，
+     * 且 parse 的 url 前缀（key）本身就来自具体订阅，命中即用。
+     */
+    fun parserClass(clsName: String): Class<*>? {
+        synchronized(lock) {
+            for (dl in loaders.values) {
+                runCatching { dl.loadClass(clsName) }.getOrNull()?.let {
+                    Log.e(TAG, "[parse] 命中 jar 解析器 $clsName")
+                    return it
+                }
+            }
+        }
+        Log.e(TAG, "[parse] jar 里找不到 $clsName")
+        return null
+    }
+
     fun destroy() {
         val all = runCatching { spiders.values.toList() }.getOrDefault(emptyList())
         runCatching { spiders.clear() }

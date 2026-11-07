@@ -141,6 +141,10 @@ class PlayActivity : Activity() {
         var url = ""
         var err = ""
         var sniffTarget = ""
+        var sniffClick = ""          // 解析源自带的 click 脚本（优先于站点 click）
+        var sitePlayUrl = ""         // 站点级 playUrl；为空 = 本站要靠外部解析源
+        var siteJx = 0               // 接口返回 jx=1：明说必须走解析
+        var parseOverride: ParseSources.Item? = null   // json: / parse: 前缀指定的解析源
         var headers: Map<String, String> = emptyMap()
         qualities.clear()
         qualityIdx = 0
@@ -190,19 +194,34 @@ class PlayActivity : Activity() {
                 else -> url = ""
             }
             // 原版 ParseJob.setParse 的协议前缀识别（点播链路最后一环）：
-            //   playUrl 以 "json:" 开头  → type=1 JSON 解析（GET 前缀+url，返回 {"url":"真实m3u8"}）
-            //   playUrl 以 "parse:" 开头 → 使用指定名称的解析器
+            //   playUrl 以 "json:" 开头  → Parse.get(1, playUrl.substring(5))，type=1 纯 HTTP 解析
+            //   playUrl 以 "parse:" 开头 → 按名字查已配置的解析源
             //   parse=1 且两者都没有 → 嗅探（type=0，需 WebView）
-            // 实测当前订阅：parses 共 29 条，24 条 type=0 需 WebView、4 条 type=1 站点已全部失联
-            // （pandown.pro / mfjx.iwsyy.xyz 拒连、api.tyun77.cn 403、zy.qiaoji8.com 404）、
-            // 1 条 type=3 依赖 jar，因此这里不做解析实现，只识别并给出准确原因，
-            // 避免"黑屏但不知道是解析站挂了"。
             val playUrlRaw = obj.optString("playUrl", "")
+            sitePlayUrl = playUrlRaw
+            // 原版 Result.jx：接口明确要求走外部解析（VideoActivity:568 的第二个条件）
+            try { siteJx = obj.optInt("jx", 0) } catch (_: Exception) { siteJx = 0 }
             when {
-                // json: / parse: 协议 → 实测订阅里这两类解析站全不可用，给准确原因即可
-                playUrlRaw.startsWith("json:") || playUrlRaw.startsWith("parse:") -> {
-                    err = "该片源需要解析接口（${playUrlRaw.take(40)}…），订阅里的解析站已失效"
-                    Log.e("XingHuiTV", "[play] 需要二次解析但解析站不可用 prefix=${playUrlRaw.take(60)}")
+                // json: 前缀 → 当 type=1 直接跑（原版 Parse.get(1, url.substring(5))）
+                playUrlRaw.startsWith("json:") -> {
+                    val jsonUrl = playUrlRaw.substring(5)
+                    if (!jsonUrl.startsWith("http")) {
+                        err = "json: 前缀后面的地址不合法（${jsonUrl.take(40)}）"
+                    } else {
+                        parseOverride = ParseSources.Item("json:", 1, jsonUrl)
+                        Log.e("XingHuiTV", "[play] json: 前缀 → type1 ${jsonUrl.take(70)}")
+                    }
+                }
+                // parse: 前缀 → 按名字找解析源（原版 VodConfig.get().getParse(name)）
+                playUrlRaw.startsWith("parse:") -> {
+                    val name = playUrlRaw.substring(6).trim()
+                    val item = ParseSources.byName(name)
+                    if (item == null) {
+                        err = "订阅里没有名为「$name」的解析源"
+                    } else {
+                        parseOverride = item
+                        Log.e("XingHuiTV", "[play] parse: 前缀 → 解析源 $name (type=${item.type})")
+                    }
                 }
                 // playUrl 是普通 http 解析页 → type=0 嗅探：起 WebView 抓真实 m3u8（对齐原版 startWeb）
                 parseFlag == 1 && !looksLikeMedia(url) && playUrlRaw.startsWith("http") -> {
@@ -244,6 +263,7 @@ class PlayActivity : Activity() {
             // 这一步会阻塞（等元信息/等任务启动，上限十几秒），当前在后台线程，安全。
             if (ThunderPlay.match(url)) {
                 Log.e("XingHuiTV", "[play] 迅雷体系 → ${url.take(70)}")
+                ThunderPlay.ensureInit(this)
                 url = ThunderPlay.resolve(url)
                 if (qualities.isEmpty()) qualities.add("自动" to url)
             }
@@ -255,7 +275,27 @@ class PlayActivity : Activity() {
             runOnUiThread { startSniff(sniffTarget, headers) }
             return
         }
+        // json: / parse: 前缀指定的解析源优先，先跑它
+        val override = parseOverride
+        if (override != null && ep.isNotBlank()) {
+            parseList = listOf(override) + ParseSources.all().filter { it.name != override.name }
+            parseEpRaw = ep
+            parseHdrs = headers
+            parseIdx = 0
+            runParseItem(override)
+            return
+        }
         if (url.isBlank() || (err.isNotBlank() && !looksLikeMedia(url))) {
+            // 站点没配 playUrl、但订阅里有 type=0 解析源 —— 原版这时会把解析源列表显示出来让用户选
+            // （VideoActivity:568：setUseParse(VodConfig.hasParse() && result.getPlayUrl().isEmpty() ...)）。
+            // 我们之前直接判失败，等于把 24 个可用的 WebView 解析源全扔了。
+            // ★只在**确实没拿到地址**时才展示，不能因为"站点没配 playUrl"就打断本来能播的直链。
+            val epRaw = ep.ifBlank { url }
+            // 显示条件照原版：有解析配置 且（站点没给 playUrl 就认为要外部解析 或 接口明说 jx=1）
+            if (!ParseSources.isEmpty() && (sitePlayUrl.isBlank() || siteJx == 1) && epRaw.isNotBlank()) {
+                bindingParseBar(epRaw, headers)
+                return
+            }
             // err 非空且 url 不是媒体直链：把"需要解析接口"这类原因直接抛给用户，
             // 而不是硬塞一个网页地址给 ExoPlayer 变成无限转圈
             onPlayFail(if (err.isBlank()) "未解析到播放地址：$fl" else "解析失败[$fl]：$err")
@@ -263,39 +303,167 @@ class PlayActivity : Activity() {
         }
         runOnUiThread {
             // spider 可能返回 proxy://xxx 这类本地 scheme，进播放器前统一重写成 http://127.0.0.1:9978/...
-            playUrl(UrlConvert.convert(url), headers)
+            val jpa = toPlayableUrl(url)
+            if (jpa == null) {
+                Log.e("XingHuiTV", "[jpa] 起播失败 ${url.take(60)}")
+                runOnUiThread { Toast.makeText(this, "荐片 P2P 起播失败", Toast.LENGTH_LONG).show() }
+            } else {
+                playUrl(jpa, headers)
+            }
             updateQualityBtn()
             recordHistory()
         }
     }
 
+    /**
+     * 对齐原版 Source.getExtractor 的顺序判断里荐片那一条（`JianPian.match`）：
+     * scheme ∈ { tvbox-xg, jianpian, ftp } → 交给 P2P 引擎，转成本地 `http://127.0.0.1:<port>/...`。
+     * 其余走原本的 UrlConvert。
+     */
+    private fun toPlayableUrl(raw: String): String? {
+        if (JianPianPlay.match(raw)) {
+            val local = JianPianPlay.fetch(this, raw)
+            Log.e("XingHuiTV", "[jpa] ${raw.take(50)} → ${local.orEmpty().take(80)}")
+            return local
+        }
+        return UrlConvert.convert(raw)
+    }
+
     /** 判断地址是否已经是可直接播放的媒体直链 */
     private var sniffer: SniffWebView? = null
+
+    // 解析源轮换状态（对齐原版 checkParse：一个失败就试下一个）
+    private var parseList: List<ParseSources.Item> = emptyList()
+    private var parseIdx = -1
+    private var parseEpRaw = ""
+    private var parseHdrs: Map<String, String> = emptyMap()
+
+    /**
+     * 解析源条（对齐原版 view_control_vod.xml 里 `id=parse` 那一行 + adapter_parse.xml 的 TextView 样式）。
+     *
+     * 显示条件照 VideoActivity:568：
+     *   setUseParse(VodConfig.hasParse() && (result.getPlayUrl().isEmpty() && ...) || result.getJx() == 1)
+     */
+    private fun bindingParseBar(epRaw: String, hdrs: Map<String, String>) {
+        val list = ParseSources.all()
+        if (list.isEmpty()) return
+        parseList = list
+        parseEpRaw = epRaw
+        parseHdrs = hdrs
+        parseIdx = -1
+        runOnUiThread {
+            val bar = findViewById<android.widget.HorizontalScrollView>(R.id.parseBar)
+            val row = findViewById<android.widget.LinearLayout>(R.id.parseRow)
+            row.removeAllViews()
+            for (item in list) {
+                val tv = android.widget.TextView(this).apply {
+                    text = item.name
+                    setTextColor(0xFFFFFFFF.toInt())
+                    textSize = 14f
+                    gravity = android.view.Gravity.CENTER
+                    isFocusable = true
+                    isClickable = true
+                    setBackgroundResource(R.drawable.selector_parse_text)
+                    setOnClickListener {
+                        ParseSources.current = item
+                        parseIdx = list.indexOf(item)
+                        runParseItem(item)
+                    }
+                }
+                val lp = android.widget.LinearLayout.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = (8 * resources.displayMetrics.density + 0.5f).toInt() }
+                row.addView(tv, lp)
+            }
+            bar.visibility = android.view.View.VISIBLE
+            Toast.makeText(this, "本站需要解析，请用遥控器选择一个解析源", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** 按解析源类型分流执行（type0 走嗅探，1/3/4 走裸露 HTTP / jar 反射） */
+    private fun runParseItem(item: ParseSources.Item) {
+        Log.e("XingHuiTV", "[play] 解析源 ${item.name} type=${item.type}")
+        runOnUiThread { Toast.makeText(this, "正在尝试解析源：${item.name}", Toast.LENGTH_SHORT).show() }
+        val mergedHeaders = parseHdrs + item.headers
+        when (item.type) {
+            0 -> startSniff(item.url + parseEpRaw, mergedHeaders, item.click)
+            else -> Thread {
+                val hit = ParseJob.run(item, parseEpRaw, flag)
+                runOnUiThread {
+                    if (hit != null) {
+                        playUrl(toPlayableUrl(hit.url) ?: hit.url, mergedHeaders + hit.headers)
+                        updateQualityBtn()
+                        recordHistory()
+                    } else {
+                        tryNextParse()
+                    }
+                }
+            }.start()
+        }
+    }
+
+    /** 对齐原版 checkParse：当前解析源失败就换下一个，全部失败才报错 */
+    private fun tryNextParse() {
+        val next = parseIdx + 1
+        if (parseIdx < 0 || next >= parseList.size) {
+            Log.e("XingHuiTV", "[play] 解析源全部失败（共 ${parseList.size} 个）")
+            parseIdx = -1
+            onPlayFail("解析源全部失败[$flag]")
+            return
+        }
+        parseIdx = next
+        runOnUiThread {
+            Toast.makeText(this, "换下一个解析源：${parseList[next].name}", Toast.LENGTH_SHORT).show()
+        }
+        runParseItem(parseList[next])
+    }
 
     /**
      * type=0 嗅探（对齐原版 ParseJob case 0 → CustomWebView）。
      * 打开 解析页地址 = playUrl + 真实地址，从 WebView 的网络请求里截获 m3u8/mp4。
      */
-    private fun startSniff(target: String, hdrs: Map<String, String>) {
+    private fun startSniff(target: String, hdrs: Map<String, String>, parseClick: String = "") {
         sniffer?.cancel()
         sniffer = SniffWebView(
             this,
             onFound = { u, h ->
                 runOnUiThread {
                     val merged = if (hdrs.isEmpty()) h else hdrs + h
-                    playUrl(UrlConvert.convert(u), merged)
+                    playUrl(toPlayableUrl(u) ?: u, merged)
                     updateQualityBtn()
                     recordHistory()
                 }
             },
             onFail = { why ->
-                runOnUiThread { onPlayFail("嗅探失败[$flag]：$why") }
+                runOnUiThread {
+                    // 解析源流程里失败 = 换下一个（对齐原版 checkParse）；普通站点失败才报错
+                    if (parseIdx >= 0) tryNextParse() else onPlayFail("嗅探失败[$flag]：$why")
+                }
             },
         )
-        sniffer?.start(target, hdrs)
+        // 站点级 click 脚本（订阅 site.click，原版 ParseJob.getClick → CustomWebView.start）：有些解析页
+        // 的播放按钮不会自动起播，需要注入一次点击。空串时只走 rules 里的 script。
+        val curSite = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
+        // 解析源自带 click 优先（原版 ParseJob.getClick：站点 click 优先，其次是 result/parse 的 click；
+        // 但走"外部解析源"这条路时，站点 click 对解析站的页面毫无意义，所以这里反过来）
+        val clickScript = parseClick.ifBlank {
+            runCatching {
+                curSite?.siteJson?.takeIf { it.isNotBlank() }
+                    ?.let { org.json.JSONObject(it).optString("click", "") }
+                    .orEmpty()
+            }.getOrDefault("")
+        }
+        sniffer?.start(target, hdrs, clickScript)
     }
 
     private fun looksLikeMedia(u: String): Boolean {
+        // 对齐原版 SiteViewModel:197 的判定顺序：
+        //   result.setParse(Sniffer.isVideoFormat(url) && playUrl.isEmpty() ? 0 : 1)
+        // 即「先按订阅 rules 的三层规则判是不是视频」，命中就不该再弹嗅探。
+        // 之前只用后缀判断，导致火山/抖音/农民/七新这类白名单地址被误判成解析页，
+        // 白白弹一次全屏 WebView。这里把规则判定提到前面，后缀兜底。
+        if (Sniffer.isVideoFormat(u)) return true
         val lower = u.lowercase()
         return lower.contains(".m3u8") || lower.contains(".mp4") || lower.contains(".flv") ||
             lower.contains(".mkv") || lower.contains(".ts") || lower.contains(".mp3")

@@ -1,11 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  设置页：照原版 leanback/res/layout/activity_setting.xml 的排版语言重写。
-  原版度量（逐项实读 513 行）：外层 padding 24dp；行间距 16dp；行背景 @drawable/selector_item；
-  双列网格，每列 weight=1、列间 marginEnd 16dp；标签 18sp 白 weight 0.3、值 18sp 白 weight 0.7
-  gravity=end singleLine ellipsize=middle；直播/壁纸两行右侧带图标按钮（padding 8dp、fitCenter）。
-  文案取原版 values-zh-rCN/strings.xml 的 setting_*；原版无对应项的保留现名。
--->
+<!-- 排版照原版 leanback/res/layout/activity_setting*.xml：
+     外层 padding 24dp；行间距 16dp；双列各 weight=1、列间 marginEnd 16dp；
+     行背景 selector_item；标签 18sp 白 weight 0.3、值 18sp 白 weight 0.7 gravity=end。 -->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -25,7 +21,67 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowLive"
+                android:id="@+id/entryVod"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:layout_weight="1"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="点播"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valVod"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="未配置" />
+            </LinearLayout>
+            <ImageView
+                android:id="@+id/entryVodHome"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:padding="8dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_setting_home" />
+            <ImageView
+                android:id="@+id/entryVodHistory"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:padding="8dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_setting_history" />
+        </LinearLayout>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/entryLive"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="16dp"
@@ -57,7 +113,7 @@
                     android:text="未配置" />
             </LinearLayout>
             <ImageView
-                android:id="@+id/rowLiveHome"
+                android:id="@+id/entryLiveHome"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="16dp"
@@ -68,7 +124,7 @@
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_setting_home" />
             <ImageView
-                android:id="@+id/rowLiveHistory"
+                android:id="@+id/entryLiveHistory"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:background="@drawable/selector_item"
@@ -85,7 +141,7 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowWallpaper"
+                android:id="@+id/entryWall"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="16dp"
@@ -117,7 +173,7 @@
                     android:text="默认渐变" />
             </LinearLayout>
             <ImageView
-                android:id="@+id/rowWallpaperHome"
+                android:id="@+id/entryWallHome"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="16dp"
@@ -128,7 +184,7 @@
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_setting_home" />
             <ImageView
-                android:id="@+id/rowWallpaperRefresh"
+                android:id="@+id/entryWallRefresh"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:background="@drawable/selector_item"
@@ -145,7 +201,7 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowKernel"
+                android:id="@+id/entryPlayerPage"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -160,12 +216,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="播放内核"
+                    android:text="播放设置"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valKernel"
+                    android:id="@+id/valPlayerPage"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -174,10 +230,10 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="ExoPlayer（内置）" />
+                    android:text="EXO" />
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/rowTimeout"
+                android:id="@+id/entryDanmuPage"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -191,82 +247,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="网络超时"
+                    android:text="弹幕设置"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valTimeout"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="15 秒" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowUa"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="User-Agent"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valUa"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="默认" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowProxy"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="Proxy"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valProxy"
+                    android:id="@+id/valDanmuPage"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -285,7 +271,7 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowEpg"
+                android:id="@+id/entryCustomPage"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -300,12 +286,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="直播 EPG 源"
+                    android:text="个性设置"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valEpg"
+                    android:id="@+id/valCustomPage"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -314,10 +300,10 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="未配置" />
+                    android:text="" />
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/rowSize"
+                android:id="@+id/entryDoh"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -331,12 +317,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="界面大小"
+                    android:text="DoH"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valSize"
+                    android:id="@+id/valDoh"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -345,7 +331,7 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="大" />
+                    android:text="系统" />
             </LinearLayout>
         </LinearLayout>
         <LinearLayout
@@ -355,147 +341,7 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowPoster"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="显示海报"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPoster"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="开" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowHomeHistory"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="首页显示历史"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valHomeHistory"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="开" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowHistory"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="历史记录"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valHistory"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="0 条（点击清空）" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowFav"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="收藏"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valFav"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="0 条（点击清空）" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowBackup"
+                android:id="@+id/entryBackup"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -524,10 +370,10 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="导出到本地" />
+                    android:text="未备份" />
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/rowRestore"
+                android:id="@+id/entryRestore"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -555,7 +401,7 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="从本地导入" />
+                    android:text="暂无备份" />
             </LinearLayout>
         </LinearLayout>
         <LinearLayout
@@ -565,327 +411,7 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowThunder"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="迅雷加速"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valThunder"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="未接入" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowSniff"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="网页嗅探"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valSniff"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="未接入" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowThunderCache"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="迅雷缓存"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valThunderCache"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="未接入" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowEpisodeStyle"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="选集样式"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valEpisodeStyle"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="多行" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowHomeMenuKey"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="首页菜单键"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valHomeMenuKey"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="设置页面" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowFullscreenMenuKey"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="全屏菜单键"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valFullscreenMenuKey"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="控制栏" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowSmallWindowBackKey"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="小窗返回键"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valSmallWindowBackKey"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="返回" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowPlayCore"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="播放核心"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPlayCore"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="EXO" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowDecodeMode"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="解码方式"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valDecodeMode"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="硬解" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowRenderMode"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="渲染方式"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valRenderMode"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="Surface" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowVideoScale"
+                android:id="@+id/entryCache"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -900,12 +426,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="缩放比例"
+                    android:text="缓存"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valVideoScale"
+                    android:id="@+id/valCache"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -914,26 +440,29 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="原始" />
+                    android:text="计算中…" />
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/rowTunnelMode"
+                android:id="@+id/entryVersion"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:orientation="horizontal">
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
 
                 <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="隧道模式"
+                    android:text="版本"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valTunnelMode"
+                    android:id="@+id/valVersion"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -942,7 +471,7 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="关闭" />
+                    android:text="0.1.0" />
             </LinearLayout>
         </LinearLayout>
         <LinearLayout
@@ -952,71 +481,7 @@
             android:orientation="horizontal">
 
             <LinearLayout
-                android:id="@+id/rowAacFirst"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="AAC优先"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valAacFirst"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="关闭" />
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/rowBackgroundPlay"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="后台播放"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valBackgroundPlay"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="开启" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/rowAbout"
+                android:id="@+id/entryAbout"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -1045,7 +510,7 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="星汇TV" />
+                    android:text="leanback-arm64_v8a" />
             </LinearLayout>
             <View
                 android:layout_width="0dp"

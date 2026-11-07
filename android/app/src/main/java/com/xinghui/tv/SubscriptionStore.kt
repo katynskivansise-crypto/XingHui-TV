@@ -76,6 +76,14 @@ class SubscriptionStore(context: Context) {
         prefs.edit().putString(KEY_SUB_URL, url).apply()
     }
 
+    /** 订阅 JSON 原文（进程重启后用它恢复 rules/ads，避免嗅探规则丢失） */
+    fun subscriptionText(): String = prefs.getString(KEY_SUB_TEXT, "") ?: ""
+
+    fun setSubscriptionText(text: String) {
+        if (text.isBlank()) return
+        prefs.edit().putString(KEY_SUB_TEXT, text).apply()
+    }
+
     /**
      * 把 jar 写进所有 csp_ 站点（对齐原项目 site.setJar）：
      * 旧数据缺 jar 时回填一次，之后每个站点自带 jar，切站不依赖全局字段。
@@ -94,5 +102,6 @@ class SubscriptionStore(context: Context) {
         private const val KEY_CURRENT = "current_key"
         private const val KEY_JAR = "spider_jar"
         private const val KEY_SUB_URL = "subscribe_url"
+        private const val KEY_SUB_TEXT = "subscribe_text"
     }
 }
