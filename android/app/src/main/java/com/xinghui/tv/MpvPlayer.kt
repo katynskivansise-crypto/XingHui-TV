@@ -80,6 +80,17 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.setOptionString("config", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("idle", "yes")
             `is`.xyz.mpv.MPVLib.setOptionString("vo", "gpu")
+            // ★ 官方 mpv-android MPVView.kt:92-96 的必备项，之前一直漏掉。
+            //   缺 gpu-context=android 时 mpv 会去用默认的 gpu 上下文（桌面平台的），
+            //   在 Android 上创建 GL 上下文直接失败 → VO 初始化失败 → loadfile 之后立刻 END_FILE，
+            //   idle-active 回到 true，我们这边看到的提示就是「mpv 播放中断」。
+            //   这是 mpv 在安卓上起播即失败最常见的原因，和片源、网络、解码器都无关。
+            `is`.xyz.mpv.MPVLib.setOptionString("gpu-context", "android")
+            `is`.xyz.mpv.MPVLib.setOptionString("opengl-es", "yes")
+            // ao 不显式指定时可能一个音频输出都找不到，结果是没声音或整条播放失败
+            `is`.xyz.mpv.MPVLib.setOptionString("ao", "audiotrack,opensles")
+            // 只让这些编码走硬解，其余走软解，避免 mediacodec 对不认识的编码直接报错
+            `is`.xyz.mpv.MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
             `is`.xyz.mpv.MPVLib.setOptionString("hwdec", "mediacodec")
             `is`.xyz.mpv.MPVLib.setOptionString("keep-open", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("pause", "yes")
@@ -119,7 +130,13 @@ class MpvPlayer(
         }
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (!inited) return
+        // mpv 要知道 surface 的实际尺寸才能建对渲染目标；不报的话在某些设备上会渲染成 0 尺寸
+        runCatching {
+            `is`.xyz.mpv.MPVLib.setPropertyString("android-surface-size", "${width}x${height}")
+        }
+    }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surfaceReady = false
