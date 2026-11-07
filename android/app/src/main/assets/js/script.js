@@ -98,7 +98,7 @@ function listFile(path) {
         current_parent = parent;
         let array = info.files;
         if (path === '' && array.length == 0) {
-            warnToast('可能沒有存儲權限');
+            warnToast('可能沒有存储权限');
         }
         clear_list();
         if (parent !== '.') {
@@ -180,7 +180,7 @@ function doNewFolder(yes) {
 }
 
 function delFolder() {
-    $('#delFolderContent').html('是否刪除 ' + current_root);
+    $('#delFolderContent').html('是否删除 ' + current_root);
     $('#delFolder').show();
 }
 
@@ -196,7 +196,7 @@ function doDelFolder(yes) {
 }
 
 function delFile() {
-    $('#delFileContent').html('是否刪除 ' + current_file);
+    $('#delFileContent').html('是否删除 ' + current_file);
     $('#delFile').show();
     hideFileInfo();
 }

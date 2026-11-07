@@ -1,10 +1,12 @@
 package com.xinghui.tv
 
 import android.app.Activity
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.MediaItem
@@ -1267,12 +1269,23 @@ class PlayActivity : Activity() {
         //   Setting.getFullscreenMenuKey() == 0 → onToggle()：控制栏显示/隐藏
         //   == 1 → onEpisodes()：弹选集，并收起控制栏
         // 原版放在 dispatchKeyEvent 而不是 onKeyDown，因为控制栏显示时按键会先被 mKeyDown 分支接走
-        if (event.action == KeyEvent.ACTION_UP && event.keyCode == KeyEvent.KEYCODE_MENU) {
-            if (Settings(this).fullscreenMenuKey == 1) {
-                hideControl()
-                openEpisodes()
-            } else {
-                toggleControl()
+        // 原版 KeyUtil.isMenuKey:35 判的是 ACTION_UP + KEYCODE_MENU（VideoActivity:1686-1687 两分支）。
+        // 但斐讯 T1 这类盒子的遥控器菜单键实测不一定发 KEYCODE_MENU，有的发 KEYCODE_TV_CONTENTS_MENU，
+        // 有的 DOWN/UP 不成对（UP 被上游吃掉就静默无反应）。
+        // 所以这里统一在 ACTION_DOWN 触发一次、UP 直接吞掉（防双触发），
+        // 语义仍与原版一致：档位 0 → 切控制栏显隐；档位 1 → 弹选集并收起控制栏。
+        val menuLike = event.keyCode == KeyEvent.KEYCODE_MENU ||
+            event.keyCode == KeyEvent.KEYCODE_TV_CONTENTS_MENU
+        if (menuLike) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                val toEpisodes = Settings(this).fullscreenMenuKey == 1
+                Log.i("XingHuiTV", "[key] 菜单键 code=${event.keyCode} → ${if (toEpisodes) "选集" else "控制栏"}")
+                if (toEpisodes) {
+                    hideControl()
+                    openEpisodes()
+                } else {
+                    toggleControl()
+                }
             }
             return true
         }
@@ -1318,10 +1331,10 @@ class PlayActivity : Activity() {
             }
             KeyEvent.KEYCODE_BACK -> return super.dispatchKeyEvent(event)
             else -> {
-                // 遥控器上的菜单键并不都发 KEYCODE_MENU（斐讯 T1 这类盒子上常见别的码），
-                // 认不出来时不能把键吞掉：控制条隐藏状态下，任何非方向键都先呼出控制条，
-                // 对齐原版 CustomKeyDownVod「非方向键 → showControl」的行为，同时把码打出来便于定位。
-                if (event.action == KeyEvent.ACTION_UP) {
+                // 遥控器键码各家不同：控制条隐藏时，任何未识别的非方向键在 ACTION_DOWN 就呼出控制条，
+                // 对齐原版「非方向键 → 显示控制」的兜底意图，同时把码打出来便于定位。
+                // 这样即使遥控器的菜单键不是 KEYCODE_MENU，按下去也一定能出控制条。
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                     Log.i("XingHuiTV", "[key] 未识别按键 code=${event.keyCode}，呼出控制条")
                     showControl()
                 }
@@ -1338,6 +1351,14 @@ class PlayActivity : Activity() {
      */
     private fun applyImmersive() {
         runCatching {
+            // 硬设窗口 flag（theme 的 windowFullscreen 在部分 ROM 上会被 DecorView insets 覆盖）：
+            // FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算，FLAG_LAYOUT_NO_LIMITS 允许溢出系统栏区域。
+            // 这两条配合 hideSystemUI 的 LAYOUT_FULLSCREEN，才能真正做到「内容区 = 整块屏幕」。
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            )
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_LOW_PROFILE
@@ -1421,7 +1442,18 @@ class PlayActivity : Activity() {
      */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) applyImmersive()
+        if (hasFocus) {
+            applyImmersive()
+            // 尺寸自检：若 内容区 < 屏幕，说明窗口仍未真正铺满（白边就是壁纸从这个缝里露出来的）
+            runCatching {
+                val dm = resources.displayMetrics
+                val root = window.decorView
+                Log.i(
+                    "XingHuiTV",
+                    "[play] 尺寸 内容=${root.width}x${root.height} 屏=${dm.widthPixels}x${dm.heightPixels}"
+                )
+            }
+        }
     }
 
     /** 原版 BaseActivity:130-133：HDMI 分辨率/HDR 等配置变化后也要重设一次 */

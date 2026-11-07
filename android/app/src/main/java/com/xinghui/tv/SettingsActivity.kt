@@ -41,22 +41,19 @@ class SettingsActivity : Activity() {
         WallpaperStore.apply(this)
         settings = Settings(this)
 
-        // 点播：显示当前站点配置来源，点击进入站点列表（原版点播行点开就是站源页）
-        findViewById<View>(R.id.entryVod)?.setOnClickListener {
+            // 点播：原版 SettingActivity.onVod → ConfigDialog.create(this).type(0).show()
+        // 弹窗内含 二维码 + 「使用手机扫描二维码 或于浏览器访问地址 …」+ 接口输入框 + 选择/确定/取消
+        findViewById<View>(R.id.entryVod)?.setOnClickListener { showConfigDialog(0) }
+        // 点播行的 home 图标：原版是 SiteDialog（首页源锁定），本工程用它进站点列表
+        findViewById<View>(R.id.entryVodHome)?.setOnClickListener {
             startActivity(Intent(this, SitesActivity::class.java))
         }
-        // 长按点播行 → 手机推送二维码（对齐原版 PushActivity：二维码 + 「使用手机扫描二维码 或于浏览器访问地址 …」）
-        findViewById<View>(R.id.entryVod)?.setOnLongClickListener {
-            showPushDialog()
-            true
-        }
-        // 直播源主页图标 / 历史图标（本工程无直播体系数据，只做入口占位）
-        findViewById<View>(R.id.entryVodHome)?.setOnClickListener { toast("暂无点播主页源") }
         // 点播配置历史（原版 SettingActivity.onVodHistory → HistoryDialog type=0）
         findViewById<View>(R.id.entryVodHistory)?.setOnClickListener { showConfigHistory(0) }
 
         // 直播：值显示直播源是否已配，点击可编辑（原版点开是直播源列表）
-        findViewById<View>(R.id.entryLive)?.setOnClickListener { showLiveDialog() }
+        // 直播：原版 SettingActivity.onLive → ConfigDialog.create(this).type(1).show()
+        findViewById<View>(R.id.entryLive)?.setOnClickListener { showConfigDialog(1) }
         findViewById<View>(R.id.entryLiveHome)?.setOnClickListener { toast("暂无直播主页源") }
         // 直播配置历史（原版 SettingActivity.onLiveHistory → HistoryDialog type=1）
         findViewById<View>(R.id.entryLiveHistory)?.setOnClickListener { showConfigHistory(1) }
@@ -303,37 +300,69 @@ class SettingsActivity : Activity() {
     private fun px(dp: Int): Int = (dp * resources.displayMetrics.density + 0.5f).toInt()
 
     /**
-     * 手机推送弹窗（对齐原版 PushActivity + activity_push.xml）：
-     * 250dp 二维码 + 「使用手机扫描二维码 或于浏览器访问地址 …」。
-     * 地址就是本工程的本地服务端口（ProxyServer 固定 9978，与原版 Server.java 一致）。
+     * 点播/直播配置弹窗（照原版 ConfigDialog + dialog_config.xml）：
+     * 左边 180dp 二维码 → 扫出来是 http://IP:9978?tab=3（原版 Server.getAddress(3)，直达手机网页「設定」）；
+     * 右边三行提示「使用手机扫描二维码 / 或于浏览器访问地址 / http://IP:9978」（原版 push_info）；
+     * 下方接口输入框预填当前配置；底部「选择 / 确定 / 取消」。
+     * 确定 = 原版 onPositive → Config.find(text,type) → VodConfig/LiveConfig.load()。
      */
-    private fun showPushDialog() {
-        val addr = "http://${serverAddress()}:9978?tab=3"
-        val shown = "http://${serverAddress()}:9978"
-        val box = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            gravity = android.view.Gravity.CENTER
-            setPadding(px(24), px(24), px(24), px(24))
-            setBackgroundColor(android.graphics.Color.WHITE)
+    private fun showConfigDialog(type: Int) {
+        val view = layoutInflater.inflate(R.layout.dialog_config, null)
+        val code = view.findViewById<android.widget.ImageView>(R.id.code)
+        val info = view.findViewById<TextView>(R.id.info)
+        val text = view.findViewById<EditText>(R.id.text)
+        val positive = view.findViewById<TextView>(R.id.positive)
+        val negative = view.findViewById<TextView>(R.id.negative)
+        val storage = view.findViewById<TextView>(R.id.storage)
+
+        val base = "http://${serverAddress()}:9978"
+        // 原版 QRCode.getBitmap(Server.get().getAddress(3), 200, 0)
+        runCatching { QRCode.getBitmap("$base?tab=3", px(180), 0) }
+            .getOrNull()?.let { code.setImageBitmap(it) }
+        // 原版 push_info：「使用手机扫描二维码，或于浏览器访问地址 %s」，中文逗号被换成换行
+        info.text = "使用手机扫描二维码\n或于浏览器访问地址\n$base"
+
+        val cur = if (type == 0) SubscriptionStore(this).subscribeUrl() else settings.liveUrl
+        text.setText(cur)
+        text.setSelection(cur.length)
+
+        // 原版 storage 是申请存储权限（为读本地 file:// 配置）；本工程订阅只走网络地址
+        storage.setOnClickListener { toast("本工程订阅只支持网络地址") }
+
+        val dlg = AlertDialog.Builder(this).setView(view).create()
+        positive.setOnClickListener {
+            val url = text.text.toString().trim()
+            dlg.dismiss()
+            if (url.isEmpty()) {
+                toast(if (type == 0) "请输入点播接口" else "请输入直播接口")
+                return@setOnClickListener
+            }
+            if (type == 1) {
+                settings.liveUrl = url
+                SubscriptionStore(this).saveConfig(url, "", 1)
+                refresh()
+                toast("已保存直播源")
+            } else {
+                toast("正在加载订阅…")
+                SubscriptionImporter.import(this, url) { ok, msg ->
+                    if (ok) refresh()
+                    toast(msg)
+                }
+            }
         }
-        val bmp = runCatching { QRCode.getBitmap(addr, px(250), 1) }.getOrNull()
-        if (bmp != null) {
-            box.addView(android.widget.ImageView(this).apply {
-                setImageBitmap(bmp)
-                layoutParams = android.widget.LinearLayout.LayoutParams(px(250), px(250))
-            })
+        negative.setOnClickListener { dlg.dismiss() }
+        dlg.setOnShowListener {
+            // 原版：宽度 = 屏幕 55%，dimAmount = 0（不把底层压暗）
+            runCatching {
+                dlg.window?.setLayout(
+                    (resources.displayMetrics.widthPixels * 0.55f).toInt(),
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                dlg.window?.setDimAmount(0f)
+            }
+            text.requestFocus()
         }
-        box.addView(TextView(this).apply {
-            text = "使用手机扫描二维码\n或于浏览器访问地址\n$shown"
-            gravity = android.view.Gravity.CENTER
-            setTextColor(android.graphics.Color.BLACK)
-            textSize = 16f
-            setPadding(0, px(24), 0, 0)
-        })
-        AlertDialog.Builder(this)
-            .setView(box)
-            .setPositiveButton("确定", null)
-            .show()
+        dlg.show()
     }
 
     /**
