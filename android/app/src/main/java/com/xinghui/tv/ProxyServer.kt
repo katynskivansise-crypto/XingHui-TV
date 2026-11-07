@@ -56,6 +56,8 @@ object ProxyServer {
                 override fun serve(session: IHTTPSession): Response {
                     val path = session.uri.substringBefore('?').trim()
                     return when {
+                        // 原版 /action（server/process/Action.java）：手机网页的「設定/推送/搜尋」都打这里
+                        path == "/action" -> handleAction(session)
                         path == "/proxy" -> handleProxy(session)
                         path.startsWith("/file") -> handleFile(session, path)
                         // 原版 /upload /newFolder /delFolder /delFile 也归 Local，但我们不做文件管理
@@ -79,6 +81,42 @@ object ProxyServer {
     fun stopServer() {
         runCatching { http?.stop() }
         http = null
+    }
+
+    // ───────────────────────── /action ─────────────────────────
+
+    /**
+     * 对齐原版 server/process/Action.java 的 doResponse：
+     *   do=setting  {text, name}  —— 写配置。name 为空时原版写的是点播订阅地址
+     *   do=push     {url}         —— 推送到电视播放（本工程暂无投屏播放链路，只回 OK）
+     *   do=search   {word}        —— 电视端搜索（同上，只回 OK）
+     */
+    private fun handleAction(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        val p = HashMap<String, String>()
+        runCatching {
+            // parms 是 Map<String,String>（POST 表单已解析），parameters 是 Map<String,List<String>>
+            session.parms?.forEach { (k, v) -> p[k] = v }
+            session.parameters?.forEach { (k, v) -> v.firstOrNull()?.let { if (p[k] == null) p[k] = it } }
+        }
+        val act = p["do"].orEmpty().trim()
+        val text = p["text"].orEmpty().trim()
+        val name = p["name"].orEmpty().trim()
+        Log.i(TAG, "[proxy.action] do=$act name=$name text=${text.take(80)}")
+        val ctx = appCtx
+        when (act) {
+            "setting" -> if (ctx != null && text.isNotBlank()) {
+                if (name.isBlank()) {
+                    // 原版 name 为空 = 点播订阅。LiveConfig.sync 语义：直播没单独配就跟着点播走
+                    SubscriptionStore(ctx).setSubscribeUrl(text)
+                    val settings = Settings(ctx)
+                    if (settings.liveUrl.isBlank()) settings.liveUrl = text
+                } else if (name.equals("ua", true)) {
+                    Settings(ctx).ua = text
+                }
+            }
+            "push", "search" -> Unit
+        }
+        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK")
     }
 
     // ───────────────────────── /proxy ─────────────────────────

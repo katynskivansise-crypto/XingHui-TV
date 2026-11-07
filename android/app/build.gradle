@@ -56,6 +56,8 @@ dependencies {
     implementation 'androidx.media3:media3-exoplayer-smoothstreaming:1.3.1'
     implementation 'org.json:json:20240303'
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
+    // 推送二维码（对齐原版 utils/QRCode.java 的 zxing 用法）
+    implementation 'com.google.zxing:core:3.5.3'
     // catvod 基础类（spider.jar 运行时依赖这些类，由 app 侧提供，与原版一致）
     implementation 'com.google.code.gson:gson:2.10.1'
     implementation 'com.orhanobut:logger:2.2.0'

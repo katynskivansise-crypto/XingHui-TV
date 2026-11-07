@@ -34,12 +34,16 @@ class ListAdapter(
         // 横向 tab（如点播页分类条）：simple_list_item_1 默认 match_parent，横排会撑满导致只显示一项
         val lm = (parent as? RecyclerView)?.layoutManager
         if (lm is androidx.recyclerview.widget.GridLayoutManager) {
-            // 集数格：原版 adapter_episode 是无 padding 的 TextView，行高由 VerticalGridView 固定 44dp。
-            // 之前这里 padding 12dp + 四边 margin 4dp，格子被撑到 45dp 以上，格子间隔看着很大。
-            val h = (tv.context.resources.displayMetrics.density * 44 + 0.5f).toInt()
+            // 集数格：完全对齐原版 leanback/res/layout/adapter_episode.xml ——
+            // layout_height=wrap_content / 16sp / gravity=center，高度只由文字 + shape_item 自带的 8dp 上下 padding 决定。
+            // 之前这里固定 44dp，但 simple_list_item_1 自带 minHeight=?attr/listPreferredItemHeight
+            // （Android TV 主题下是 64dp），44dp 被 minHeight 顶掉，实际一格 64dp ——
+            // 这就是「集数之间间隔太大」的真因，改 layoutParams 高度根本压不下来。
+            tv.minHeight = 0
             tv.setPadding(0, 0, 0, 0)
             tv.layoutParams = RecyclerView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, h
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
         if (lm is androidx.recyclerview.widget.LinearLayoutManager &&
@@ -71,8 +75,9 @@ class ListAdapter(
                     if (has) focusTextColor else android.graphics.Color.WHITE
                 )
             }
-            // 之前这里用 0xFF335588 铺实心青块，真机上看就是「焦点格一块蓝」，原版没有填充色
-            (v as TextView).isActivated = has
+            // 焦点态交给 selector_item 的 state_focused（shape_item_focused：白 1.5dp 描边）。
+            // 之前这里写 isActivated = has，把焦点伪装成「当前集」，state_focused 永远不触发，白描边也就永远不出现。
+            (v as TextView).refreshDrawableState()
         }
     }
 

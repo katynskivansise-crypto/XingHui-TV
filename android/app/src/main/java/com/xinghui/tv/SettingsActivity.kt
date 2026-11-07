@@ -45,14 +45,21 @@ class SettingsActivity : Activity() {
         findViewById<View>(R.id.entryVod)?.setOnClickListener {
             startActivity(Intent(this, SitesActivity::class.java))
         }
+        // 长按点播行 → 手机推送二维码（对齐原版 PushActivity：二维码 + 「使用手机扫描二维码 或于浏览器访问地址 …」）
+        findViewById<View>(R.id.entryVod)?.setOnLongClickListener {
+            showPushDialog()
+            true
+        }
         // 直播源主页图标 / 历史图标（本工程无直播体系数据，只做入口占位）
-        findViewById<View>(R.id.entryVodHome)?.setOnClickListener { toast("暂无直播主页源") }
-        findViewById<View>(R.id.entryVodHistory)?.setOnClickListener { toast("暂无直播历史") }
+        findViewById<View>(R.id.entryVodHome)?.setOnClickListener { toast("暂无点播主页源") }
+        // 点播配置历史（原版 SettingActivity.onVodHistory → HistoryDialog type=0）
+        findViewById<View>(R.id.entryVodHistory)?.setOnClickListener { showConfigHistory(0) }
 
         // 直播：值显示直播源是否已配，点击可编辑（原版点开是直播源列表）
         findViewById<View>(R.id.entryLive)?.setOnClickListener { showLiveDialog() }
         findViewById<View>(R.id.entryLiveHome)?.setOnClickListener { toast("暂无直播主页源") }
-        findViewById<View>(R.id.entryLiveHistory)?.setOnClickListener { toast("暂无直播历史") }
+        // 直播配置历史（原版 SettingActivity.onLiveHistory → HistoryDialog type=1）
+        findViewById<View>(R.id.entryLiveHistory)?.setOnClickListener { showConfigHistory(1) }
 
         // 壁纸：点行弹选择，右侧 home=恢复默认、refresh=重新应用
         findViewById<View>(R.id.entryWall)?.setOnClickListener { showWallpaperDialog() }
@@ -280,5 +287,110 @@ class SettingsActivity : Activity() {
 
     private companion object {
         private const val REQ_WALLPAPER = 1001
+    }
+
+    /** 本机局域网 IPv4 地址（原版 Util.getIp()）；取不到时回 127.0.0.1 */
+    private fun serverAddress(): String = runCatching {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.toList() }
+            .filterIsInstance<java.net.Inet4Address>()
+            .firstOrNull { !it.isLoopbackAddress }
+            ?.hostAddress
+            ?: "127.0.0.1"
+    }.getOrDefault("127.0.0.1")
+
+    private fun px(dp: Int): Int = (dp * resources.displayMetrics.density + 0.5f).toInt()
+
+    /**
+     * 手机推送弹窗（对齐原版 PushActivity + activity_push.xml）：
+     * 250dp 二维码 + 「使用手机扫描二维码 或于浏览器访问地址 …」。
+     * 地址就是本工程的本地服务端口（ProxyServer 固定 9978，与原版 Server.java 一致）。
+     */
+    private fun showPushDialog() {
+        val addr = "http://${serverAddress()}:9978?tab=3"
+        val shown = "http://${serverAddress()}:9978"
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(px(24), px(24), px(24), px(24))
+            setBackgroundColor(android.graphics.Color.WHITE)
+        }
+        val bmp = runCatching { QRCode.getBitmap(addr, px(250), 1) }.getOrNull()
+        if (bmp != null) {
+            box.addView(android.widget.ImageView(this).apply {
+                setImageBitmap(bmp)
+                layoutParams = android.widget.LinearLayout.LayoutParams(px(250), px(250))
+            })
+        }
+        box.addView(TextView(this).apply {
+            text = "使用手机扫描二维码\n或于浏览器访问地址\n$shown"
+            gravity = android.view.Gravity.CENTER
+            setTextColor(android.graphics.Color.BLACK)
+            textSize = 16f
+            setPadding(0, px(24), 0, 0)
+        })
+        AlertDialog.Builder(this)
+            .setView(box)
+            .setPositiveButton("确定", null)
+            .show()
+    }
+
+    /**
+     * 配置历史列表（对齐原版 HistoryDialog + dialog_history.xml）：
+     * 单列 RecyclerView，项文案取 Config.getDesc()（有 name 显示 name，否则显示 url），
+     * 点击 = ConfigAdapter.onTextClick → callback.setConfig(item)，长按 = onDeleteClick。
+     */
+    private fun showConfigHistory(type: Int) {
+        val store = SubscriptionStore(this)
+        val items = store.configHistory(type)
+        if (items.isEmpty()) {
+            toast(if (type == 0) "暂无点播配置历史" else "暂无直播配置历史")
+            return
+        }
+        val pairs = items.map { it.first to it.second }
+        val rv = androidx.recyclerview.widget.RecyclerView(this).apply {
+            layoutManager = androidx.recyclerview.widget.LinearLayoutManager(this@SettingsActivity)
+            setPadding(px(16), px(16), px(16), px(16))
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            clipToPadding = false
+        }
+        rv.adapter = ListAdapter(
+            items = pairs,
+            onLongClick = { u ->
+                store.deleteConfig(u, type)
+                toast("已删除该配置（观看历史不受影响）")
+            },
+            focusTextColor = android.graphics.Color.rgb(255, 204, 0),
+            onClick = { u -> applyConfig(u, type) }
+        )
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(if (type == 0) "点播配置历史" else "直播配置历史")
+            .setView(rv)
+            .setNegativeButton("关闭", null)
+            .create()
+        dlg.setOnShowListener { rv.post { rv.getChildAt(0)?.requestFocus() } }
+        dlg.show()
+    }
+
+    /**
+     * 切换配置（对齐原版 ConfigCallback.setConfig）：
+     * 点播 → VodConfig.load(config)：clear 内存 + 强制重拉 + 重建站点；
+     * 直播 → LiveConfig.load(config)：换直播源地址。
+     * 观看历史/收藏按 vodId 存（HistoryStore），不随配置变，切回旧配置历史仍在。
+     */
+    private fun applyConfig(url: String, type: Int) {
+        if (type == 1) {
+            settings.liveUrl = url
+            SubscriptionStore(this).saveConfig(url, "", 1)
+            refresh()
+            toast("已切换直播源")
+            return
+        }
+        toast("正在加载订阅…")
+        SubscriptionImporter.import(this, url) { ok, msg ->
+            if (ok) refresh()
+            toast(msg)
+        }
     }
 }

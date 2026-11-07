@@ -50,38 +50,13 @@ class SitesActivity : Activity() {
             }
             inputUrl.isEnabled = false
             Toast.makeText(this, "正在下载订阅…", Toast.LENGTH_SHORT).show()
-            Thread {
-                val text = JsonFetcher.get(url)
-                runOnUiThread {
-                    inputUrl.isEnabled = true
-                    if (text == null) {
-                        Toast.makeText(this, "下载失败，请检查地址或网络", Toast.LENGTH_LONG).show()
-                        return@runOnUiThread
-                    }
-                    // csp_ 源需要 spider.jar：先解析订阅顶层 spider 字段，再解析站点（站点自带 jar，对齐原项目）
-                    val jarRaw = SubscriptionParser.parseJar(text)
-                    val jarFull = SubscriptionParser.jarUrl(jarRaw, url)
-                    val sites = SubscriptionParser.parse(text, jarFull, url)
-                    if (sites.isEmpty()) {
-                        Toast.makeText(this, "未解析到站点（需 JSON 订阅格式）", Toast.LENGTH_LONG).show()
-                        return@runOnUiThread
-                    }
-                    store.addAll(sites)
-                    if (jarFull.isNotBlank()) {
-                        store.setJar(jarFull)
-                        store.attachJar(jarFull)
-                    }
-                    // 保存订阅 URL：drpy2.js 规则源（./js/*.js / ./lib/*.js）相对路径要基于它解析
-                    store.setSubscribeUrl(url)
-                    // 保存订阅原文：进程重启后用 SnifferRules.load 恢复 rules/ads（嗅探白名单与点击脚本）
-                    store.setSubscriptionText(text)
-                    // 换订阅=换 jar 与站点集合，旧的 spider 实例（各自挂着一个 DexClassLoader）
-                    // 再也不会被用到，必须在这里放掉，否则每换一次订阅就多留一整套类加载器。
-                    CspLoader.destroy()
-                    refresh(tvCurrent, labelSites)
-                    Toast.makeText(this, "已添加 ${sites.size} 个站点：${sites.joinToString("、") { it.name }}", Toast.LENGTH_LONG).show()
-                }
-            }.start()
+            // 统一链路（对齐原版 ConfigDialog.onPositive → Config.find → VodConfig.load）：
+            // 真拉订阅 → 解析 → 落库 → 记配置历史 → 放掉旧 spider
+            SubscriptionImporter.import(this, url) { ok, msg ->
+                inputUrl.isEnabled = true
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                if (ok) refresh(tvCurrent, labelSites)
+            }
         }
 
         // 删除当前站点

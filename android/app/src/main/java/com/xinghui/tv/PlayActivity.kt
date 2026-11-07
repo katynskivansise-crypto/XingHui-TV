@@ -70,7 +70,9 @@ class PlayActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_play)
-        // 对齐原版 VideoActivity（继承 BaseActivity）：窗口同样是壁纸，播放器自身黑底压住
+        // 恢复：对齐原版 VideoActivity（继承 BaseActivity）—— 窗口同样挂壁纸，播放器自身黑底压住。
+        // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
+        // 白边的真正解法是让内容区真正全屏（Theme.TVBox + LAYOUT_FULLSCREEN），不是靠撤壁纸。
         runCatching { WallpaperStore.apply(this) }
 
         vodId = intent.getStringExtra("vod_id") ?: ""
@@ -1314,6 +1316,17 @@ class PlayActivity : Activity() {
                 }
                 return true
             }
+            KeyEvent.KEYCODE_BACK -> return super.dispatchKeyEvent(event)
+            else -> {
+                // 遥控器上的菜单键并不都发 KEYCODE_MENU（斐讯 T1 这类盒子上常见别的码），
+                // 认不出来时不能把键吞掉：控制条隐藏状态下，任何非方向键都先呼出控制条，
+                // 对齐原版 CustomKeyDownVod「非方向键 → showControl」的行为，同时把码打出来便于定位。
+                if (event.action == KeyEvent.ACTION_UP) {
+                    Log.i("XingHuiTV", "[key] 未识别按键 code=${event.keyCode}，呼出控制条")
+                    showControl()
+                }
+                return true
+            }
         }
         return super.dispatchKeyEvent(event)
     }
@@ -1329,6 +1342,10 @@ class PlayActivity : Activity() {
             window.decorView.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_LOW_PROFILE
                     or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    // LAYOUT_FULLSCREEN 才是「布局真正延伸到系统栏区域」的那一位。
+                    // 原版 Util.hideSystemUI 没写它，是因为原版 Activity 主题本身带 windowFullscreen；
+                    // 少了它时 FULLSCREEN 只隐藏状态栏、内容区仍在栏下方，等于白做。
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                     or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                     or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION

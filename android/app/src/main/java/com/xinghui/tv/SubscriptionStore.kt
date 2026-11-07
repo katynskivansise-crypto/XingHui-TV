@@ -2,6 +2,7 @@ package com.xinghui.tv
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * 订阅站点存储（SharedPreferences 持久化）。
@@ -96,6 +97,68 @@ class SubscriptionStore(context: Context) {
         if (updated != all) save(updated)
     }
 
+    // ───────── 配置历史（对齐原版 bean/Config：按 (url,type) 唯一，记 name/time）─────────
+    // 原版点播/直播各一张表，用 Room 存，历史（History/Keep）以 config.id 关联，
+    // 所以换配置历史不丢、切回旧配置历史还在。这里用同一份 JSON 列表复刻。
+
+    fun configHistory(type: Int): List<Pair<String, String>> {
+        val raw = prefs.getString(KEY_CONFIG_HISTORY, "") ?: ""
+        if (raw.isBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length())
+                .map { arr.optJSONObject(it) }
+                .filter { it != null && it.optInt("type", 0) == type }
+                .sortedByDescending { it!!.optLong("time", 0L) }
+                .map { o ->
+                    val u = o!!.optString("url")
+                    u to o.optString("name").ifBlank { u }
+                }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveConfig(url: String, name: String = "", type: Int = 0) {
+        if (url.isBlank()) return
+        val raw = prefs.getString(KEY_CONFIG_HISTORY, "") ?: ""
+        val arr = try {
+            if (raw.isBlank()) JSONArray() else JSONArray(raw)
+        } catch (_: Exception) {
+            JSONArray()
+        }
+        var hit = -1
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            if (o.optString("url") == url && o.optInt("type", 0) == type) { hit = i; break }
+        }
+        val obj = JSONObject()
+            .put("url", url)
+            .put("name", name)
+            .put("time", System.currentTimeMillis())
+            .put("type", type)
+        if (hit >= 0) arr.put(hit, obj) else arr.put(obj)
+        prefs.edit().putString(KEY_CONFIG_HISTORY, arr.toString()).apply()
+    }
+
+    fun deleteConfig(url: String, type: Int) {
+        val raw = prefs.getString(KEY_CONFIG_HISTORY, "") ?: ""
+        if (raw.isBlank()) return
+        val keep = try {
+            val arr = JSONArray(raw)
+            val out = JSONArray()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("url") == url && o.optInt("type", 0) == type) continue
+                out.put(o)
+            }
+            out
+        } catch (_: Exception) {
+            return
+        }
+        prefs.edit().putString(KEY_CONFIG_HISTORY, keep.toString()).apply()
+    }
+
     companion object {
         private const val PREFS = "xinghui_subscriptions"
         private const val KEY_SITES = "sites"
@@ -103,5 +166,6 @@ class SubscriptionStore(context: Context) {
         private const val KEY_JAR = "spider_jar"
         private const val KEY_SUB_URL = "subscribe_url"
         private const val KEY_SUB_TEXT = "subscribe_text"
+        private const val KEY_CONFIG_HISTORY = "config_history"
     }
 }
