@@ -36,6 +36,8 @@ class SearchActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_search)
+        // 对齐原版 BaseActivity.refreshWall：全站 window 层壁纸，布局透明透出来
+        runCatching { WallpaperStore.apply(this) }
 
         input = findViewById(R.id.searchInput)
         wordStore = SearchWordStore(this)

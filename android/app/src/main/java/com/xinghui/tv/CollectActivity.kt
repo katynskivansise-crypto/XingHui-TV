@@ -22,6 +22,8 @@ class CollectActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_lib)
+        // 对齐原版 BaseActivity.refreshWall：全站 window 层壁纸，布局透明透出来
+        runCatching { WallpaperStore.apply(this) }
 
         store = HistoryStore(this)
         findViewById<TextView>(R.id.libTitle).text = "收藏"

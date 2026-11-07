@@ -29,14 +29,17 @@ object WallpaperStore {
 
     fun has(context: Context): Boolean = file(context).let { it.exists() && it.length() > 0 }
 
-    /** 应用到窗口；没有壁纸就清空，露出布局里的深色渐变底 */
+    /** 应用到窗口；有自设壁纸用它，没有就回退原版内置 wallpaper_1（全站统一，对齐 BaseActivity.refreshWall） */
     fun apply(activity: Activity) {
         runCatching {
             val f = file(activity)
             if (f.exists() && f.length() > 0) {
                 activity.window.setBackgroundDrawable(Drawable.createFromPath(f.absolutePath))
             } else {
-                activity.window.setBackgroundDrawable(null)
+                // 原版 Setting.getWall() 默认 1 → 用内置 wallpaper_1。
+                // 之前这里设 null 会把 MainActivity 刚设好的壁纸清掉，首页退回纯黑，
+                // 而详情页没调本方法所以仍是绿色 —— 就是「首页黑、播放页绿」的原因。
+                activity.window.setBackgroundDrawableResource(R.drawable.wallpaper_1)
             }
         }.onFailure { Log.e(TAG, "[wall] apply 失败", it) }
     }

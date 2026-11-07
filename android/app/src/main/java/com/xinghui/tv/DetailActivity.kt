@@ -84,8 +84,10 @@ class DetailActivity : Activity() {
         // 我们是 DetailActivity + PlayActivity 两页，就在这里补上同样的直达：
         // 点海报→播第一集，点任意集数→直接全屏播那一集（省掉「先看详情、再点进去」这一步）。
         // 对齐原版 VideoActivity：视频框和集数在同一页，点框进全屏（onVideo 的语义）
-        // 原版 BaseActivity.refreshWall：壁纸设在 window 层，布局透明透出来
-        runCatching { window.setBackgroundDrawableResource(R.drawable.wallpaper_1) }
+        // 原版 BaseActivity.refreshWall：壁纸设在 window 层，布局透明透出来。
+        // 注意必须走 WallpaperStore.apply：它才有「用户自设图 > 内置 wallpaper_1」的分支。
+        // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
+        runCatching { WallpaperStore.apply(this) }
         inlineView = findViewById(R.id.inlinePlayer)
         player = ExoPlayer.Builder(this).build().also { inlineView.player = it }
         // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
@@ -280,12 +282,17 @@ class DetailActivity : Activity() {
         playInline(idx.coerceIn(0, (next.episodes.size - 1).coerceAtLeast(0)))
     }
 
-    /** 重建分段按钮：原版按 40 集一段（1-40 / 41-80 / 81-102），集数少就不显示这一行 */
+    /**
+     * 重建分段按钮：原版按 40 集一段（1-40 / 41-80 / 81-102）。
+     * 注意：原版即使只有 6 集也照样显示「倒序 → 1-6」（整行存在，只是只有一个段按钮），
+     * 只有单集时才没意义。之前写成 episodes.size <= GROUP_SIZE 就整行 GONE，
+     * 导致 3 集的影片连「倒序」都没有。
+     */
     private fun rebuildGroups() {
         val box = findViewById<android.widget.LinearLayout>(R.id.groupItems)
         box.removeAllViews()
         val row = findViewById<View>(R.id.groupRow)
-        if (episodes.size <= GROUP_SIZE) {
+        if (episodes.size <= 1) {
             row?.visibility = View.GONE
             return
         }

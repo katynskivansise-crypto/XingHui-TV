@@ -239,126 +239,143 @@
 
     </LinearLayout>
 
-    <!-- 首页历史记录横排行 -->
-    <LinearLayout
-        android:id="@+id/quickRow"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <TextView
-            android:id="@+id/quickLabel"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="6dp"
-            android:textColor="@android:color/white"
-            android:textSize="14sp"
-            android:text="历史记录 · 点击续播" />
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/quickList"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:clipToPadding="false" />
-
-    </LinearLayout>
-
-    <!-- 首页更新推荐（数据来自 home 的 list） -->
-    <LinearLayout
-        android:id="@+id/recommendRow"
+    <!--
+      内容区：对齐原版 HomeActivity 的 ViewPager 结构。
+      原版 pager 一页只显示一页（page0=首页推荐，page1..N=各分类），结构上不可能叠屏。
+      这里用 FrameLayout 承载两页，homeContent 与 mainBody 二选一，杜绝「首页入口行 + 二级页」拼屏。
+    -->
+    <FrameLayout
+        android:id="@+id/contentPager"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:orientation="vertical"
-        android:visibility="gone">
+        android:layout_weight="1">
 
-        <TextView
-            android:id="@+id/recommendLabel"
+        <!-- 第 0 页：首页（历史记录 + 更新推荐） -->
+        <LinearLayout
+            android:id="@+id/homeContent"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingStart="44dp"
-            android:paddingTop="14dp"
-            android:paddingBottom="8dp"
-            android:textColor="@android:color/white"
-            android:textSize="18sp"
-            android:textStyle="bold"
-            android:letterSpacing="0.04"
-            android:text="更新推荐" />
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/recommendList"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:clipToPadding="false" />
-
-    </LinearLayout>
-
-    <!-- 二级：点播内容页（点「点播」后显示） -->
-    <LinearLayout
-        android:id="@+id/mainBody"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <!-- 横向分类 tab（电影/剧集/综艺/动漫/短剧…） -->
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/catList"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp"
-            android:clipToPadding="false" />
-
-        <HorizontalScrollView
-            android:id="@+id/filterRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp"
-            android:scrollbars="none"
-            android:visibility="gone">
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
             <LinearLayout
-                android:id="@+id/filterList"
-                android:layout_width="wrap_content"
+                android:id="@+id/quickRow"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal" />
-        </HorizontalScrollView>
+                android:orientation="vertical"
+                android:visibility="gone">
 
-        <TextView
-            android:id="@+id/labelVod"
+                <TextView
+                    android:id="@+id/quickLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="6dp"
+                    android:textColor="@android:color/white"
+                    android:textSize="14sp"
+                    android:text="历史记录 · 点击续播" />
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/quickList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:clipToPadding="false" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/recommendRow"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/recommendLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingStart="44dp"
+                    android:paddingTop="14dp"
+                    android:paddingBottom="8dp"
+                    android:textColor="@android:color/white"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.04"
+                    android:text="更新推荐" />
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/recommendList"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:clipToPadding="false" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- 第 1 页：点播分类页（原版 VodFragment） -->
+        <LinearLayout
+            android:id="@+id/mainBody"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingStart="44dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="4dp"
-            android:textColor="#B0FFFFFF"
-            android:textSize="14sp"
-            android:text="影片" />
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
 
-        <!-- 空状态提示（区分"没数据"与"没加载"） -->
-        <TextView
-            android:id="@+id/tvEmpty"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="18dp"
-            android:gravity="center"
-            android:textColor="#90FFFFFF"
-            android:textSize="16sp"
-            android:visibility="gone"
-            android:text="" />
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/catList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:clipToPadding="false" />
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/vodList"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:clipToPadding="false" />
+            <HorizontalScrollView
+                android:id="@+id/filterRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:scrollbars="none"
+                android:visibility="gone">
 
-    </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/filterList"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+
+            <TextView
+                android:id="@+id/labelVod"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="44dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="4dp"
+                android:textColor="#B0FFFFFF"
+                android:textSize="14sp"
+                android:text="影片" />
+
+            <TextView
+                android:id="@+id/tvEmpty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="18dp"
+                android:gravity="center"
+                android:textColor="#90FFFFFF"
+                android:textSize="16sp"
+                android:visibility="gone"
+                android:text="" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/vodList"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false" />
+
+        </LinearLayout>
+
+    </FrameLayout>
 
 </LinearLayout>

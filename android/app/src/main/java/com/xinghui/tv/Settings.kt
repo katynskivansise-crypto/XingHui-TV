@@ -57,6 +57,68 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_LIVE_URL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_LIVE_URL, value).apply()
 
+    // ==== 对齐原版 SettingCustomActivity（个性设置）====
+    /** 选集样式：0=单行，1=多行（详情页集数网格） */
+    var episodeStyle: Int
+        get() = prefs.getInt("episode_style", 1)
+        set(value) = prefs.edit().putInt("episode_style", value).apply()
+
+    /** 首页 MENU 键：0选项弹窗 1切换站源 2切换线路 3直播 4历史 5搜索 6推送 7收藏 8设置 */
+    var homeMenuKey: Int
+        get() = prefs.getInt("home_menu_key", 8)
+        set(value) = prefs.edit().putInt("home_menu_key", value).apply()
+
+    /** 全屏 MENU 键：0=控制栏，1=选集 */
+    var fullscreenMenuKey: Int
+        get() = prefs.getInt("fullscreen_menu_key", 0)
+        set(value) = prefs.edit().putInt("fullscreen_menu_key", value).apply()
+
+    /** 小窗返回键：0=返回，1=焦点移动 */
+    var smallWindowBackKey: Int
+        get() = prefs.getInt("small_window_back_key", 0)
+        set(value) = prefs.edit().putInt("small_window_back_key", value).apply()
+
+    /** 返回键/菜单键配置是否生效，见 MainActivity.dispatchKeyEvent */
+    var keyConfigEnabled: Boolean
+        get() = prefs.getBoolean("key_config_enabled", true)
+        set(value) = prefs.edit().putBoolean("key_config_enabled", value).apply()
+
+    // ==== 对齐原版 SettingPlayerActivity（播放核心）====
+    /** 播放核心：0=EXO，1=IJK（本壳仅内置 EXO，IJK 选项保留定义） */
+    var playCore: Int
+        get() = prefs.getInt("play_core", 0)
+        set(value) = prefs.edit().putInt("play_core", value).apply()
+
+    /** 解码方式：0=软解，1=硬解 */
+    var decodeMode: Int
+        get() = prefs.getInt("decode_mode", 1)
+        set(value) = prefs.edit().putInt("decode_mode", value).apply()
+
+    /** 渲染方式：0=Surface，1=Texture */
+    var renderMode: Int
+        get() = prefs.getInt("render_mode", 0)
+        set(value) = prefs.edit().putInt("render_mode", value).apply()
+
+    /** 缩放比例：0原始 1=16:9 2=4:3 3填充 4裁剪 */
+    var videoScale: Int
+        get() = prefs.getInt("video_scale", 0)
+        set(value) = prefs.edit().putInt("video_scale", value).apply()
+
+    /** 隧道模式：0=关，1=开 */
+    var tunnelMode: Int
+        get() = prefs.getInt("tunnel_mode", 0)
+        set(value) = prefs.edit().putInt("tunnel_mode", value).apply()
+
+    /** AAC 优先：0=关，1=开 */
+    var aacFirst: Int
+        get() = prefs.getInt("aac_first", 0)
+        set(value) = prefs.edit().putInt("aac_first", value).apply()
+
+    /** 后台播放：0=关，1=开 */
+    var backgroundPlay: Int
+        get() = prefs.getInt("background_play", 1)
+        set(value) = prefs.edit().putInt("background_play", value).apply()
+
     /** UA 当前档位中文名，用于设置界面展示 */
     fun uaLabel(): String = when (ua) {
         "" -> "默认"

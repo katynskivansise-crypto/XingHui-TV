@@ -73,10 +73,9 @@ class MainActivity : Activity() {
         installCrashReporter()
         ensureStoragePermission()
         ensureTvBoxDir()
-        // 原版 BaseActivity.refreshWall：首页同样是 window 层壁纸，布局透明透出来
-        runCatching { window.setBackgroundDrawableResource(R.drawable.wallpaper_1) }
         setContentView(R.layout.activity_main)
         // 壁纸（对齐原版 BaseActivity.refreshWall：只设 window 背景，不额外加 View）
+        // 统一走 WallpaperStore：有自设图用它，没有回退内置 wallpaper_1
         runCatching { WallpaperStore.apply(this) }
 
         // 分类 tab（横向，对齐原版二级页）
@@ -206,6 +205,8 @@ class MainActivity : Activity() {
         super.onResume()
         // 顶部时钟
         clockTick.run()
+        // 从任意页面返回时收敛一次，避免上一页的区块残留成拼屏
+        syncPageRows()
         // 从站点管理返回后，若当前站点变化则重新加载
         val cur = SubscriptionStore(this).currentKey()
         if (lastSiteKey != null && cur != lastSiteKey) {
@@ -506,6 +507,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.mainBody)?.visibility = View.GONE
         findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
         findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
+        syncPageRows()
         findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + site.name
         showEmpty("")
         siteKey = site.key
@@ -538,6 +540,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
         findViewById<View>(R.id.quickRow)?.visibility = View.GONE
         findViewById<View>(R.id.mainBody)?.visibility = View.VISIBLE
+        syncPageRows()
         if (categories.isEmpty()) {
             showEmpty("未获取到分类列表（首页接口未返回 class 字段）\n按返回键回首页，看首页显示的失败原因")
             return
@@ -552,6 +555,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
         findViewById<View>(R.id.recommendRow)?.visibility =
             if (recommends.isNotEmpty()) View.VISIBLE else View.GONE
+        syncPageRows()
         loadQuickHistory() // 恢复首页历史行（历史/设置可能已变化）
         findViewById<View>(R.id.btnVod)?.requestFocus()
     }
@@ -622,7 +626,36 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /**
+     * 页面态收敛（治拼屏）：
+     * 之前 entryRow / quickRow / recommendRow / mainBody 四个区块各自由不同代码路径 setVisibility，
+     * 任一路径漏掉一项就会「首页入口行 + 二级页/配置页」叠在同一屏上（截图里搜索/收藏/历史压着卡片）。
+     * 这里统一以 mainBody 是否为 VISIBLE 作为唯一真值，其它三块全部反着设。
+     */
+    private fun syncPageRows() {
+        val inMain = findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE
+        // contentPager 里只有两页：homeContent（首页）/ mainBody（分类页）。
+        // mainBody 自身无背景（透明），所以必须把 homeContent 整页藏掉，
+        // 否则下层推荐网格会透上来 —— 这正是之前「卡片压在海报上」的真因。
+        findViewById<View>(R.id.homeContent)?.visibility = if (inMain) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.entryRow)?.visibility = if (inMain) View.GONE else View.VISIBLE
+        if (inMain) {
+            findViewById<View>(R.id.quickRow)?.visibility = View.GONE
+            findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
+        } else {
+            findViewById<View>(R.id.quickRow)?.visibility =
+                if (quickListEmpty()) View.GONE else View.VISIBLE
+            findViewById<View>(R.id.recommendRow)?.visibility =
+                if (recommends.isEmpty()) View.GONE else View.VISIBLE
+        }
+    }
+
+    private fun quickListEmpty(): Boolean =
+        (findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.quickList)?.adapter?.itemCount ?: 0) == 0
+
     private fun showEmpty(msg: String) {
+        // 每次刷新提示都顺带收敛一次，因为异步解析/回包可能晚于页面切换
+        findViewById<View>(R.id.mainBody)?.post { syncPageRows() }
         findViewById<TextView>(R.id.tvEmpty)?.apply {
             text = msg
             visibility = if (msg.isEmpty()) View.GONE else View.VISIBLE

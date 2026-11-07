@@ -22,6 +22,8 @@ class SitesActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_sites)
+        // 对齐原版 BaseActivity.refreshWall：全站 window 层壁纸，布局透明透出来
+        runCatching { WallpaperStore.apply(this) }
 
         store = SubscriptionStore(this)
 

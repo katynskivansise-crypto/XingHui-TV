@@ -43,6 +43,8 @@ class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
+        // 对齐原版 BaseActivity.refreshWall：全站 window 层壁纸，布局透明透出来
+        runCatching { WallpaperStore.apply(this) }
 
         settings = Settings(this)
         store = HistoryStore(this)
@@ -62,7 +64,7 @@ class SettingsActivity : Activity() {
         tvAbout = findViewById<TextView>(R.id.valAbout)
         tvWallpaper = findViewById<TextView>(R.id.valWallpaper)
         tvSize = findViewById<TextView>(R.id.valSize)
-        tvScale = findViewById<TextView>(R.id.valScale)
+        tvScale = findViewById<TextView>(R.id.valVideoScale)
 
         refresh()
 
@@ -138,15 +140,46 @@ class SettingsActivity : Activity() {
         }
 
         // 备份：把 SharedPreferences 目录打包导出（对齐原项目 BackupDialog 导出配置）
+        // 原版这三行右侧的图标按钮：壁纸 home=恢复默认，refresh=重新应用当前壁纸
+        findViewById<View>(R.id.rowWallpaperHome)?.setOnClickListener {
+            WallpaperStore.clear(this)   // clear 内部已含 apply
+            refresh()
+        }
+        findViewById<View>(R.id.rowWallpaperRefresh)?.setOnClickListener {
+            WallpaperStore.apply(this)
+            refresh()
+        }
+        // 直播两枚（home/history）当前无对应数据源，按「只接入文字、点击不产生变化」处理
+        findViewById<View>(R.id.rowLiveHome)?.setOnClickListener { }
+        findViewById<View>(R.id.rowLiveHistory)?.setOnClickListener { }
+
         findViewById<View>(R.id.rowWallpaper).setOnClickListener { showWallpaperDialog() }
         findViewById<View>(R.id.rowSize).setOnClickListener {
             settings.uiSize = if (settings.uiSize >= 3) 0 else settings.uiSize + 1
             refresh()
         }
-        findViewById<View>(R.id.rowScale).setOnClickListener {
+        findViewById<View>(R.id.rowVideoScale).setOnClickListener {
             settings.playerScale = if (settings.playerScale >= 4) 0 else settings.playerScale + 1
             refresh()
         }
+
+        // ==== 操作（对齐原版 SettingCustomActivity 的取值枚举，仅展示）====
+        bindDisplay(R.id.rowEpisodeStyle, EPISODE_STYLE) { Settings(this).episodeStyle }
+        bindDisplay(R.id.rowHomeMenuKey, HOME_MENU_KEY) { Settings(this).homeMenuKey }
+        bindDisplay(R.id.rowFullscreenMenuKey, FULLSCREEN_MENU_KEY) { Settings(this).fullscreenMenuKey }
+        bindDisplay(R.id.rowSmallWindowBackKey, SMALL_WINDOW_BACK_KEY) { Settings(this).smallWindowBackKey }
+
+        // ==== 加速与嗅探：功能未接入，只呈现状态文字 ====
+        findViewById<TextView>(R.id.valThunder)?.text = "未接入"
+        findViewById<TextView>(R.id.valSniff)?.text = "未接入"
+        findViewById<TextView>(R.id.valThunderCache)?.text = "未接入"
+
+        // ==== 播放参数（对齐原版 SettingPlayerActivity，按实际能力裁剪）====
+        bindDisplay(R.id.rowDecodeMode, DECODE_MODE) { Settings(this).decodeMode }
+        bindDisplay(R.id.rowRenderMode, RENDER_MODE) { Settings(this).renderMode }
+        bindDisplay(R.id.rowTunnelMode, TUNNEL_MODE) { Settings(this).tunnelMode }
+        bindDisplay(R.id.rowBackgroundPlay, BACKGROUND_PLAY) { Settings(this).backgroundPlay }
+
         findViewById<View>(R.id.rowBackup).setOnClickListener { doBackup() }
 
         // 恢复：从备份 zip 还原配置
@@ -157,6 +190,39 @@ class SettingsActivity : Activity() {
 
     /** 代理设置对话框（对齐原项目 ProxyDialog）：输入地址保存；留空保存即关闭代理 */
     /** 壁纸：本地选图 / 图片地址 / 恢复默认（对齐原版设置页的壁纸项，来源扩展为可自选） */
+
+    // ==== 设置项枚举（文案/顺序照原版 select_* 数组）====
+    private val EPISODE_STYLE = arrayOf("单行", "多行")
+    private val HOME_MENU_KEY = arrayOf(
+        "选项弹窗", "切换站源", "切换线路", "直播页面", "历史页面",
+        "搜索页面", "推送页面", "收藏页面", "设置页面"
+    )
+    private val FULLSCREEN_MENU_KEY = arrayOf("控制栏", "选集")
+    private val SMALL_WINDOW_BACK_KEY = arrayOf("返回", "焦点移动")
+    // 本壳只走 MediaCodec 硬解；软解需要 FFmpeg 扩展，尚未接入
+    private val DECODE_MODE = arrayOf("硬解")
+    private val RENDER_MODE = arrayOf("Surface", "Texture")
+    private val TUNNEL_MODE = arrayOf("关闭", "开启")
+    private val BACKGROUND_PLAY = arrayOf("关闭", "开启")
+
+    /**
+     * 只显示当前值、不响应点击：这些设置项目前还没有行为接线，
+     * 按用户要求「没覆盖到的功能只接入选项或文字，点击不产生变化」。
+     */
+    private fun bindDisplay(rowId: Int, options: Array<String>, get: () -> Int) {
+        val row = findViewById<View>(rowId) ?: return
+        val valView = findViewById<android.widget.TextView>(
+            resources.getIdentifier("val" + resources.getResourceEntryName(rowId).removePrefix("row"),
+                "id", packageName)
+        )
+        fun show() {
+            val i = get().coerceIn(0, options.size - 1)
+            valView?.text = options[i]
+        }
+        show()
+        // 当前版本这些项只呈现选项文字，点击不做改动（功能接线另轮推进）
+    }
+
     private fun showWallpaperDialog() {
         AlertDialog.Builder(this)
             .setTitle("壁纸")

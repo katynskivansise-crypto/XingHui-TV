@@ -70,6 +70,8 @@ class PlayActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_play)
+        // 对齐原版 VideoActivity（继承 BaseActivity）：窗口同样是壁纸，播放器自身黑底压住
+        runCatching { WallpaperStore.apply(this) }
 
         vodId = intent.getStringExtra("vod_id") ?: ""
         vodName = intent.getStringExtra("vod_name") ?: ""
