@@ -421,11 +421,41 @@ class MpvPlayer(
     /** 用缓存的 pause/eof，不在这里同步调 native（mpv_get_property 在 seek 期间会阻塞 UI） */
     fun isPlaying(): Boolean = inited && !paused && !eofReached
 
+    /**
+     * 真实暂停态：缓存标记一旦被「写下去却没生效」带偏，就再也纠不回来 ——
+     * 按 OK 第一次把 paused 置 true（mpv 其实没停），之后每次 toggle 都会走 resume()，
+     * 表现就是用户说的「mpv 根本停不下来」。所以这里读一次 mpv 自己的 pause 属性为准并回写缓存。
+     */
+    fun isPausedActual(): Boolean {
+        if (!inited) return true
+        val real = runCatching { `is`.xyz.mpv.MPVLib.getPropertyBoolean("pause") }.getOrNull()
+        if (real != null) paused = real
+        return paused
+    }
+
+    /**
+     * 写 pause：属性写和命令写两条路都下发，再读回核对。
+     * 只用 setPropertyBoolean 时，个别 libmpv 版本对这条写入是静默丢弃（不抛异常、也不报错，
+     * 播放照旧），读回核对才能把这种情况暴露出来。
+     */
+    private fun applyPause(value: Boolean) {
+        if (!inited) return
+        paused = value
+        runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", value) }
+        runCatching {
+            `is`.xyz.mpv.MPVLib.command(arrayOf("set", "pause", if (value) "yes" else "no"))
+        }
+        val actual = runCatching { `is`.xyz.mpv.MPVLib.getPropertyBoolean("pause") }.getOrNull()
+        Log.i(TAG, "[mpv] set pause=$value 实际=$actual")
+        if (actual != null && actual != value && value) {
+            // 个别实例会被自己延迟的一大串属性事件覆盖回 false，再补一条命令兜住
+            runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("set", "pause", "yes")) }
+        }
+    }
 
     fun pause() {
         if (!inited) return
-        paused = true
-        runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", true) }
+        applyPause(true)
     }
 
     fun resume() {
@@ -443,8 +473,11 @@ class MpvPlayer(
             return
         }
         pendingResume = false
-        runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", false) }
+        applyPause(false)
     }
+
+    /** 调试用：surface 是否还挂着（控制条呼出后黑屏要先看这个） */
+    fun surfaceReadyNow(): Boolean = surfaceReady
 
     /** 由宿主 Activity 的 onPause/onResume 置位：后台期间不把 idle 判定成播放中断 */
     fun setBackground(value: Boolean) {
@@ -472,8 +505,23 @@ class MpvPlayer(
 
     fun seekToMs(ms: Long) {
         if (!inited) return
-        val sec = String.format(Locale.US, "%.3f", (ms.coerceAtLeast(0)) / 1000.0)
+        val target = ms.coerceAtLeast(0)
+        val sec = String.format(Locale.US, "%.3f", target / 1000.0)
         runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute+exact")) }
+        Log.i(TAG, "[mpv] seek -> ${sec}s")
+        // 1.2 秒后核对位置：这条命令在个别内核/异常流上会被静默丢掉（不报错也不动），
+        // 表现就是用户说的「快进快退没反应」。真没动就补一条普通 absolute。
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!inited) return@postDelayed
+            val nowSec = runCatching {
+                `is`.xyz.mpv.MPVLib.getPropertyDouble("time-pos")
+            }.getOrNull() ?: return@postDelayed
+            val nowMs = (nowSec * 1000).toLong()
+            if (target > 3000 && kotlin.math.abs(nowMs - target) > 3000) {
+                Log.w(TAG, "[mpv] seek 未生效（现在 ${nowSec}s，目标 ${target}ms），改用 absolute 重试")
+                runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute")) }
+            }
+        }, 1200)
     }
 
     fun setSpeed(speed: Float) {

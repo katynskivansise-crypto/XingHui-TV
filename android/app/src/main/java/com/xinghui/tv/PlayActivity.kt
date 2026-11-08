@@ -1369,6 +1369,15 @@ class PlayActivity : Activity() {
 
     private fun handleMenuKey() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
+        // 调试日志（真机排查用）：菜单键这一下 mpv 的 surface / pause 真实状态，
+        // 黑屏到底是「surface 没了」还是「内核暂停但没画面」全靠这行区分。
+        runCatching {
+            Log.i(
+                "XingHuiTV",
+                "[menu] 档位=${Settings(this).fullscreenMenuKey} mpv=${mpv != null} " +
+                    "surfaceReady=${mpv?.surfaceReadyNow()} paused=${mpv?.isPausedActual()}"
+            )
+        }
         if (toEpisodes) {
             hideControl()
             openEpisodes()
@@ -1429,7 +1438,9 @@ class PlayActivity : Activity() {
     private fun togglePlayPause() {
         if (isMpvMode()) {
             val m = mpv ?: return
-            if (m.isPlaying()) {
+            // 用 mpv 自己的 pause 属性判断，不用缓存标记：缓存一旦被「写下去没生效」带偏，
+            // 之后每次按 OK 都会走 resume()，看起来就是 mpv 完全停不下来。
+            if (!m.isPausedActual()) {
                 m.pause()
                 setKeepScreenOn(false)
                 showPlayCenter()
@@ -1495,7 +1506,7 @@ class PlayActivity : Activity() {
         // onPlay 里做的是 addFlags(KEEP_SCREEN_ON) + play() + hideCenter()）。
         hidePlayCenter()
         if (isMpvMode()) {
-            if (!(mpv?.isPlaying() ?: true)) mpv?.resume()
+            if (mpv?.isPausedActual() ?: false) mpv?.resume()
         } else {
             runCatching { player?.playWhenReady = true }
         }
@@ -1806,7 +1817,11 @@ class PlayActivity : Activity() {
         // 先置后台标记再暂停：mpv 在「后台 + vo 已空」这段时间会短暂掉进 idle-active=true，
         // 内核侧的 END_FILE 异常判定要能看见这个标记，否则会误判成播放中断并静默换线路。
         if (isMpvMode()) runCatching { mpv?.setBackground(true) }
-        if (isMpvMode()) runCatching { mpv?.pause() } else runCatching { player?.pause() }
+        // 两颗内核都停：isMpvMode() 只反映设置里选中的那颗，一旦和真正在跑的那颗不一致
+        // （mpv 起播失败回退 EXO、切内核半途中断），只看它就会漏掉真正出声的内核 ——
+        // 在真机上表现就是「回主页后后台还在播、按什么都没反应」。
+        runCatching { mpv?.pause() }
+        runCatching { player?.pause() }
         savePosition()
     }
 
