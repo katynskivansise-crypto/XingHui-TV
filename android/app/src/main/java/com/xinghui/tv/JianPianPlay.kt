@@ -20,7 +20,7 @@ import java.net.URLEncoder
  *   exit()   清空 jpa 目录
  *
  * 与原版的差异（有意）：
- *   1. `Path.jpa()` 换成 `context.filesDir/jpa`（我们没引入 catvod 的 Path 工具类）
+ *   1. `Path.jpa()` 已在（见 ensureEngine）：荐片临时目录跟随「缓存目录」设置，和原版同源
  *   2. 不实现 exit()（同进程反复 start/end httpd 是已知易崩路径，和 ThunderPlay 一样刻意不暴露释放）
  *   3. `ftp://` 仍然 match，但只有当它确实被站点返回时才会走到这里；正常 http 直链不受影响
  */
@@ -96,7 +96,13 @@ object JianPianPlay {
     @Synchronized
     private fun ensureEngine(context: Context): com.p2p.P2PClass? {
         p2p?.let { return it }
-        val dir = File(context.filesDir, "jpa").apply { if (!exists()) mkdirs() }
+        // 原版 Path.jpa() = thunderCache()/jpa —— 荐片的 P2P 临时目录跟着「缓存目录」这一项走，
+        // 和迅雷的 Path.thunder() 同一个父目录。之前硬编码 filesDir/jpa，用户改缓存目录后
+        // 迅雷换了地方、荐片却还留在私有目录里，两套口径就分家了。
+        runCatching { com.github.catvod.Init.set(context) }
+        val dir = runCatching { com.github.catvod.utils.Path.jpa() }.getOrElse {
+            File(context.filesDir, "jpa").apply { if (!exists()) mkdirs() }
+        }
         return runCatching { com.p2p.P2PClass(dir.absolutePath) }
             .onFailure { Log.e(TAG, "[jpa] loadLibrary 失败 ${it.message}", it) }
             .getOrNull()

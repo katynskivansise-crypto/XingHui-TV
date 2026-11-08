@@ -297,6 +297,9 @@ class PlayActivity : Activity() {
             // 内部会返回 http://127.0.0.1:<port>/... 的本地直链，ExoPlayer 直接可播。
             // 这一步会阻塞（等元信息/等任务启动，上限十几秒），当前在后台线程，安全。
             if (ThunderPlay.match(url)) {
+                // 对齐原版 Source.fetch：切到新片前先停掉上一个迅雷任务，
+                // deleteTask 会清分片但留 .torrent，重播仍能命中缓存。
+                runCatching { ThunderPlay.stop() }
                 Log.e("XingHuiTV", "[play] 迅雷体系 → ${url.take(70)}")
                 ThunderPlay.ensureInit(this)
                 url = ThunderPlay.resolve(url)
@@ -655,7 +658,7 @@ class PlayActivity : Activity() {
             val dur = mpvDur
             if (dur > 0 && pos >= dur - 10_000) return
             lastSavedPos = pos
-            HistoryStore(this).setPosition(vodId, epUrl, pos)
+            if (!Settings(this).isIncognito) HistoryStore(this).setPosition(vodId, epUrl, pos)
             return
         }
         val p = player ?: return
@@ -664,7 +667,7 @@ class PlayActivity : Activity() {
         val dur = runCatching { p.duration }.getOrDefault(0)
         if (dur > 0 && pos >= dur - 10_000) return
         lastSavedPos = pos
-        HistoryStore(this).setPosition(vodId, epUrl, pos)
+        if (!Settings(this).isIncognito) HistoryStore(this).setPosition(vodId, epUrl, pos)
     }
 
     /**
@@ -804,7 +807,12 @@ class PlayActivity : Activity() {
             .setAllowCrossProtocolRedirects(true)
         if (headers.isNotEmpty()) dataSourceFactory.setDefaultRequestProperties(headers)
         builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
-        player = builder.build().also { playerView?.player = it }
+        player = builder.build().also {
+            // 官方 Players.java:158 setHandleAudioBecomingNoisy(true)：
+            // HDMI / 蓝牙音频突然断开时自动暂停，而不是继续无声播放。
+            it.setHandleAudioBecomingNoisy(true)
+            playerView?.player = it
+        }
         applyCaptionStyle()
         attachPlayerListeners()
         player?.setPlaybackSpeed(speedSteps[speedIdx])
@@ -870,6 +878,8 @@ class PlayActivity : Activity() {
     }
 
     private fun recordHistory() {
+        // 无痕模式：不写历史（对齐原版 Setting.isIncognito 的语义）
+        if (Settings(this).isIncognito) return
         HistoryStore(this).addHistory(vodId, vodName, vodPic, "", flag, epUrl)
     }
 
@@ -1538,17 +1548,33 @@ class PlayActivity : Activity() {
      * 缺这一步时内容区会被状态栏/导航栏占掉，PlayerView 铺不满窗口，
      * 四周露出的就是 window 背景（壁纸），浅色壁纸下表现为一圈白边。
      */
+    /** 窗口 flag 只需落一次（它一旦设上就不会消失），见 applyImmersive 里的注释 */
+    private var windowFlagsApplied = false
+
     private fun applyImmersive() {
         runCatching {
+            // addFlags 与 setSystemUiVisibility 在系统侧都是幂等的（相同值不触发 relayout），
+            // 所以焦点来回反复调用是安全的，这里不做额外闸门 —— 加了反而会在 HDMI
+            // 分辨率变化 / 系统栏回来时漏掉重设，白边会回来。
             // 硬设窗口 flag（theme 的 windowFullscreen 在部分 ROM 上会被 DecorView insets 覆盖）：
             // FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算，FLAG_LAYOUT_NO_LIMITS 允许溢出系统栏区域。
             // 这两条配合 hideSystemUI 的 LAYOUT_FULLSCREEN，才能真正做到「内容区 = 整块屏幕」。
             // 只保留两条：FLAG_FULLSCREEN 兜住 hide 系统栏，FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算。
             // 上一轮加的 FLAG_LAYOUT_NO_LIMITS 是对悬浮窗用的，加在 Activity 上会让窗口尺寸计算异常，已移除。
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_FULLSCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-            )
+            // 关键：这个 addFlags 只做一次。
+            // Window.setFlags 会**无条件**回调 onWindowAttributesChanged → WindowManager.updateViewLayout，
+            // 即使 flag 位没变化也会走一次窗口 relayout；原版 Util.hideSystemUI 只调
+            // setSystemUiVisibility、不碰窗口 flag，所以原版没有这次多余 relayout。
+            // 而 onWindowFocusChanged 每关一次弹窗都会回来调本方法 —— 于是每关一次菜单
+            // 就 relayout 一次，SurfaceView 跟着重建，EXO 的黑色 shutter 重新盖上，
+            // 要等重新渲染出第一帧才撤（T1 上约 3 秒）。mpv 侧则因 vo 未复位而永久黑。
+            if (!windowFlagsApplied) {
+                windowFlagsApplied = true
+                window.addFlags(
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                )
+            }
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_LOW_PROFILE
@@ -1652,14 +1678,36 @@ class PlayActivity : Activity() {
         applyImmersive()
     }
 
-    /** 切后台/被遮挡时立即落盘，避免只靠 15 秒定时那一次丢掉最后片段 */
+    /**
+     * 切后台：暂停**当前内核**并落盘。
+     * 对齐原版 VideoActivity:1826-1831（onPause → setBackground(true) + mPlayers.pause() + mClock.stop()）。
+     * 原版是统一暂停，不分内核；之前我们只 pause mpv，EXO 在后台会继续跑。
+     */
     override fun onPause() {
         seekingByKey = false
         uiHandler.removeCallbacks(commitSeek)
         hideSeekHint()
         super.onPause()
-        if (isMpvMode()) runCatching { mpv?.pause() }
+        if (isMpvMode()) runCatching { mpv?.pause() } else runCatching { player?.pause() }
         savePosition()
+    }
+
+    /**
+     * 回到前台：恢复播放。
+     * 对齐原版 VideoActivity:1818-1823（onResume → setBackground(false) + onPlay()），
+     * 而 onPlay() 里做的是「加 FLAG_KEEP_SCREEN_ON + mPlayers.play()」。
+     *
+     * 之前整个 PlayActivity 没有 onResume：onPause 里 pause 过之后就再没人叫醒，
+     * 切后台回来画面停在暂停帧（mpv 尤其明显，看起来就像黑屏卡住）。
+     */
+    override fun onResume() {
+        super.onResume()
+        runCatching {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        // 首次进入时 url 还是空的，这里不能抢跑
+        if (activeUrl.isBlank()) return
+        if (isMpvMode()) runCatching { mpv?.resume() } else runCatching { player?.play() }
     }
 
     override fun onDestroy() {
@@ -1674,6 +1722,8 @@ class PlayActivity : Activity() {
         sniffer = null
         player?.release()
         player = null
+        // 播放器已释放，这时候清迅雷任务/分片才安全（文件不删，则 thunder/ 会无限增长）
+        runCatching { ThunderPlay.stop() }
     }
 }
 

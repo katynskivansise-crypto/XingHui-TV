@@ -54,6 +54,9 @@ object ThunderPlay {
     @Volatile
     private var inited = false
 
+    /** 当前迅雷任务：stop() 时要交给 XLTaskHelper.deleteTask 才能清掉分片 */
+    private var curTask: GetTaskId? = null
+
     /**
      * 迅雷 SDK 的初始化前提（原版靠 App.onCreate 里的 Init.set(base) 完成，我们没有 Application 类）。
      * XLDownloadManager 构造函数第一行 `this.context = Init.context();` 之后立刻 `context.getFilesDir()`，
@@ -207,6 +210,7 @@ object ThunderPlay {
             }
 
             val taskId: GetTaskId = XLTaskHelper.get().parse(url, dir)
+            curTask = taskId
             val realUrl = taskId.realUrl.orEmpty()
 
             // 迅雷链接 / ed2k：parse 已把真实地址解出来，直接返回
@@ -270,6 +274,7 @@ object ThunderPlay {
             }
 
             val taskId: GetTaskId = XLTaskHelper.get().parse(u, dir)
+            curTask = taskId
             val realUrl = taskId.realUrl.orEmpty()
 
             // 迅雷/ed2k 直链：本身就是能播的地址，不需要展开
@@ -338,6 +343,7 @@ object ThunderPlay {
         val parent = sel.torrent.parentFile ?: Path.thunder("tmp")
 
         val sub = XLTaskHelper.get().addTorrentTask(sel.torrent, parent, sel.index)
+        curTask = sub
         var waited = 0L
         while (true) {
             if (Thread.currentThread().isInterrupted) throw InterruptedException("迅雷下载被取消")
@@ -371,6 +377,20 @@ object ThunderPlay {
             }
             Log.e(TAG, "[thunder] 种子下载完成 ${target.length()} B")
         }.onFailure { Log.e(TAG, "[thunder] 种子下载失败 ${it.message}") }
+    }
+
+    /**
+     * 对齐原版 `Source.Extractor.stop()`（Thunder.java:59-64）：
+     * `deleteTask` 会递归删掉 savePath 下的文件，**但保留 `.torrent`** —— 所以重播同一条磁力
+     * 仍能命中 `locateTorrent` 的缓存，不用重新解析元信息；分片不会永久堆在 `thunder/` 里。
+     *
+     * 之前完全不调：任务一直跑、分片一直涨，退出后文件也没有任何回收口。
+     */
+    fun stop() {
+        val t = curTask ?: return
+        curTask = null
+        runCatching { XLTaskHelper.get().deleteTask(t) }
+            .onFailure { Log.e(TAG, "[thunder] deleteTask 失败 ${it.message}") }
     }
 
     /**

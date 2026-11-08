@@ -14,124 +14,65 @@ object SubscriptionParser {
     /**
      * @param defaultJar 订阅顶层 spider 解析出的 jar 完整 URL（csp_ 站点自动带上，对齐原项目）
      */
+    /**
+     * 解析订阅文本。
+     *
+     * **解析已下沉到 Rust 引擎**（`cmd=subscription`，见 engine/src/subscription.rs）：
+     * 三种订阅形态识别、相对地址补全（`./` `../`）、ext/header 归一化、
+     * siteType 推断、门口值（searchable/changeable/style）都在引擎侧完成，
+     * 壳这里只做「引擎 JSON → Site 模型」的映射，签名保持不变，调用点零改动。
+     *
+     * 规则/解析源两个副作用仍在壳侧：它们是壳内的单例，引擎下沉后也没必要搬。
+     */
     fun parse(text: String, defaultJar: String = "", subscribeUrl: String = ""): List<Site> {
         val sites = mutableListOf<Site>()
-        // 对齐原项目 Decoder.fix(url, data)：订阅 JSON 里的 "./xxx"、"../xxx" 一律按订阅
-        // 所在目录补成绝对地址（原版是在 Json.parse 之前对整段文本做替换）。
-        // 这一步覆盖的不只是 spider/jar，还包括站点 ext、lives、parses 里的相对地址。
-        val trimmed = absolutize(text.trim(), subscribeUrl)
-        if (trimmed.isEmpty()) return sites
-        // 订阅顶层的 rules / ads 一并载入（原版 VodConfig.getRules / getAds）：
-        // 嗅探判定、点击脚本、广告阻断都依赖它，之前完全没接，导致嗅探几乎必然空手。
-        SnifferRules.load(text)
-        // 订阅顶层的 parses 一并载入（原版 VodConfig.getParses）。type=0 的 24 条解析源
-        // 是「站点没配 playUrl」时唯一能救场的路径，之前完全没接。
-        ParseSources.load(text)
-
-        // 1) / 2) 整体 JSON
-        try {
-            val obj = JSONObject(trimmed)
-            // 对齐原版 VodConfig.initSite：订阅允许 {"video":{"sites":[...]}} 的嵌套写法
-            // （原版 if (object.has("video")) { initSite(object.getAsJsonObject("video")); return; }）
-            val holder = obj.optJSONObject("video")?.takeIf { it.has("sites") } ?: obj
-            val arr = holder.optJSONArray("sites")
-            if (arr != null) {
-                for (i in 0 until arr.length()) {
-                    val s = arr.getJSONObject(i)
-                    siteFrom(s, i, defaultJar)?.let { sites.add(it) }
-                }
-                return sites
-            }
-            if (obj.has("key") || obj.has("name")) {
-                siteFrom(obj, 0, defaultJar)?.let { sites.add(it) }
-                return sites
-            }
-        } catch (_: Exception) {
-            // 不是整体 JSON，尝试逐行
-        }
-
-        // 3) 逐行 txt
-        trimmed.lineSequence().forEach { line ->
-            val l = line.trim()
-            if (l.startsWith("{")) {
-                try {
-                    siteFrom(JSONObject(l), sites.size, defaultJar)?.let { sites.add(it) }
-                } catch (_: Exception) {
-                    // 跳过坏行
-                }
-            }
+        if (text.trim().isEmpty()) return sites
+        val json = runCatching {
+            Engine.execute(
+                "subscription", "",
+                JSONObject().put("text", text).put("jar", defaultJar).put("url", subscribeUrl).toString()
+            )
+        }.getOrElse { return sites }
+        if (json.isBlank()) return sites
+        // 同一次引擎结果里就带着 rules/ads/parses，直接喂给两个单例，不再各自重解析
+        SnifferRules.loadFromJson(json)
+        ParseSources.loadFromJson(json)
+        val arr = runCatching { JSONObject(json).optJSONArray("sites") }.getOrNull() ?: return sites
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            sites.add(Site.fromEngine(o))
         }
         return sites
     }
 
-    private fun siteFrom(o: JSONObject, index: Int, defaultJar: String = ""): Site? {
-        val key = o.optString("key").ifBlank { "site$index" }
-        val name = o.optString("name").ifBlank { key }
-        val api = o.optString("api", "")
-        // ext 对齐原版 gson 的 ExtAdapter：字符串原样，对象/数组序列化成 JSON 文本。
-        // 之前直接 optString("ext")，遇到对象型 ext（苹果站等加密站）会返回空串，
-        // spider.init(ctx, "") 拿不到 appName/publicKey/dataKey 等配置，
-        // 表现为首页还能出内容、分类页却缺字段（海报空白）。
-        // 订阅实测：157 站中 42 站 ext 是对象。
-        val ext = when (val e = o.opt("ext")) {
-            is String -> e
-            is JSONObject -> e.toString()
-            is JSONArray -> e.toString()
-            else -> ""
-        }
-        // 对齐原项目：csp_ 站点自带 jar（订阅内若有 site.jar 优先，否则用订阅顶层 spider）
-        val ownJar = o.optString("jar", "")
-        val jar = ownJar.ifBlank { if (api.startsWith("csp_")) defaultJar else "" }
-        // 卡片形态（订阅里 51/157 站带 style，如体育站 type=list、影视站 ratio=1.33）
-        val (stType, stRatio) = Site.styleOf(o)
-        // 站点行为字段，对齐原版 Site：
-        //   type=3 → 走 spider（jar 或 js 规则）；type=1 → 直接 GET api 并按 JSON 解析；
-        //   type=0 → 直接 GET api 并按 XML 解析。
-        // 订阅实测 157 站：type=3 共 142 个（108 csp + 34 js），type=1 共 14 个，type=0 共 1 个。
-        // 缺 type 时按 api 形态推断，避免被当成 0（XML）解析导致整站返回空。
-        val siteType = when {
-            o.has("type") -> o.optInt("type", 0)
-            api.startsWith("csp_") -> 3
-            api.contains(".js") -> 3
-            else -> 1
-        }
-        // searchable=0 的 29 站（配置中心、各网盘、体育等）原版不参与搜索，
-        // 混进搜索结果只会拖慢速度并返回空列表。
-        val searchable = o.optInt("searchable", 1)
-        val changeable = o.optInt("changeable", 1)
-        return Site(
-            key = key,
-            name = name,
-            api = api,
-            ext = ext,
-            siteJson = o.toString(),
-            jar = jar,
-            styleType = stType,
-            styleRatio = stRatio,
-            headerJson = Site.normalizeHeader(o),
-            siteType = siteType,
-            searchable = searchable,
-            changeable = changeable,
-            categoriesJson = Site.categoriesOf(o),
-        )
-    }
+    /** 直播主页源（引擎 `subscription` 的 lives，已做相对地址补全）。 */
+    /** 订阅里的一条直播主页源（对齐原版 bean/Live 用到的那几个字段） */
+    data class Live(
+        val name: String,
+        val url: String,
+        val ua: String,
+        /** 原版 Live.epg：XMLTV 节目单地址，选中这条源时自动带上 */
+        val epg: String,
+    )
 
-    /**
-     * 解析订阅 JSON 顶层的 spider 字段（csp_ 源需要）。
-     * 返回形如 ./jar/spider.jar;md5;c6c7 的原文；无则返回空串。
-     */
-    /**
-     * 把 JSON 字符串值里以 "./" / "../" 开头的地址补成绝对地址。
-     * 只匹配 "key": "./xxx" 这种"值以相对路径开头"的位置，比原版的全局 replace 更保守，
-     * 不会误伤普通文本里的 "./"。先处理 "../" 再处理 "./"，否则 "../" 会被拆坏。
-     */
-    private fun absolutize(text: String, subscribeUrl: String): String {
-        if (text.isEmpty() || !subscribeUrl.contains("://")) return text
-        val dir = subscribeUrl.substringBeforeLast('/', missingDelimiterValue = subscribeUrl) + "/"
-        val parent = dir.trimEnd('/').substringBeforeLast('/', dir) + "/"
-        return text
-            .replace(Regex("(:\\s*\")\\.\\./")) { m -> m.groupValues[1] + parent }
-            .replace(Regex("(:\\s*\")\\./")) { m -> m.groupValues[1] + dir }
+    fun lives(text: String, subscribeUrl: String = ""): List<Live> {
+        if (text.trim().isEmpty()) return emptyList()
+        val json = runCatching {
+            Engine.execute(
+                "subscription", "",
+                JSONObject().put("text", text).put("jar", "").put("url", subscribeUrl).toString()
+            )
+        }.getOrElse { return emptyList() }
+        if (json.isBlank()) return emptyList()
+        val arr = runCatching { JSONObject(json).optJSONArray("lives") }.getOrNull() ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val name = o.optString("name").trim()
+            val url = o.optString("url").trim()
+            val ua = o.optString("ua").trim()
+            val epg = o.optString("epg").trim()
+            if (name.isEmpty() || url.isEmpty()) null else Live(name, url, ua, epg)
+        }
     }
 
     fun parseJar(text: String): String {

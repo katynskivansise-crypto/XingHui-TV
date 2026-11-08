@@ -114,7 +114,18 @@ object ProxyServer {
                     Settings(ctx).ua = text
                 }
             }
-            "push", "search" -> Unit
+            // do=search：手机网页搜片 → 电视直接打开搜索页并开搜。
+            // do=push 仍留空（投屏播放链路未做，见文件头说明）。
+            "search" -> if (ctx != null && text.isNotBlank()) {
+                runCatching {
+                    ctx.startActivity(
+                        android.content.Intent(ctx, SearchActivity::class.java)
+                            .putExtra("keyword", text)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }.onFailure { Log.e(TAG, "[proxy.action] 启动搜索失败", it) }
+            }
+            "push" -> Unit
         }
         return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK")
     }

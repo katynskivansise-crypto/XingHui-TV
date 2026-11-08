@@ -234,13 +234,14 @@ class SettingsActivity : Activity() {
         }.onFailure { e -> toast("恢复失败：${e.message}") }
     }
 
+    /**
+     * 原版点「缓存」= 把 Path.cache() 整个删掉（FileUtil.clearCache），
+     * 我们按白名单清可再生的部分，见 AppCache 的注释。
+     */
     private fun clearCache() {
         runCatching {
-            val n = cacheDir.walkTopDown().filter { it.isFile }.sumOf { it.length() } +
-                (externalCacheDir?.walkTopDown()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L)
-            cacheDir.deleteRecursively()
-            externalCacheDir?.deleteRecursively()
-            toast("已清理缓存 ${formatSize(n)}")
+            val n = AppCache.clear(this)
+            toast("已清理缓存 ${AppCache.format(n)}")
             refresh()
         }.onFailure { e -> toast("清理失败：${e.message}") }
     }
@@ -268,18 +269,21 @@ class SettingsActivity : Activity() {
         findViewById<TextView>(R.id.valRestore)?.text =
             if (backup != null && backup.exists()) "点击恢复" else "暂无备份"
 
-        findViewById<TextView>(R.id.valCache)?.text = formatSize(cacheDirSize())
+        refreshCacheText()
         findViewById<TextView>(R.id.valVersion)?.text = "0.1.0"
         findViewById<TextView>(R.id.valAbout)?.text = "leanback-arm64_v8a"
     }
 
-    private fun cacheDirSize(): Long =
-        cacheDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-
-    private fun formatSize(b: Long): String = when {
-        b >= 1L shl 20 -> String.format(java.util.Locale.getDefault(), "%.1f MB", b / 1024.0 / 1024.0)
-        b >= 1L shl 10 -> String.format(java.util.Locale.getDefault(), "%.0f KB", b / 1024.0)
-        else -> "$b B"
+    /**
+     * 统计放到子线程：图片缓存上限 100MB、几百个文件，主线程同步遍历会有明显卡顿
+     * （原版也是 App.execute 里算完再 App.post 回填）。
+     */
+    private fun refreshCacheText() {
+        val tv = findViewById<TextView>(R.id.valCache) ?: return
+        Thread {
+            val size = AppCache.size(this)
+            runOnUiThread { runCatching { if (!isFinishing) tv.text = AppCache.format(size) } }
+        }.apply { isDaemon = true }.start()
     }
 
     private fun backupFile(): File? = getExternalFilesDir(null)?.let { File(it, "xinghui_backup.zip") }
@@ -317,54 +321,33 @@ class SettingsActivity : Activity() {
      * 相对地址（如 `./tvboxtv.txt`）在这里按订阅地址补全（原版 Decoder.fix 的规则）。
      */
     private fun showLiveHomeDialog() {
-        val lives = parseLives()
+        // 解析已下沉到引擎，这里只拿结果
+        val lives = SubscriptionParser.lives(
+            SubscriptionStore(this).subscriptionText(),
+            SubscriptionStore(this).subscribeUrl()
+        )
         if (lives.isEmpty()) {
             toast("订阅里没有直播主页源")
             return
         }
         val cur = Settings(this).liveUrl
-        val selected = lives.indexOfFirst { it.second == cur }.takeIf { it >= 0 } ?: 0
+        val selected = lives.indexOfFirst { it.url == cur }.takeIf { it >= 0 } ?: 0
         AlertDialog.Builder(this)
             .setTitle("直播主页源")
-            .setSingleChoiceItems(lives.map { it.first }.toTypedArray(), selected) { d, which ->
-                val (name, url, ua) = lives[which]
-                Settings(this).liveUrl = url
-                Settings(this).liveUa = ua
+            .setSingleChoiceItems(lives.map { it.name }.toTypedArray(), selected) { d, which ->
+                val live = lives[which]
+                Settings(this).liveUrl = live.url
+                Settings(this).liveUa = live.ua
+                // 对齐原版：EPG 地址跟着直播源走（Live.epg），选中就自动填好节目单源。
+                // 源里没给 epg 时不动原值，避免把用户手填的地址清掉。
+                if (live.epg.isNotBlank()) Settings(this).epgUrl = live.epg
                 d.dismiss()
                 refresh()
-                toast("直播主页源已设为 $name")
+                toast("直播主页源已设为 ${live.name}" +
+                    if (live.epg.isNotBlank()) "（已带上节目单）" else "")
             }
             .setNegativeButton("取消", null)
             .show()
-    }
-
-    /** 解析订阅顶层 lives；相对地址按订阅地址补全（对齐原版 Decoder.fix）。 */
-    private fun parseLives(): List<Triple<String, String, String>> {
-        val text = SubscriptionStore(this).subscriptionText()
-        if (text.isBlank()) return emptyList()
-        return runCatching {
-            val holder = org.json.JSONObject(text).optJSONObject("video")
-                ?.takeIf { it.has("lives") } ?: org.json.JSONObject(text)
-            val arr = holder.optJSONArray("lives") ?: return emptyList()
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                val name = o.optString("name").trim()
-                val url = absolutizeLiveUrl(o.optString("url").trim())
-                if (name.isEmpty() || url.isEmpty()) null else Triple(name, url, o.optString("ua").trim())
-            }
-        }.getOrElse { emptyList() }
-    }
-
-    private fun absolutizeLiveUrl(url: String): String {
-        if (!url.startsWith("./") && !url.startsWith("../")) return url
-        val base = SubscriptionStore(this).subscribeUrl()
-        if (!base.contains("://")) return url
-        val dir = base.substringBeforeLast('/', base) + "/"
-        return if (url.startsWith("../")) {
-            dir.trimEnd('/').substringBeforeLast('/', dir) + "/" + url.removePrefix("../")
-        } else {
-            dir + url.removePrefix("./")
-        }
     }
 
     private fun showConfigDialog(type: Int) {

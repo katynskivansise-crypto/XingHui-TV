@@ -233,6 +233,11 @@ object AsyncImageLoader {
             .put("ua", s.ua)
             .apply {
                 extraHeaders["Referer"]?.takeIf { it.isNotBlank() }?.let { put("referer", it) }
+                // Cookie 与直连那条路保持对称：登录墙的封面直连失败后，兜底也得带会话，
+                // 否则引擎一样被 302 到登录页（原版 Glide 共享 OkHttp client 天然带 Cookie）。
+                val ck = extraHeaders["Cookie"]?.takeIf { it.isNotBlank() }
+                    ?: okhttp3.internal.Bridge.cookieFor(url)
+                if (ck.isNotBlank()) put("cookie", ck)
             }
             .toString()
         val b64 = Engine.execute("proxy_image", "", params)
@@ -317,8 +322,9 @@ object AsyncImageLoader {
             val target = trimToKb * 1024
             files.sortedBy { it.lastModified() }.forEach { f ->
                 if (total > target) {
-                    total -= f.length()
-                    f.delete()
+                    // 先删成功再扣：文件被占用时 delete 返回 false，
+                    // 原先先扣后删会让统计偏小、提前停止收缩，磁盘停在 100MB 以上。
+                    if (runCatching { f.delete() }.getOrDefault(false) || !f.exists()) total -= f.length()
                 }
             }
         }

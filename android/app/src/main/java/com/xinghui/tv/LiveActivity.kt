@@ -183,7 +183,13 @@ class LiveActivity : Activity() {
         Thread {
             var text = "未查询到节目单"
             try {
-                val params = JSONObject().put("url", epgUrl).put("name", name).toString()
+                // 缓存目录对齐原版 Path.epg() = cacheDir/epg；引擎按「当天已下过就复用」处理
+                val dir = java.io.File(cacheDir, "epg").absolutePath
+                val params = JSONObject()
+                    .put("url", epgUrl)
+                    .put("name", name)
+                    .put("dir", dir)
+                    .toString()
                 val json = Engine.execute("epg", "", params)
                 val arr = JSONObject(json).optJSONArray("list")
                 if (arr != null && arr.length() > 0) {

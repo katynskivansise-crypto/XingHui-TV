@@ -35,7 +35,7 @@ impl Proxy {
     }
 }
 
-/// 图片/资源代理：按 params（`url`，可选 `referer`/`ua`）抓取字节，返回 ProxyResp。
+/// 图片/资源代理：按 params（`url`，可选 `referer`/`ua`/`cookie`）抓取字节，返回 ProxyResp。
 /// 对应原 Spider.proxyLocal 的常见用途（图片防盗链代理）。
 pub fn image_proxy(net: &Net, params: &HashMap<String, String>) -> Option<ProxyResp> {
     let url = params.get("url")?;
@@ -45,6 +45,11 @@ pub fn image_proxy(net: &Net, params: &HashMap<String, String>) -> Option<ProxyR
     }
     if let Some(ua) = params.get("ua") {
         headers.insert("User-Agent".to_string(), ua.clone());
+    }
+    // 会话 Cookie：和壳侧直连那条路保持对称，否则「登录墙」站点的封面直连失败后，
+    // 兜底交给引擎照样拿不到（原版 Glide 共享 OkHttp client，Cookie 天然跟着走）。
+    if let Some(c) = params.get("cookie") {
+        headers.insert("Cookie".to_string(), c.clone());
     }
     let body = if headers.is_empty() {
         net.bytes(url)

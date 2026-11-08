@@ -156,16 +156,52 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
         // 海报取图（对齐原项目 ImageLoader 走网络层）：壳传 url/ua，引擎用临时
         // Net 拉图片字节 → base64 返回。复用现有 jstring 通道（execute 签名不变），
         // 不带防盗链 Referer 时仍比壳 HttpURLConnection 直连更稳（统一 ureq + UA）。
+        // 订阅解析：params {text, jar, url} —— text 是订阅原文，jar 是顶层 spider 解析出的
+        // jar 完整地址，url 是订阅地址（用于把 ./ ../ 相对路径补成绝对）。
+        // 一次性返回 sites + lives + spider，壳侧只做映射、不再各自解析。
+        "subscription" => {
+            let p = json::safe_object(&json::parse(params));
+            let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let jar = p.get("jar").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let r = crate::subscription::parse(&text, &jar, &url);
+            serde_json::json!({
+                "code": 0,
+                "sites": r.sites,
+                "lives": r.lives,
+                "spider": r.spider,
+                "rules": r.rules,
+                "ads": r.ads,
+                "parses": r.parses,
+            })
+            .to_string()
+        }
+        // params: {url, ua?, referer?}
+        // 之前这里自建 Net 只 set_ua，把壳侧传过来的 referer 直接丢了 —— 防盗链的图
+        // 交到引擎手里照样 403。proxy::image_proxy 本来就支持 referer（proxy.rs 头部注入
+        // Referer），这里补齐，两条路（直连 / 引擎兜底）的请求头才算对称。
         "proxy_image" => {
             let p = json::safe_object(&json::parse(params));
             let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("");
+            let referer = p.get("referer").and_then(|v| v.as_str()).unwrap_or("");
+            let cookie = p.get("cookie").and_then(|v| v.as_str()).unwrap_or("");
             if url.is_empty() {
                 String::new()
             } else {
                 let mut net = Net::new();
+                let mut headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                 if !ua.is_empty() {
-                    net.set_ua(&ua);
+                    headers.insert("User-Agent".to_string(), ua.to_string());
+                }
+                if !referer.is_empty() {
+                    headers.insert("Referer".to_string(), referer.to_string());
+                }
+                if !cookie.is_empty() {
+                    headers.insert("Cookie".to_string(), cookie.to_string());
+                }
+                if !headers.is_empty() {
+                    net.set_headers(&headers);
                 }
                 let bytes = net.bytes(&url);
                 if bytes.is_empty() {
@@ -216,7 +252,12 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             let p = json::safe_object(&json::parse(params));
             let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            crate::epg::fetch_epg(&Net::new(), &url, &name)
+            // dir = cacheDir/epg（对齐原版 Path.epg()）：当天已下过就直接读文件，不再整份重下
+            let dir = p.get("dir").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut net = Net::new();
+            // XMLTV 常有几 MB，原版 TIMEOUT_EPG 只有 5s；这里放宽到 15s 避免大文件截断
+            net.set_timeout_millis(15_000);
+            crate::epg::fetch_epg(&net, &dir, &url, &name)
         }
         _ => {
             let Some(spider) = manager.get(key) else {

@@ -52,6 +52,8 @@ class SearchActivity : Activity() {
     private var currentPage = 1
     private var loadingMore = false
     private var zhuyin = false
+    /** 手机网页 /action?do=search 推过来的关键字 */
+    private val incomingKeyword: String? by lazy { intent?.getStringExtra("keyword") }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -293,18 +295,36 @@ class SearchActivity : Activity() {
         hideKeyboardIfAny()
         showResults()
         title.text = "搜索 “$keyword” 查找中…"
+        val curKey = runCatching { SubscriptionStore(this).currentKey() }.getOrDefault("")
         Thread {
-            // 聚合搜索：Rust 引擎的 searchAll + 壳侧 csp 源合并
             val params = JSONObject().put("key", keyword).toString()
-            val json = Engine.execute("searchAll", "", params)
-            val found = Vod.parseList(json).toMutableList()
-            val cspJson = CspLoader.searchAll(this, SubscriptionStore(this), keyword)
-            found.addAll(Vod.parseList(cspJson))
+            val agg = Settings(this).aggregatedSearch
+            val found = if (agg) {
+                // 聚合搜索：Rust 引擎的 searchAll + 壳侧 csp 源合并
+                val json = Engine.execute("searchAll", "", params)
+                val list = Vod.parseList(json).toMutableList()
+                list.addAll(Vod.parseList(CspLoader.searchAll(this, SubscriptionStore(this), keyword)))
+                list
+            } else {
+                // 只搜当前站：引擎单站 search + csp 单站 search，都不用把所有源跑一遍。
+                // 引擎单站 search 依赖「当前已注册的 spider」，若为空（比如刚启动还没注册）就回退全站过滤，
+                // 保证关了聚合也不会出现空结果。
+                val single = runCatching {
+                    val e = Vod.parseList(Engine.execute("search", "", params))
+                    val site = SubscriptionStore(this).currentSite()
+                    val c = if (site != null) Vod.parseList(CspLoader.search(this, site, keyword)) else emptyList()
+                    e + c
+                }.getOrDefault(emptyList())
+                if (single.isNotEmpty()) single
+                else (Vod.parseList(Engine.execute("searchAll", "", params)) +
+                      Vod.parseList(CspLoader.searchAll(this, SubscriptionStore(this), keyword)))
+                        .filter { it.source == curKey }
+            }
             runOnUiThread {
                 results.clear()
                 results.addAll(found)
                 adapter.notifyDataSetChanged()
-                title.text = "搜索 “$keyword” 共 ${results.size} 条（全部源）"
+                title.text = "搜索 “$keyword” 共 ${results.size} 条" + if (agg) "（全部源）" else "（当前源）"
             }
         }.start()
     }
@@ -349,6 +369,16 @@ class SearchActivity : Activity() {
     private fun hideResults() {
         resultPanel.visibility = View.GONE
         input.requestFocus()
+    }
+
+    override fun onPostCreate(savedInstanceState: Bundle?) {
+        super.onPostCreate(savedInstanceState)
+        // 手机网页 /action?do=search 推过来的关键字，直接开搜，省掉在电视上再敲一遍
+        incomingKeyword?.takeIf { it.isNotBlank() }?.let { kw ->
+            input.setText(kw)
+            input.setSelection(kw.length)
+            input.post { runCatching { doSearch(kw) } }
+        }
     }
 
     private fun hideKeyboardIfAny() {

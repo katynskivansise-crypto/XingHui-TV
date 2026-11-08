@@ -32,6 +32,9 @@ regex = "1"
 scraper = "0.20"
 url = "2"
 
+# XMLTV .gz 解压（原版 EpgParser.readGzip）；纯 Rust，无 bindgen/NDK 依赖
+flate2 = "1"
+
 # 页面字符集解码（drpy2 规则"编码: gb2312/gbk"支持，纯 Rust、Android 交叉编译友好）
 encoding_rs = "0.8"
 
