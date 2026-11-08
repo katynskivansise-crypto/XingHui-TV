@@ -22,6 +22,10 @@ class MpvPlayer(
 
     companion object {
         private const val TAG = "XingHuiTV"
+        /** 当前活着的 MpvPlayer 数量：>1 说明有实例没释放，MPVLib 的静态句柄会指错，指令全打到空实例上 */
+        @Volatile
+        var liveCount: Int = 0
+            private set
     }
 
     var onLoaded: (() -> Unit)? = null
@@ -78,6 +82,7 @@ class MpvPlayer(
         // 不设它时 surface 走默认的「窗口内 punch-through」，控制条是窗口里的 View，
         // 布局里 mpvView 声明在前、controlBar 在后，控制条照样盖在上面。
         surfaceView.holder.addCallback(this)
+        liveCount++
         // addCallback 时 surface 若已经有效，系统不会再补发 surfaceCreated，这里手动走一遍
         val h = surfaceView.holder
         if (h.surface != null && h.surface.isValid) surfaceCreated(h)
@@ -230,6 +235,7 @@ class MpvPlayer(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        MpvDebug.log("[mpv] surfaceCreated inited=$inited playPending=$playPending")
         if (!inited) initWithOptions()
         // 初始化失败时绝不能继续调 native，否则 libmpv 内部空指针会直接 SEGV
         if (!inited) return
@@ -275,6 +281,7 @@ class MpvPlayer(
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        MpvDebug.log("[mpv] surfaceChanged ${width}x${height}")
         if (!inited) return
         // mpv 要知道 surface 的实际尺寸才能建对渲染目标；不报的话在某些设备上会渲染成 0 尺寸
         runCatching {
@@ -283,6 +290,7 @@ class MpvPlayer(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        MpvDebug.log("[mpv] surfaceDestroyed inited=$inited")
         surfaceReady = false
         // release() 之后 SurfaceView 还会回调一次，此时 handle 已销毁，再调 native 会崩
         if (!inited) return
@@ -314,7 +322,8 @@ class MpvPlayer(
         runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("stop")) }
         runCatching { `is`.xyz.mpv.MPVLib.destroy() }
         created = false
-        Log.i(TAG, "[mpv] 内核已释放")
+        liveCount--
+        MpvDebug.log("[mpv] 内核已释放 存活实例=${liveCount}")
     }
 
     // ---------------------------------------------------------------- 音频焦点
@@ -446,7 +455,7 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.command(arrayOf("set", "pause", if (value) "yes" else "no"))
         }
         val actual = runCatching { `is`.xyz.mpv.MPVLib.getPropertyBoolean("pause") }.getOrNull()
-        Log.i(TAG, "[mpv] set pause=$value 实际=$actual")
+        MpvDebug.log("[mpv] set pause=$value 实际=$actual")
         if (actual != null && actual != value && value) {
             // 个别实例会被自己延迟的一大串属性事件覆盖回 false，再补一条命令兜住
             runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("set", "pause", "yes")) }
@@ -508,7 +517,7 @@ class MpvPlayer(
         val target = ms.coerceAtLeast(0)
         val sec = String.format(Locale.US, "%.3f", target / 1000.0)
         runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute+exact")) }
-        Log.i(TAG, "[mpv] seek -> ${sec}s")
+        MpvDebug.log("[mpv] seek -> ${sec}s")
         // 1.2 秒后核对位置：这条命令在个别内核/异常流上会被静默丢掉（不报错也不动），
         // 表现就是用户说的「快进快退没反应」。真没动就补一条普通 absolute。
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
@@ -518,7 +527,7 @@ class MpvPlayer(
             }.getOrNull() ?: return@postDelayed
             val nowMs = (nowSec * 1000).toLong()
             if (target > 3000 && kotlin.math.abs(nowMs - target) > 3000) {
-                Log.w(TAG, "[mpv] seek 未生效（现在 ${nowSec}s，目标 ${target}ms），改用 absolute 重试")
+                MpvDebug.log("[mpv] seek 未生效（现在 ${nowSec}s，目标 ${target}ms），改用 absolute 重试")
                 runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute")) }
             }
         }, 1200)

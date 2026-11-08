@@ -70,6 +70,11 @@ object ProxyServer {
                 override fun serve(session: IHTTPSession): Response {
                     val path = session.uri.substringBefore('?').trim()
                     return when {
+                        // 调试通道：手机浏览器打开 http://盒子IP:9978/debug
+                        // 只给排查用，播放页 UI 一行不加、不弹任何提示
+                        path == "/debug" -> newFixedLengthResponse(
+                            Response.Status.OK, "text/plain; charset=utf-8", MpvDebug.dump()
+                        )
                         // 原版 /action（server/process/Action.java）：手机网页的「設定/推送/搜尋」都打这里
                         path == "/action" -> handleAction(session)
                         path == "/proxy" -> handleProxy(session)

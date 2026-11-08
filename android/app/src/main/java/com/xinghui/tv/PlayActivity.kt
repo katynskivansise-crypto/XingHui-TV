@@ -75,6 +75,8 @@ class PlayActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_play)
+        // 调试快照：手机浏览器打开 http://盒子IP:9978/debug 就能看到这份状态（界面零改动）
+        MpvDebug.snapshot = { mpvDebugLine() }
         // 恢复：对齐原版 VideoActivity（继承 BaseActivity）—— 窗口同样挂壁纸，播放器自身黑底压住。
         // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
         // 白边的真正解法是让内容区真正全屏（Theme.TVBox + LAYOUT_FULLSCREEN），不是靠撤壁纸。
@@ -1367,17 +1369,23 @@ class PlayActivity : Activity() {
         handleMenuKey()
     }
 
+    /** 调试快照文本：只在 /debug 页面上出现，播放页 UI 不变 */
+    private fun mpvDebugLine(): String {
+        val m = mpv
+        val surfaceVis = runCatching {
+            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility
+        }.getOrNull()
+        return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
+            "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
+            "mpvView=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
+            "controlBar=${controlBar?.visibility} pos=${mpvPos}ms dur=${mpvDur}ms " +
+            "url=${activeUrl.take(60)}"
+    }
+
     private fun handleMenuKey() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
-        // 调试日志（真机排查用）：菜单键这一下 mpv 的 surface / pause 真实状态，
-        // 黑屏到底是「surface 没了」还是「内核暂停但没画面」全靠这行区分。
-        runCatching {
-            Log.i(
-                "XingHuiTV",
-                "[menu] 档位=${Settings(this).fullscreenMenuKey} mpv=${mpv != null} " +
-                    "surfaceReady=${mpv?.surfaceReadyNow()} paused=${mpv?.isPausedActual()}"
-            )
-        }
+        // 调试日志（走 /debug 页面，不弹任何提示）：黑屏到底是「surface 没了」还是「内核假暂停」全靠这行区分
+        MpvDebug.log("[menu] " + mpvDebugLine())
         if (toEpisodes) {
             hideControl()
             openEpisodes()
@@ -1816,6 +1824,7 @@ class PlayActivity : Activity() {
         super.onPause()
         // 先置后台标记再暂停：mpv 在「后台 + vo 已空」这段时间会短暂掉进 idle-active=true，
         // 内核侧的 END_FILE 异常判定要能看见这个标记，否则会误判成播放中断并静默换线路。
+        MpvDebug.log("[life] onPause 前 " + mpvDebugLine())
         if (isMpvMode()) runCatching { mpv?.setBackground(true) }
         // 两颗内核都停：isMpvMode() 只反映设置里选中的那颗，一旦和真正在跑的那颗不一致
         // （mpv 起播失败回退 EXO、切内核半途中断），只看它就会漏掉真正出声的内核 ——
@@ -1844,6 +1853,7 @@ class PlayActivity : Activity() {
         runCatching {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+        MpvDebug.log("[life] onResume " + mpvDebugLine())
         // 首次进入时 url 还是空的，这里不能抢跑
         if (activeUrl.isBlank()) return
         if (isMpvMode()) {
@@ -1861,6 +1871,7 @@ class PlayActivity : Activity() {
     }
 
     override fun onDestroy() {
+        MpvDebug.snapshot = null
         uiHandler.removeCallbacks(mpvWatchdog)
         saveHandler.removeCallbacks(saveRunnable)
         // 先落盘再释放内核：mpv 一旦 destroy 就读不到 time-pos 了
