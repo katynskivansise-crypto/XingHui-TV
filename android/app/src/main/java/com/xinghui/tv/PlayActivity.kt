@@ -1405,6 +1405,7 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.btnNext)?.requestFocus()
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
+        MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         // 控制条一出现，mpv 侧就做一次渲染自检：vo 掉了就地复位，不等系统重建 surface
         if (isMpvMode()) runCatching { mpv?.recoverRendering() }
     }
@@ -1414,6 +1415,7 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         // 控制条收起同样可能带掉 vo，这里也补一次自检
         if (isMpvMode()) runCatching { mpv?.recoverRendering() }
     }

@@ -536,8 +536,14 @@ class MpvPlayer(
      * @return true 表示确实做过复位
      */
     fun recoverRendering(): Boolean {
+        val surface = attachedSurface
+        // 入口无条件打点：之前几个早退分支是静默 return，日志里就看不出「调用过但被挡回去了」
+        MpvDebug.log(
+            "[mpv] 渲染自检 进入 inited=$inited surfaceReady=$surfaceReady " +
+                "surface=${surface != null} valid=${surface?.isValid} vo=${runCatching { voNow() }.getOrElse { "读取异常" }}"
+        )
         if (!inited || !surfaceReady) return false
-        val surface = attachedSurface ?: return false
+        if (surface == null) return false
         if (!surface.isValid) return false
         val vo = voNow()
         if (vo != "空" && vo != "未初始化" && vo != "读取失败" && vo.isNotBlank()) {
