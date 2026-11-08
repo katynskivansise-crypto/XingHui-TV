@@ -21,10 +21,6 @@ pub const TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Net {
     /// 单请求注入的自定义 header（原 RequestInterceptor 逻辑）
     pub headers: Arc<HashMap<String, String>>,
-    /// 是否启用代理；启用后走 `proxy_url`
-    pub proxy: bool,
-    /// 代理地址，scheme://user:pass@host:port（对应原 OkProxySelector）
-    pub proxy_url: Arc<Option<String>>,
     /// 是否绕过 TLS 证书校验（对应原 SSLCompat 的 hostnameVerifier -> true）
     pub insecure: bool,
     /// 超时，默认 30s
@@ -38,8 +34,6 @@ impl Net {
     pub fn new() -> Self {
         Net {
             headers: Arc::new(HashMap::new()),
-            proxy: false,
-            proxy_url: Arc::new(None),
             insecure: true, // 对齐原实现：默认绕过证书校验以兼容大量直播源
             timeout: TIMEOUT,
             follow_redirects: true,
@@ -54,18 +48,6 @@ impl Net {
         let mut m = (*self.headers).clone();
         m.insert("User-Agent".to_string(), ua.to_string());
         self.headers = Arc::new(m);
-    }
-
-    /// 设置代理（对齐原 OkProxySelector）。空值关闭代理。
-    /// 格式：scheme://user:pass@host:port，如 http://user:pass@127.0.0.1:7890
-    pub fn set_proxy(&mut self, proxy_url: &str) {
-        if proxy_url.is_empty() {
-            self.proxy = false;
-            self.proxy_url = Arc::new(None);
-        } else {
-            self.proxy = true;
-            self.proxy_url = Arc::new(Some(proxy_url.to_string()));
-        }
     }
 
     /// 合并站点级 header（对齐原项目 getHeaders：站点 header 优先，覆盖全局 UA 等）。
@@ -236,22 +218,10 @@ impl Net {
     /// 与 fetch 相同，但额外返回真实响应头与状态码
     /// （drpy 规则 `obj.withHeaders` 读 res.headers，`res.code` 读状态码，对齐原 Connect.success）
     fn fetch_full(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>, body: Option<&[u8]>) -> (Vec<u8>, HashMap<String, String>, u16) {
-        let mut builder = ureq::AgentBuilder::new()
+        let builder = ureq::AgentBuilder::new()
             .timeout(self.timeout)
             .timeout_connect(self.timeout)
             .redirects(if self.follow_redirects { 10 } else { 0 });
-
-        if self.proxy {
-            // 本机代理回环（127.0.0.1:9978）绝不能走外部代理，否则自己打自己出不去
-            let is_local = url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]");
-            if !is_local {
-                if let Some(p) = self.proxy_url.as_ref() {
-                    if let Ok(proxy) = ureq::Proxy::new(p.clone()) {
-                        builder = builder.proxy(proxy);
-                    }
-                }
-            }
-        }
 
         // ureq 2.x 的 TLS 配置通过 tls_config 注入；证书校验绕过需 rustls custom config。
         // 这里保留接口占位，Android 集成版再接入自定义 TLS 配置。
@@ -312,7 +282,6 @@ mod tests {
         let n = Net::new();
         assert!(n.insecure);
         assert_eq!(n.timeout, TIMEOUT);
-        assert!(!n.proxy);
         assert!(n.headers.is_empty());
     }
 }

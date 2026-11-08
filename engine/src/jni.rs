@@ -51,18 +51,16 @@ pub extern "system" fn Java_com_xinghui_tv_Engine_execute(
 fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) -> String {
     match action {
         "init" => {
-            // params: {key, dir, rule, engine, site_json, ua, proxy}
+            // params: {key, dir, rule, engine, site_json, ua}
             //   - drpy 源：Android 侧下载 ext 规则脚本 → rule/engine → DrpySpider
             //   - JSON 规则源：整个站点 JSON（含 ext 数组）→ site_json → JsonSpider
             //   - ua：可选全局 User-Agent（对齐原设置 UA，注入 drpy 网络请求）
-            //   - proxy：可选代理地址 scheme://user:pass@host:port（对齐原代理设置）
             let p = json::safe_object(&json::parse(params));
             let dir = p.get("dir").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let rule = p.get("rule").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let engine_script = p.get("engine").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let site_json = p.get("site_json").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
             // 站点级 header JSON（drpy2.js 规则源如"新闪雷/茶杯狐"配置了站点 header，对齐原项目 getHeaders）
             let header = p
                 .get("header")
@@ -83,8 +81,8 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
                 if has_api {
-                    // 传全局 UA/代理给 ApiSpider（站点 header 优先、全局兜底，对齐原项目 getHeaders）
-                    match crate::api_spider::ApiSpider::new(&site_json, &ua, &proxy) {
+                    // 传全局 UA 给 ApiSpider（站点 header 优先、全局兜底，对齐原项目 getHeaders）
+                    match crate::api_spider::ApiSpider::new(&site_json, &ua) {
                         Ok(spider) => {
                             manager.register(key, Box::new(spider));
                             r#"{"code":0,"msg":"ok"}"#.to_string()
@@ -101,7 +99,7 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                     }
                 }
             } else if !rule.is_empty() {
-                let spider = DrpySpider::new(dir, rule, engine_script, &ua, &proxy, &header);
+                let spider = DrpySpider::new(dir, rule, engine_script, &ua, &header);
                 manager.register(key, Box::new(spider));
                 r#"{"code":0,"msg":"ok"}"#.to_string()
             } else {
@@ -155,23 +153,19 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             });
             serde_json::json!({"list": dedup, "source": "all"}).to_string()
         }
-        // 海报代理（对齐原项目 ImageLoader 走网络层）：壳传 url/ua/proxy，引擎用临时
+        // 海报取图（对齐原项目 ImageLoader 走网络层）：壳传 url/ua，引擎用临时
         // Net 拉图片字节 → base64 返回。复用现有 jstring 通道（execute 签名不变），
-        // 不带防盗链 Referer 时仍比壳 HttpURLConnection 直连更稳（统一 ureq + UA/代理）。
+        // 不带防盗链 Referer 时仍比壳 HttpURLConnection 直连更稳（统一 ureq + UA）。
         "proxy_image" => {
             let p = json::safe_object(&json::parse(params));
             let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if url.is_empty() {
                 String::new()
             } else {
                 let mut net = Net::new();
                 if !ua.is_empty() {
                     net.set_ua(&ua);
-                }
-                if !proxy.is_empty() {
-                    net.set_proxy(&proxy);
                 }
                 let bytes = net.bytes(&url);
                 if bytes.is_empty() {
@@ -182,7 +176,7 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             }
         }
         // 通用 HTTP —— 供安卓侧自研 okhttp3 兼容层的 Call.execute() 转发。
-        // params: {url, method, headers:{}, body, ua, proxy, timeout}
+        // params: {url, method, headers:{}, body, ua, timeout}
         // 返回: {code, headers:{}, body:"<base64>"}；失败时 code=0 且带 error。
         "http" => {
             let p = json::safe_object(&json::parse(params));
@@ -191,7 +185,6 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 serde_json::json!({"code": 0, "error": "empty url"}).to_string()
             } else {
                 let ua = p.get("ua").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let proxy = p.get("proxy").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let timeout = p.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
                 let opts = serde_json::json!({
                     "method": p.get("method").and_then(|v| v.as_str()).unwrap_or("GET"),
@@ -203,9 +196,6 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                 let mut net = Net::new();
                 if !ua.is_empty() {
                     net.set_ua(&ua);
-                }
-                if !proxy.is_empty() {
-                    net.set_proxy(&proxy);
                 }
                 net.set_timeout_millis(timeout);
                 if let Some(f) = p.get("follow_redirects").and_then(|v| v.as_bool()) {

@@ -29,9 +29,10 @@ pub struct ApiSpider {
 }
 
 impl ApiSpider {
-    /// 构造：站点 JSON + 全局 UA/代理（对齐原项目 Site.getHeaders 语义——
-    /// 站点 header 字段优先，全局 UA/代理兜底，空值不覆盖）。
-    pub fn new(json: &str, ua: &str, proxy: &str) -> Result<Self, String> {
+    /// 构造：站点 JSON + 全局 UA（对齐原项目 Site.getHeaders 语义——
+    /// 站点 header 字段优先，全局 UA 兜底，空值不覆盖）。
+    /// 代理已下线：路由器侧统一接管流量，壳不再传代理参数。
+    pub fn new(json: &str, ua: &str) -> Result<Self, String> {
         let v: serde_json::Value =
             serde_json::from_str(json).map_err(|e| format!("站点 JSON 解析失败: {e}"))?;
         let key = v.get("key").and_then(|k| k.as_str()).unwrap_or("").to_string();
@@ -53,13 +54,10 @@ impl ApiSpider {
                     .collect()
             })
             .unwrap_or_default();
-        // 网络层：注入全局 UA/代理（对齐原项目设置 UA/代理；站点 header 在 get() 合并时优先）
+        // 网络层：注入全局 UA（站点 header 在 get() 合并时优先）
         let mut net = Net::new();
         if !ua.is_empty() {
             net.set_ua(ua);
-        }
-        if !proxy.is_empty() {
-            net.set_proxy(proxy);
         }
         Ok(Self { net, key, _name: name, api, ext, r#type, _play_url: play_url, header })
     }
