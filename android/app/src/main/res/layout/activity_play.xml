@@ -46,6 +46,25 @@
         android:textColor="#FFFFFF"
         android:textSize="16sp" />
 
+    <!-- 快进/快退提示：常驻 View，不是 Toast。
+         Toast 会排队，连按几下就一个个弹，看起来像一直挂在屏幕上不消失；
+         原版是一个文本，按住方向键时只更新数字，松开才真正跳过去。 -->
+    <TextView
+        android:id="@+id/seekHint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="140dp"
+        android:background="#99000000"
+        android:paddingStart="20dp"
+        android:paddingTop="10dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="10dp"
+        android:text=""
+        android:textColor="#FFFFFF"
+        android:textSize="20sp"
+        android:visibility="gone" />
+
     <!-- 底部控制条 -->
     <LinearLayout
         android:id="@+id/controlBar"

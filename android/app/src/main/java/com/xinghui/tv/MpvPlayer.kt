@@ -459,8 +459,23 @@ class MpvPlayer(
                     }.getOrNull() ?: false
                     // 换集时新文件会立刻接管，idle-active 回到 false；真的失败才停在这里
                     if (idle && !eofReached) {
-                        Log.e(TAG, "[mpv] 播放异常结束（idle，未到 EOF）")
-                        onFailed?.invoke("mpv 播放中断")
+                        // 把 mpv 自己的状态带出来：只报「播放中断」等于把真因盖住，
+                        // 修完还是中断时根本没法判断是「视频输出没建起来」还是「解码/网络失败」。
+                        //   current-vo       有值（通常是 gpu）说明渲染后端起来了
+                        //   vo-configured    false 说明 VO 压根没配成功
+                        val voName = runCatching {
+                            `is`.xyz.mpv.MPVLib.getPropertyString("current-vo")
+                        }.getOrNull()
+                        val voReady = runCatching {
+                            `is`.xyz.mpv.MPVLib.getPropertyBoolean("vo-configured")
+                        }.getOrNull()
+                        val ver = runCatching {
+                            `is`.xyz.mpv.MPVLib.getPropertyString("mpv-version")
+                        }.getOrNull()
+                        Log.e(TAG, "[mpv] 异常结束 vo=${voName ?: "空"} cfg=$voReady ver=$ver url=$pendingUrl")
+                        onFailed?.invoke(
+                            "mpv 中断｜vo=${voName?.ifBlank { "空" } ?: "空"} cfg=${voReady ?: false}"
+                        )
                     }
                 }, 800)
             }

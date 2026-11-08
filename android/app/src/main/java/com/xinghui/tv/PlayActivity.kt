@@ -1235,6 +1235,39 @@ class PlayActivity : Activity() {
         }
     }
 
+    // ===== 左右键快进/快退（原版 CustomKeyDownVod：按住累加，松开 250ms 后一次跳） =====
+    private val SEEK_STEP_MS = 10_000L
+    private var seekBaseMs = 0L          // 按下方向键那一刻的位置
+    private var seekAccumMs = 0L         // 按住期间累计的偏移
+    private var seekingByKey = false
+
+    private fun currentPosMs(): Long =
+        if (isMpvMode()) mpvPos else runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
+
+    private fun showSeekHint(accum: Long) {
+        val tv = findViewById<TextView>(R.id.seekHint) ?: return
+        val secs = Math.abs(accum) / 1000
+        tv.text = (if (accum > 0) "快进 +" else "快退 -") + secs + " 秒"
+        tv.visibility = View.VISIBLE
+    }
+
+    private fun hideSeekHint() {
+        findViewById<TextView>(R.id.seekHint)?.visibility = View.GONE
+    }
+
+    private val commitSeek = Runnable {
+        val base = seekBaseMs
+        val delta = seekAccumMs
+        seekAccumMs = 0L
+        if (delta == 0L) { hideSeekHint(); return@Runnable }
+        val dur = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+        var target = (base + delta).coerceAtLeast(0L)
+        if (dur > 0) target = target.coerceAtMost(dur)
+        if (isMpvMode()) mpv?.seekToMs(target) else player?.seekTo(target)
+        mpvPos = target
+        uiHandler.postDelayed({ hideSeekHint() }, 800)
+    }
+
     /** 左右键：快退/快进 10 秒（对齐原版 CustomKeyDownVod 的 INTERVAL_SEEK） */
     private fun seekBy(deltaMs: Long) {
         val cur: Long
@@ -1251,8 +1284,8 @@ class PlayActivity : Activity() {
         val target = (cur + deltaMs).coerceIn(0L, if (dur > 0) dur else Long.MAX_VALUE)
         if (isMpvMode()) mpv?.seekToMs(target) else player?.seekTo(target)
         mpvPos = target
-        val secs = Math.abs(deltaMs) / 1000
-        Toast.makeText(this, (if (deltaMs > 0) "快进 +" else "快退 -") + secs + " 秒", Toast.LENGTH_SHORT).show()
+        showSeekHint(deltaMs)
+        uiHandler.postDelayed({ hideSeekHint() }, 800)
     }
 
     /** 时间栏刷新（原版 view_control_seek 的 position / timeBar / duration） */
@@ -1365,8 +1398,24 @@ class PlayActivity : Activity() {
                 return true
             }
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                // 对齐原版 CustomKeyDownVod.check()：
+                //   DOWN（含长按 repeat）只累加偏移并刷新提示，不立刻跳
+                //   UP 之后 post 250ms 再一次性 seekTo
+                // 原来每收到一个 DOWN 就独立 seek 10 秒：按住时连续跳几十次，手感完全不同，
+                // 而且每次都弹一个 Toast，Toast 排队就变成了「提示一直挂在屏幕上」。
+                val dir = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1L else 1L
                 if (event.action == KeyEvent.ACTION_DOWN) {
-                    seekBy(if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -10_000L else 10_000L)
+                    if (!seekingByKey) {
+                        seekingByKey = true
+                        seekBaseMs = currentPosMs()
+                        seekAccumMs = 0L
+                    }
+                    seekAccumMs += dir * SEEK_STEP_MS
+                    showSeekHint(seekAccumMs)
+                } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
+                    seekingByKey = false
+                    uiHandler.removeCallbacks(commitSeek)
+                    uiHandler.postDelayed(commitSeek, 250)
                 }
                 return true
             }
@@ -1497,6 +1546,9 @@ class PlayActivity : Activity() {
 
     /** 切后台/被遮挡时立即落盘，避免只靠 15 秒定时那一次丢掉最后片段 */
     override fun onPause() {
+        seekingByKey = false
+        uiHandler.removeCallbacks(commitSeek)
+        hideSeekHint()
         super.onPause()
         if (isMpvMode()) runCatching { mpv?.pause() }
         savePosition()
