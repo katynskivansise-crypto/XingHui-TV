@@ -37,6 +37,7 @@
          43.6MB 的 so 若解压，磁盘总占用反而多出 20MB 左右。
          AGP 8.5.2 的 useLegacyPackaging 默认 false，so 以 Stored 方式存放，前提成立 -->
     <application
+        android:name=".XingHuiApp"
         android:allowBackup="true"
         android:label="@string/app_name"
         android:usesCleartextTraffic="true"

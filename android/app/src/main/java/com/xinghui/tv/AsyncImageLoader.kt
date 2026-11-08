@@ -224,9 +224,16 @@ object AsyncImageLoader {
         // 一律先直连，直连拿不到再交给引擎兜底（引擎侧有自己的超时与重试）。
         directFetch(s, url, extraHeaders)?.let { return it }
 
+        // 带 Referer 的兜底：引擎 proxy_image 支持 referer 参数（proxy.rs:43），
+        // 但之前壳这边只传 url/ua，等于「防盗链的图交到引擎手里也拿不到」。
+        // 原版没有这个问题是因为它只有一条路（Glide + OkHttp，header 一次带齐）；
+        // 我们拆成「直连 + 引擎兜底」两条路，就得把这个头补到兜底那一路才算对称。
         val params = JSONObject()
             .put("url", url)
             .put("ua", s.ua)
+            .apply {
+                extraHeaders["Referer"]?.takeIf { it.isNotBlank() }?.let { put("referer", it) }
+            }
             .toString()
         val b64 = Engine.execute("proxy_image", "", params)
         if (b64.isNotBlank()) {
