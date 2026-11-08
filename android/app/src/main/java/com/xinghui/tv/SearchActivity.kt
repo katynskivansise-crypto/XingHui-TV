@@ -192,11 +192,82 @@ class SearchActivity : Activity() {
 
             R.drawable.ic_keyboard_search -> onSearch()
 
-            R.drawable.ic_setting_home ->
-                Toast.makeText(this, "站内搜索：未接入（当前为全站聚合搜索）", Toast.LENGTH_SHORT).show()
+            R.drawable.ic_setting_home -> showSiteDialog()
 
             R.drawable.ic_keyboard -> zhuyin = keyboardAdapter.toggle()
         }
+    }
+
+    /**
+     * 原版 CustomKeyboard.onIconClick 里 ic_setting_home → showDialog() → SiteDialog.search()：
+     * 弹一个站点列表，选中回调 SearchActivity.setSite(Site) —— 而那个方法在原版里是空的。
+     * 也就是说这个按钮在原版就是「只列出站点、选了不改变任何东西」。
+     * 这里保持同样语义，不自己编一个「单站搜索」出来。
+     */
+    private fun showSiteDialog() {
+        val sites = runCatching { SubscriptionStore(this).sites() }
+            .getOrDefault(emptyList())
+            .filter { it.name.isNotBlank() }
+        if (sites.isEmpty()) {
+            Toast.makeText(this, "还没有订阅站点", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dialog = android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        dialog.setContentView(R.layout.dialog_site_search)
+        val rv = dialog.findViewById<RecyclerView>(R.id.dialogSiteList)
+        val list = ArrayList<String>()
+        sites.forEach { list.add(it.name) }
+        val adapter = SiteNameAdapter(list) { dialog.dismiss() }
+        rv.layoutManager = LinearLayoutManager(this)
+        rv.addItemDecoration(SpaceItemDecoration(1, 16))
+        rv.adapter = adapter
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.42f).toInt(),
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        dialog.setOnShowListener { rv.requestFocus() }
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.42f).toInt(),
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        rv.post { rv.requestFocus() }
+    }
+
+    /** 站点名列表，一行一个，焦点高亮（原版 SiteDialog 的列表格子） */
+    private class SiteNameAdapter(
+        private val items: List<String>,
+        private val onClick: (String) -> Unit,
+    ) : RecyclerView.Adapter<SiteNameAdapter.VH>() {
+
+        class VH(val tv: TextView, val row: android.view.View) : RecyclerView.ViewHolder(row)
+
+        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): VH {
+            val v = android.widget.LinearLayout(parent.context).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                layoutParams = RecyclerView.LayoutParams(
+                    RecyclerView.LayoutParams.MATCH_PARENT,
+                    RecyclerView.LayoutParams.WRAP_CONTENT
+                )
+                setBackgroundResource(R.drawable.selector_item)
+                setPadding(16, 12, 16, 12)
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+            val tv = TextView(parent.context).apply {
+                textSize = 18f
+                setTextColor(android.graphics.Color.WHITE)
+            }
+            v.addView(tv)
+            return VH(tv, v)
+        }
+
+        override fun onBindViewHolder(holder: VH, position: Int) {
+            holder.tv.text = items[position]
+            holder.row.setOnClickListener { onClick(items[position]) }
+        }
+
+        override fun getItemCount(): Int = items.size
     }
 
     /** 原版 onLongClick：只有删除键有长按行为 = 清空 */

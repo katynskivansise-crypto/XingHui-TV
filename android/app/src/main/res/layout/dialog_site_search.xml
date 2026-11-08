@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 站点选择弹窗，对应原版 SiteDialog.search()（type=1）+ adapter_site。
+     原版点完后 SearchActivity.setSite() 是空实现，所以这里选中也只会关闭弹窗 —
+     就是「只接入选项、点击不产生变化」，与原版一致。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="#E6101010"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:id="@+id/dialogSiteTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:text="选择站点"
+        android:textColor="@color/white"
+        android:textSize="22sp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/dialogSiteList"
+        android:layout_width="360dp"
+        android:layout_height="360dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:overScrollMode="never" />
+</LinearLayout>

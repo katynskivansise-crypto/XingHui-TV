@@ -4,6 +4,7 @@
     <color name="white">#FFFFFFFF</color>
     <color name="black">#FF000000</color>
     <color name="black_20">#33000000</color>
+    <color name="black_30">#4D000000</color>
     <color name="black_40">#66000000</color>
     <color name="black_50">#80000000</color>
     <!-- 原版 selector_text 用到的色名（原版由依赖库提供，这里补同值） -->
