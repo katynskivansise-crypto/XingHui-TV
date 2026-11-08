@@ -1,0 +1,12 @@
+<!-- 原版 leanback/res/drawable/ic_widget_play.xml 原样。
+     暂停时居中显示这个「播放」三角，语义是「按 OK 继续播放」，与原版一致。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:tint="#FFFFFF"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8,5v14l11,-7z" />
+</vector>

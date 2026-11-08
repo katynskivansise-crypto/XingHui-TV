@@ -235,13 +235,12 @@ class SettingsActivity : Activity() {
     }
 
     /**
-     * 原版点「缓存」= 把 Path.cache() 整个删掉（FileUtil.clearCache），
-     * 我们按白名单清可再生的部分，见 AppCache 的注释。
+     * 原版点「缓存」= 把 Path.cache() 整个删掉（FileUtil.clearCache），完成后只 setCacheText()
+     * 让数字归 0，不弹任何提示。这里同样只刷新数字。
      */
     private fun clearCache() {
         runCatching {
-            val n = AppCache.clear(this)
-            toast("已清理缓存 ${AppCache.format(n)}")
+            AppCache.clear(this)
             refresh()
         }.onFailure { e -> toast("清理失败：${e.message}") }
     }

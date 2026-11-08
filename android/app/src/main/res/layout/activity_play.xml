@@ -10,7 +10,11 @@
     android:background="@android:color/black">
 
     <!-- 属性对齐原版 styles.xml 的 Player 样式：
-         resize_mode=fit / use_controller=false / auto_show=false -->
+         resize_mode=fit / use_controller=false / auto_show=false。
+         shutter 不单独指定颜色，走 media3 默认（黑）—— 原版 Player 样式里同样没有
+         shutter_background_color 这一项，多设一项反而偏离原版。
+         起播/换集那段空档由上面的 playProgress 转圈占位，与原版 Player.Vod 的行为一致
+         （keep_content_on_player_reset=false，旧帧清掉后直接看到转圈）。 -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/playView"
         android:layout_width="match_parent"
@@ -18,7 +22,6 @@
         android:background="@android:color/black"
         app:auto_show="false"
         app:resize_mode="fit"
-        app:shutter_background_color="@android:color/black"
         app:use_controller="false" />
 
     <!-- 内嵌 mpv 的画面层：与 playView 二选一显示。
@@ -30,6 +33,91 @@
         android:layout_height="match_parent"
         android:background="@android:color/black"
         android:visibility="gone" />
+
+    <!-- 起播/缓冲指示：对齐原版 view_widget_vod.xml 的 @id/progress
+         （LinearLayout 居中，内含 view_progress 的 ProgressBar + traffic 网速文本）。
+         原版靠 Player.STATE_BUFFERING -> showProgress()、STATE_READY -> hideProgress() 切换；
+         这里同理，另在解析阶段（resolvePlay 开始到首个状态回调之间）也盖上，
+         否则点了播放到 ExoPlayer 第一次回调之间仍然是纯黑。 -->
+    <LinearLayout
+        android:id="@+id/playProgress"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- 原版 view_progress.xml：ProgressBar 居中，indeterminateTint=white -->
+        <ProgressBar
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:indeterminateTint="@android:color/white" />
+
+        <!-- 原版 widget/traffic：白字 16sp，距上 8dp，显示实时网速（我们暂填「加载中」） -->
+        <TextView
+            android:id="@+id/playProgressText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="加载中"
+            android:textColor="@android:color/white"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+    <!-- 暂停时居中提示：对齐原版 view_widget_vod.xml 的 @id/center。
+         结构完全照抄：外形 LinearLayout（圆角半透明黑 background=@drawable/shape_widget，padding=16dp），
+         上面 56dp 的 action 图标（暂停时是 ic_widget_play，语义为「按 OK 继续播放」），
+         下面一行「当前位置 / 总时长」，16sp 白字，斜杠两侧各 4dp。
+         原版时机：onPaused() 时 showInfoAndCenter()（全屏才显示），onPlay() 时 hideCenter()。 -->
+    <LinearLayout
+        android:id="@+id/playCenter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/shape_widget"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/playCenterIcon"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_widget_play" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/playCenterPos"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:text="/"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/playCenterDur"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+        </LinearLayout>
+    </LinearLayout>
 
     <!-- 片名：原版顶部 info（view_widget_vod），跟随控制条显隐 -->
     <TextView
@@ -46,25 +134,6 @@
         android:text="播放中"
         android:textColor="#FFFFFF"
         android:textSize="16sp" />
-
-    <!-- 快进/快退提示：常驻 View，不是 Toast。
-         Toast 会排队，连按几下就一个个弹，看起来像一直挂在屏幕上不消失；
-         原版是一个文本，按住方向键时只更新数字，松开才真正跳过去。 -->
-    <TextView
-        android:id="@+id/seekHint"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="140dp"
-        android:background="#99000000"
-        android:paddingStart="20dp"
-        android:paddingTop="10dp"
-        android:paddingEnd="20dp"
-        android:paddingBottom="10dp"
-        android:text=""
-        android:textColor="#FFFFFF"
-        android:textSize="20sp"
-        android:visibility="gone" />
 
     <!-- 底部控制条 -->
     <LinearLayout

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 原版 leanback/res/drawable/shape_widget.xml 原样：
+     暂停/快进时的居中提示块背景，40% 黑 + 8dp 圆角 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <solid android:color="@color/black_40" />
+
+    <corners android:radius="8dp" />
+
+</shape>

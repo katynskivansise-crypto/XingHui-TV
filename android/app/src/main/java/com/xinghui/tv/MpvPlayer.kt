@@ -48,6 +48,23 @@ class MpvPlayer(
     private var pendingSeekMs = 0L
     private var paused = true
     private var eofReached = false
+    /**
+     * 应用是否在后台（由 PlayActivity 的 onPause/onResume 置位）。
+     *
+     * 为什么需要它：切后台时 Activity 的 SurfaceView 会被系统销毁，
+     * surfaceDestroyed 把 vo 置 null、detachSurface 之后，mpv 会短暂掉进 idle-active=true。
+     * END_FILE 的异常判定若只看 idle-active，就会把「切后台」误判成「播放中断」，
+     * 进而触发上层静默自动换线路 —— 用户看到的就是「切回来卡住/换了台」。
+     */
+    private var backgrounded = false
+    /**
+     * resume() 在 surface 还没回来时先记账。
+     *
+     * onResume 常常早于 surfaceCreated：那时 vo 还是 null，直接下发 pause=false
+     * 会让 mpv 在「无视频输出」状态下开始播放，部分机型因此触发 END_FILE。
+     * 所以 surface 不在时只记账，等 surfaceCreated 里补发。
+     */
+    private var pendingResume = false
     private var desiredSpeed = 1.0f
     private var desiredScale = 0
     private var audioManager: android.media.AudioManager? = null
@@ -238,6 +255,22 @@ class MpvPlayer(
         if (playPending && pendingUrl.isNotBlank()) {
             playPending = false
             doPlay(pendingUrl)
+        } else if (pendingResume && pendingUrl.isNotBlank()) {
+            // 回前台时 onResume 早于 surfaceCreated：resume() 当时只记了账，
+            // 这里 surface 已经 attach 好、vo 也重开了，才真正下发 pause=false。
+            pendingResume = false
+            paused = false
+            runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", false) }
+        } else if (pendingUrl.isNotBlank() && !backgrounded) {
+            // surface 换了一块新的，但 mpv 因为 vo 曾被置 null 已经掉到 idle（文件没在播），
+            // 只重开 vo 是黑屏。这种情况按最后一次地址重新 loadfile，位置沿用记下来的进度。
+            val wasIdle = runCatching {
+                `is`.xyz.mpv.MPVLib.getPropertyBoolean("idle-active")
+            }.getOrNull() ?: false
+            if (wasIdle) {
+                pendingSeekMs = pendingStartMs
+                doPlay(pendingUrl)
+            }
         }
     }
 
@@ -270,6 +303,8 @@ class MpvPlayer(
         inited = false
         surfaceReady = false
         playPending = false
+        pendingResume = false
+        backgrounded = false
         // 清掉已播地址：否则释放后若 surface 再次创建，会把旧地址重新 loadfile
         pendingUrl = ""
         // 照官方 BaseMPVView.destroy：先摘掉 surface 回调再 destroy，
@@ -400,7 +435,23 @@ class MpvPlayer(
             runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", "0", "absolute+exact")) }
         }
         paused = false
+        // surface 还没回来：此时 vo 是 null（surfaceDestroyed 置的），
+        // 直接解暂停会让 mpv 在无视频输出下开播，部分机型借此触发 END_FILE → 误判中断。
+        // 只记账，等 surfaceCreated 里 attach 完再补发。
+        if (!surfaceReady) {
+            pendingResume = true
+            return
+        }
+        pendingResume = false
         runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", false) }
+    }
+
+    /** 由宿主 Activity 的 onPause/onResume 置位：后台期间不把 idle 判定成播放中断 */
+    fun setBackground(value: Boolean) {
+        backgrounded = value
+        if (!value) return
+        // 进后台时把记账清掉，避免把「上一次切后台的 resume」带到下一次 surface 重建
+        pendingResume = false
     }
 
     fun positionMs(): Long {
@@ -599,6 +650,14 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     if (!inited || pendingUrl.isBlank()) return@postDelayed
+                    // 后台期间 / surface 已销毁时一律不判异常结束：
+                    // 切后台 -> surfaceDestroyed 把 vo 置 null 并 detachSurface，
+                    // mpv 会短暂 idle-active=true；这时判「中断」会触发上层静默自动换线路，
+                    // 用户切回来看到的就是「卡住 / 换了台」而不是继续播。
+                    if (backgrounded || !surfaceReady) {
+                        Log.i(TAG, "[mpv] 后台或无 surface，跳过 END_FILE 异常判定")
+                        return@postDelayed
+                    }
                     val idle = runCatching {
                         `is`.xyz.mpv.MPVLib.getPropertyBoolean("idle-active")
                     }.getOrNull() ?: false

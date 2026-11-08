@@ -7,6 +7,7 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.media3.common.MediaItem
@@ -86,6 +87,19 @@ class PlayActivity : Activity() {
         siteKey = SubscriptionStore(this).currentKey() ?: ""
 
         playerView = findViewById<PlayerView>(R.id.playView)
+        /**
+         * keep_content_on_player_reset 不在这里设，保持 media3 默认（false），与点播场景一致。
+         *
+         * 原版 styles.xml 明确分了两档：
+         *   Player.Vod  -> keep_content_on_player_reset=false
+         *   Player.Live -> keep_content_on_player_reset=true
+         * 点播要 false：换集时旧片画面必须清掉，否则上一集最后一帧会挂在新集起播前，
+         * 看起来像卡住了；期间由 progress 转圈负责占位（见 showPlayProgress）。
+         * 直播才需要 true，因为切台时希望画面连续、不闪。
+         *
+         * 之前这里设过 true，是错的：既偏离原版，又只在 rebuildPlayer（切线路/切内核，
+         * 会 release 掉 player）这条路径上生效，正常换集走 applyMediaSource 反而用不到。
+         */
         // 画面缩放（对齐原版 VideoActivity.getScale：本片记录优先，-1 才回落全局 Setting.getScale）
         scaleIdx = HistoryStore(this).scaleOf(vodId)
             .takeIf { it >= 0 } ?: Settings(this).playerScale
@@ -173,6 +187,10 @@ class PlayActivity : Activity() {
 
     /** 调用引擎 player 接口解析出播放地址；csp_ 源走壳侧并带 header；失败进入自动换源重试链 */
     private fun resolvePlay(fl: String, ep: String) {
+        // 解析要发网络请求（引擎 player / csp 源），这段到 ExoPlayer 第一次状态回调之间
+        // 播放器还没接管，shutter 盖着就是纯黑。原版同样的空档是 progressLayout.showProgress()，
+        // 这里先盖上转圈，等 STATE_BUFFERING / READY 回调再按原版时机切换。
+        showPlayProgress()
         var url = ""
         var err = ""
         var sniffTarget = ""
@@ -507,8 +525,26 @@ class PlayActivity : Activity() {
             lower.contains(".mkv") || lower.contains(".ts") || lower.contains(".mp3")
     }
 
+    /**
+     * 起播/缓冲指示，对齐原版 VideoActivity：
+     *   showProgress() -> mBinding.widget.progress.setVisibility(VISIBLE)
+     *   hideProgress() -> 同 GONE + 停掉网速刷新
+     *
+     * 原版这两次调用挂在 onPlayerEvent 的 STATE_BUFFERING / STATE_READY 上，
+     * 另外起播前（checkCast 里非投屏时）也先盖一层 progressLayout。
+     * 我们照同一套时机：解析开始、首次缓冲、seek 后都显示，就绪/播完/失败时收起。
+     */
+    private fun showPlayProgress() {
+        runOnUiThread { findViewById<View>(R.id.playProgress)?.visibility = View.VISIBLE }
+    }
+
+    private fun hidePlayProgress() {
+        runOnUiThread { findViewById<View>(R.id.playProgress)?.visibility = View.GONE }
+    }
+
     /** 播放/解析失败 → 先切下一条线路，再自动换站点；都失败才停止（对齐原项目 startFlow→checkFlag→checkSearch） */
     private fun onPlayFail(msg: String) {
+        hidePlayProgress()
         if (tryAutoSwitch()) return
         if (siteSwitchCount < MAX_SITE_SWITCH && autoSwitchSite()) return
         runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
@@ -625,6 +661,16 @@ class PlayActivity : Activity() {
 
             /** 就绪后跳续播位置：太靠近片尾（不足 5 秒）就当作看完了，从头播 */
             override fun onPlaybackStateChanged(state: Int) {
+                // 对齐原版 VideoActivity.onPlayerEvent：
+                //   STATE_BUFFERING -> showProgress()
+                //   STATE_READY     -> hideProgress()
+                // 原版那 3 秒里显示的是居中的转圈，不是黑屏；我们之前没接这一段，
+                // 所以 shutter 盖着的时候看起来就是纯黑。
+                when (state) {
+                    Player.STATE_BUFFERING -> showPlayProgress()
+                    Player.STATE_READY, Player.STATE_ENDED -> hidePlayProgress()
+                    else -> Unit
+                }
                 if (state == Player.STATE_ENDED) {
                     handleEnded()
                     return
@@ -957,10 +1003,14 @@ class PlayActivity : Activity() {
         val surface = findViewById<android.view.SurfaceView>(R.id.mpvView)
         surface.visibility = View.VISIBLE
         mpvLoaded = false
+        // mpv 没有 ExoPlayer 的 STATE_BUFFERING/READY 回调，等价时机是 onLoaded（FILE_LOADED）。
+        // 这里先盖上转圈，onLoaded 里再收起，行为与原版 progress 一致。
+        showPlayProgress()
         val m = mpv ?: MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
                 mpvLoaded = true
                 Log.i("XingHuiTV", "[mpv] 已加载 $url")
+                hidePlayProgress()
                 recordHistory()
             }
             p.onEndFile = { handleEnded() }
@@ -1294,8 +1344,6 @@ class PlayActivity : Activity() {
 
     private fun handleMenuKey() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
-        // 短提示：既让操作有反馈，也能一眼确认「遥控器这个键到底有没有送到播放页」
-        Toast.makeText(this, if (toEpisodes) "菜单键：选集" else "菜单键：控制栏", Toast.LENGTH_SHORT).show()
         if (toEpisodes) {
             hideControl()
             openEpisodes()
@@ -1329,6 +1377,29 @@ class PlayActivity : Activity() {
         if (controlBar?.visibility == View.VISIBLE) hideControl() else showControl()
     }
 
+    /**
+     * 暂停时居中提示（对齐原版 VideoActivity.onPaused → showInfoAndCenter）。
+     *
+     * 原版动作：把 exo_position / exo_duration 填好，再把 widget.center 设 VISIBLE。
+     * center 里固定是 ic_widget_play（播放三角），语义为「按 OK 继续播放」，不是暂停符号。
+     * 只在全屏下显示，我们播放页本身就是全屏。
+     */
+    private fun showPlayCenter() {
+        val durMs = if (isMpvMode()) mpvDur
+        else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+        findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(currentPosMs())
+        findViewById<TextView>(R.id.playCenterDur)?.text =
+            if (durMs > 0L) fmtTime(durMs) else "--:--"
+        findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
+    }
+
+    /** 恢复播放时收起（对齐原版 onPlay → hideCenter，同时把图标复位回 ic_widget_play） */
+    private fun hidePlayCenter() {
+        // 对齐原版 hideCenter()：图标复位回 ic_widget_play，再整块收起
+        findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(R.drawable.ic_widget_play)
+        findViewById<View>(R.id.playCenter)?.visibility = View.GONE
+    }
+
     /** OK 键短按：暂停 / 继续（对齐原版 onKeyCenter），EXO / mpv 双内核同语义 */
     private fun togglePlayPause() {
         if (isMpvMode()) {
@@ -1336,9 +1407,11 @@ class PlayActivity : Activity() {
             if (m.isPlaying()) {
                 m.pause()
                 setKeepScreenOn(false)
+                showPlayCenter()
             } else {
                 m.resume()
                 setKeepScreenOn(true)
+                hidePlayCenter()
             }
             return
         }
@@ -1346,10 +1419,12 @@ class PlayActivity : Activity() {
         if (p.isPlaying) {
             p.pause()
             setKeepScreenOn(false)
+            showPlayCenter()
         } else {
             if (p.playbackState == Player.STATE_ENDED) p.seekTo(0)
             p.play()
             setKeepScreenOn(true)
+            hidePlayCenter()
         }
     }
 
@@ -1362,48 +1437,44 @@ class PlayActivity : Activity() {
     private fun currentPosMs(): Long =
         if (isMpvMode()) mpvPos else runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
 
-    private fun showSeekHint(accum: Long) {
-        val tv = findViewById<TextView>(R.id.seekHint) ?: return
-        val secs = Math.abs(accum) / 1000
-        tv.text = (if (accum > 0) "快进 +" else "快退 -") + secs + " 秒"
-        tv.visibility = View.VISIBLE
-    }
-
-    private fun hideSeekHint() {
-        findViewById<TextView>(R.id.seekHint)?.visibility = View.GONE
+    /**
+     * 快进/快退的居中提示：对齐原版 VideoActivity.onSeeking。
+     *
+     * 原版动作：exoPosition 填「目标位置」、图标换成 forward / rewind、center 设 VISIBLE、
+     * 同时 hideProgress()。目标位置用 seekBaseMs + accum 算；方向按 accum 正负判断
+     * （原版用的是 time > 0，对跳到 0 附近会判错方向，这里更准）。
+     */
+    private fun showSeekCenter(accum: Long) {
+        val durMs = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+        var target = (seekBaseMs + accum).coerceAtLeast(0L)
+        if (durMs > 0L) target = target.coerceAtMost(durMs)
+        findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(
+            if (accum > 0L) R.drawable.ic_widget_forward else R.drawable.ic_widget_rewind
+        )
+        findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(target)
+        findViewById<TextView>(R.id.playCenterDur)?.text = if (durMs > 0L) fmtTime(durMs) else "--:--"
+        findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
     }
 
     private val commitSeek = Runnable {
         val base = seekBaseMs
         val delta = seekAccumMs
         seekAccumMs = 0L
-        if (delta == 0L) { hideSeekHint(); return@Runnable }
+        if (delta == 0L) { hidePlayCenter(); return@Runnable }
         val dur = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
         var target = (base + delta).coerceAtLeast(0L)
         if (dur > 0) target = target.coerceAtMost(dur)
         if (isMpvMode()) mpv?.seekToMs(target) else player?.seekTo(target)
         mpvPos = target
-        uiHandler.postDelayed({ hideSeekHint() }, 800)
-    }
-
-    /** 左右键：快退/快进 10 秒（对齐原版 CustomKeyDownVod 的 INTERVAL_SEEK） */
-    private fun seekBy(deltaMs: Long) {
-        val cur: Long
-        val dur: Long
+        // 对齐原版 onSeekTo：跳完立刻收起居中提示并恢复播放（原版在 onSeekTo 里调了 onPlay()，
+        // onPlay 里做的是 addFlags(KEEP_SCREEN_ON) + play() + hideCenter()）。
+        hidePlayCenter()
         if (isMpvMode()) {
-            // 用回调缓存值：mpv 的 get_property 是同步的，seek 期间调用会卡住 UI
-            cur = mpvPos
-            dur = mpvDur
+            if (!(mpv?.isPlaying() ?: true)) mpv?.resume()
         } else {
-            val p = player ?: return
-            cur = p.currentPosition
-            dur = p.duration
+            runCatching { player?.playWhenReady = true }
         }
-        val target = (cur + deltaMs).coerceIn(0L, if (dur > 0) dur else Long.MAX_VALUE)
-        if (isMpvMode()) mpv?.seekToMs(target) else player?.seekTo(target)
-        mpvPos = target
-        showSeekHint(deltaMs)
-        uiHandler.postDelayed({ hideSeekHint() }, 800)
+        setKeepScreenOn(true)
     }
 
     /** 时间栏刷新（原版 view_control_seek 的 position / timeBar / duration） */
@@ -1529,7 +1600,7 @@ class PlayActivity : Activity() {
                         seekAccumMs = 0L
                     }
                     seekAccumMs += dir * SEEK_STEP_MS
-                    showSeekHint(seekAccumMs)
+                    showSeekCenter(seekAccumMs)
                 } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
                     seekingByKey = false
                     uiHandler.removeCallbacks(commitSeek)
@@ -1537,7 +1608,17 @@ class PlayActivity : Activity() {
                 }
                 return true
             }
-            KeyEvent.KEYCODE_BACK -> return super.dispatchKeyEvent(event)
+            KeyEvent.KEYCODE_BACK -> {
+                // 对齐原版 onBackPressed 的优先级：控制条 → 居中提示 → 退出。
+                // 暂停时 center 正显示，按返回应该先把它收掉，而不是直接把播放页关掉。
+                if (event.action == KeyEvent.ACTION_UP &&
+                    findViewById<View>(R.id.playCenter)?.visibility == View.VISIBLE
+                ) {
+                    hidePlayCenter()
+                    return true
+                }
+                return super.dispatchKeyEvent(event)
+            }
             else -> return super.dispatchKeyEvent(event)
         }
         return super.dispatchKeyEvent(event)
@@ -1549,31 +1630,40 @@ class PlayActivity : Activity() {
      * 四周露出的就是 window 背景（壁纸），浅色壁纸下表现为一圈白边。
      */
     /** 窗口 flag 只需落一次（它一旦设上就不会消失），见 applyImmersive 里的注释 */
-    private var windowFlagsApplied = false
+    /**
+     * 已经下发过的窗口 flag 位。
+     *
+     * 不能用「只做一次」的布尔闸门：HDMI 改分辨率、系统栏因某些 ROM 重新出现时，
+     * 那两位会被系统清掉，布尔闸门挡着就再也不补 —— 白边会回来。
+     * 这里改成按位比对：读当前窗口真实的 flags，缺哪一位才 addFlags，
+     * 位都在就不调，避免 Window.setFlags 无条件触发 onWindowAttributesChanged → relayout
+     * → SurfaceView 重建 → EXO 黑色 shutter 重盖（T1 上约 3 秒）。
+     */
+    private var appliedWindowFlags = 0
 
     private fun applyImmersive() {
         runCatching {
-            // addFlags 与 setSystemUiVisibility 在系统侧都是幂等的（相同值不触发 relayout），
-            // 所以焦点来回反复调用是安全的，这里不做额外闸门 —— 加了反而会在 HDMI
-            // 分辨率变化 / 系统栏回来时漏掉重设，白边会回来。
             // 硬设窗口 flag（theme 的 windowFullscreen 在部分 ROM 上会被 DecorView insets 覆盖）：
-            // FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算，FLAG_LAYOUT_NO_LIMITS 允许溢出系统栏区域。
-            // 这两条配合 hideSystemUI 的 LAYOUT_FULLSCREEN，才能真正做到「内容区 = 整块屏幕」。
+            // FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算。
             // 只保留两条：FLAG_FULLSCREEN 兜住 hide 系统栏，FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算。
             // 上一轮加的 FLAG_LAYOUT_NO_LIMITS 是对悬浮窗用的，加在 Activity 上会让窗口尺寸计算异常，已移除。
-            // 关键：这个 addFlags 只做一次。
+            //
             // Window.setFlags 会**无条件**回调 onWindowAttributesChanged → WindowManager.updateViewLayout，
-            // 即使 flag 位没变化也会走一次窗口 relayout；原版 Util.hideSystemUI 只调
+            // 即使 flag 位没有变化也会走一次窗口 relayout；原版 Util.hideSystemUI 只调
             // setSystemUiVisibility、不碰窗口 flag，所以原版没有这次多余 relayout。
             // 而 onWindowFocusChanged 每关一次弹窗都会回来调本方法 —— 于是每关一次菜单
             // 就 relayout 一次，SurfaceView 跟着重建，EXO 的黑色 shutter 重新盖上，
             // 要等重新渲染出第一帧才撤（T1 上约 3 秒）。mpv 侧则因 vo 未复位而永久黑。
-            if (!windowFlagsApplied) {
-                windowFlagsApplied = true
-                window.addFlags(
-                    WindowManager.LayoutParams.FLAG_FULLSCREEN or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                )
+            //
+            // 所以这里按位比对而不是「只做一次」：读窗口当前真实 flags，缺位才补。
+            //   - 位都在 -> 不调 addFlags -> 不 relayout -> SurfaceView 不重建
+            //   - HDMI 改分辨率 / ROM 清掉系统栏标志导致位缺失 -> 自动补回，白边不会回来
+            val wantFlags = WindowManager.LayoutParams.FLAG_FULLSCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            val currentFlags = window.attributes.flags
+            if (currentFlags and wantFlags != wantFlags || appliedWindowFlags != wantFlags) {
+                window.addFlags(wantFlags)
+                appliedWindowFlags = wantFlags
             }
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
@@ -1686,8 +1776,11 @@ class PlayActivity : Activity() {
     override fun onPause() {
         seekingByKey = false
         uiHandler.removeCallbacks(commitSeek)
-        hideSeekHint()
+        hidePlayCenter()
         super.onPause()
+        // 先置后台标记再暂停：mpv 在「后台 + vo 已空」这段时间会短暂掉进 idle-active=true，
+        // 内核侧的 END_FILE 异常判定要能看见这个标记，否则会误判成播放中断并静默换线路。
+        if (isMpvMode()) runCatching { mpv?.setBackground(true) }
         if (isMpvMode()) runCatching { mpv?.pause() } else runCatching { player?.pause() }
         savePosition()
     }
@@ -1699,6 +1792,12 @@ class PlayActivity : Activity() {
      *
      * 之前整个 PlayActivity 没有 onResume：onPause 里 pause 过之后就再没人叫醒，
      * 切后台回来画面停在暂停帧（mpv 尤其明显，看起来就像黑屏卡住）。
+     *
+     * 但只有「叫醒」还不够，还有两个前提要一起覆盖：
+     *  1) onResume 往往早于 surfaceCreated，此时 vo 是 null（surfaceDestroyed 置的）。
+     *     内核侧 resume() 会把这次恢复记账，等 surfaceCreated 里 attach 完再补发 pause=false。
+     *  2) mpv 实例可能在后台被起播 watchdog 置空（超时回退 EXO）。这时 mpv?.resume() 是空操作，
+     *     看起来就是「切回来还是死的」，所以 mpv 为 null 时按当前位置重建内核。
      */
     override fun onResume() {
         super.onResume()
@@ -1707,7 +1806,18 @@ class PlayActivity : Activity() {
         }
         // 首次进入时 url 还是空的，这里不能抢跑
         if (activeUrl.isBlank()) return
-        if (isMpvMode()) runCatching { mpv?.resume() } else runCatching { player?.play() }
+        if (isMpvMode()) {
+            val m = mpv
+            if (m == null) {
+                // 内核在后台没了：按当前进度重建，否则这里什么都不会发生
+                startMpv(activeUrl, activeHeaders, mpvPos)
+            } else {
+                runCatching { m.setBackground(false) }
+                runCatching { m.resume() }
+            }
+        } else {
+            runCatching { player?.play() }
+        }
     }
 
     override fun onDestroy() {
