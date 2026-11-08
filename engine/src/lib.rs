@@ -26,6 +26,7 @@ pub mod pdfh;
 pub mod proxy;
 pub mod spider;
 pub mod epg;
+pub mod subscription;
 
 #[cfg(feature = "jni")]
 pub mod jni;
