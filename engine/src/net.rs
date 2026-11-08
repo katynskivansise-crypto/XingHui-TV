@@ -14,6 +14,27 @@ use std::time::Duration;
 /// 默认读写超时（原 TIMEOUT = 30_000ms）
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 原 `Util.CHROME`：gitcode 对非浏览器 UA 直接 403，必须按原版原样替换。
+const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/// 手写 base64 编码（只为 basic auth 用）。引擎不引 base64 crate，
+/// 与 `proxy.rs` 里手写的 `base64_decode` 保持同一套自给自足的做法。
+fn base64_encode(s: &str) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let b = s.as_bytes();
+    let mut out = String::with_capacity((b.len() + 2) / 3 * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if c.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
 /// 网络客户端封装，对应原 `OkHttpClient` + `OkProxySelector`。
 ///
 /// 字段全部用 Arc 包裹以保证 Send + Sync，可被 JNI 桥安全持有。
@@ -227,7 +248,31 @@ impl Net {
         // 这里保留接口占位，Android 集成版再接入自定义 TLS 配置。
         let agent = builder.build();
 
-        let mut req = agent.request(method, url);
+        // ---- 对齐原 RequestInterceptor.intercept() 的 URL 级处理 ----
+        // ① 本地代理 URL 里的 '+' 转 %2B。原版条件：`url.contains("+") && local`，
+        //    local 的判定是 url 含 ":<Proxy.getPort()>/"，端口 9978。
+        //    不转的话 '+' 在 query 里会被解码成空格，规则传的 base64 参数直接坏掉。
+        let mut final_url = url.to_string();
+        if final_url.contains('+') && final_url.contains(":9978/") {
+            final_url = final_url.replace('+', "%2B");
+        }
+        // ② userinfo → Authorization: Basic（原 checkAuthUser 的 uri.getUserInfo() 分支）。
+        //    形如 http://user:pass@host/path；ureq 不会自动把 userinfo 变成认证头，必须剥出来自己设。
+        let mut basic_auth: Option<String> = None;
+        if let Some(pos) = final_url.find("://") {
+            let start = pos + 3;
+            if let Some(at) = final_url[start..].find('@') {
+                let seg = &final_url[start..start + at];
+                // 只有不含 '/' '?' 的片段才可能是 userinfo，避免把路径里出现的 '@' 误判
+                // userinfo 必然含 ':'（user:pass 形式）；含 '/' '?' 的不可能是 userinfo
+                if !seg.is_empty() && seg.contains(':') && !seg.contains('/') && !seg.contains('?') {
+                    basic_auth = Some(base64_encode(seg));
+                    final_url = format!("{}{}", &final_url[..start], &final_url[start + at + 1..]);
+                }
+            }
+        }
+
+        let mut req = agent.request(method, &final_url);
         // 全局 header 注入（对齐原 RequestInterceptor）：所有请求默认携带 self.headers
         for (k, v) in (*self.headers).iter() {
             req = req.set(k, v);
@@ -236,6 +281,14 @@ impl Net {
             for (k, v) in hdrs {
                 req = req.set(k, v);
             }
+        }
+        // ③ gitcode 强制浏览器 UA（原版无条件覆盖）。放在 header 注入之后，保证优先级最高。
+        if final_url.contains("gitcode.net") {
+            req = req.set("User-Agent", CHROME_UA);
+        }
+        // ④ basic auth 同样覆盖式写入（原版用 builder.header，语义是覆盖）。
+        if let Some(v) = basic_auth {
+            req = req.set("Authorization", &format!("Basic {}", v));
         }
 
         let read_all = |resp: ureq::Response| -> (Vec<u8>, HashMap<String, String>, u16) {
