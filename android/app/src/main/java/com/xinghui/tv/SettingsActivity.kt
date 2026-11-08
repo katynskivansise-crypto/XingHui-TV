@@ -54,7 +54,10 @@ class SettingsActivity : Activity() {
         // 直播：值显示直播源是否已配，点击可编辑（原版点开是直播源列表）
         // 直播：原版 SettingActivity.onLive → ConfigDialog.create(this).type(1).show()
         findViewById<View>(R.id.entryLive)?.setOnClickListener { showConfigDialog(1) }
-        findViewById<View>(R.id.entryLiveHome)?.setOnClickListener { toast("暂无直播主页源") }
+        // 直播行的 home 图标：原版 SettingActivity.onLiveHome → LiveDialog.action()（列出
+        // 订阅里的 lives 供选择）。之前这里只弹「暂无直播主页源」，而订阅其实带了
+        // migu / live / ipv6 三个源 —— 属于"有数据却没接"，本轮接上。
+        findViewById<View>(R.id.entryLiveHome)?.setOnClickListener { showLiveHomeDialog() }
         // 直播配置历史（原版 SettingActivity.onLiveHistory → HistoryDialog type=1）
         findViewById<View>(R.id.entryLiveHistory)?.setOnClickListener { showConfigHistory(1) }
 
@@ -81,8 +84,9 @@ class SettingsActivity : Activity() {
             startActivity(Intent(this, SettingsCustomActivity::class.java))
         }
 
-        // DoH：仅展示（原版可选 系统 / 阿里 / 腾讯）
-        findViewById<View>(R.id.entryDoh)?.setOnClickListener { toast("DoH 当前固定使用系统解析") }
+        // DoH：固定走系统解析，不做 DoH（2026-11-08 决定）。
+        // 这一行只展示当前取值、不可聚焦：原来点了会弹「当前固定使用系统解析」，
+        // 等于用一个提示假装成开关，属于"空有选项"，这里改回纯展示。
 
         findViewById<View>(R.id.entryBackup)?.setOnClickListener { doBackup() }
         findViewById<View>(R.id.entryRestore)?.setOnClickListener { doRestore() }
@@ -306,6 +310,63 @@ class SettingsActivity : Activity() {
      * 下方接口输入框预填当前配置；底部「选择 / 确定 / 取消」。
      * 确定 = 原版 onPositive → Config.find(text,type) → VodConfig/LiveConfig.load()。
      */
+    /**
+     * 直播主页源选择（对齐原版 LiveDialog.action()）。
+     *
+     * 数据来自订阅顶层的 `lives`：[{name, url}]。SubscriptionStore 存的是**原文**，
+     * 相对地址（如 `./tvboxtv.txt`）在这里按订阅地址补全（原版 Decoder.fix 的规则）。
+     */
+    private fun showLiveHomeDialog() {
+        val lives = parseLives()
+        if (lives.isEmpty()) {
+            toast("订阅里没有直播主页源")
+            return
+        }
+        val cur = Settings(this).liveUrl
+        val selected = lives.indexOfFirst { it.second == cur }.takeIf { it >= 0 } ?: 0
+        AlertDialog.Builder(this)
+            .setTitle("直播主页源")
+            .setSingleChoiceItems(lives.map { it.first }.toTypedArray(), selected) { d, which ->
+                val (name, url, ua) = lives[which]
+                Settings(this).liveUrl = url
+                Settings(this).liveUa = ua
+                d.dismiss()
+                refresh()
+                toast("直播主页源已设为 $name")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 解析订阅顶层 lives；相对地址按订阅地址补全（对齐原版 Decoder.fix）。 */
+    private fun parseLives(): List<Triple<String, String, String>> {
+        val text = SubscriptionStore(this).subscriptionText()
+        if (text.isBlank()) return emptyList()
+        return runCatching {
+            val holder = org.json.JSONObject(text).optJSONObject("video")
+                ?.takeIf { it.has("lives") } ?: org.json.JSONObject(text)
+            val arr = holder.optJSONArray("lives") ?: return emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val name = o.optString("name").trim()
+                val url = absolutizeLiveUrl(o.optString("url").trim())
+                if (name.isEmpty() || url.isEmpty()) null else Triple(name, url, o.optString("ua").trim())
+            }
+        }.getOrElse { emptyList() }
+    }
+
+    private fun absolutizeLiveUrl(url: String): String {
+        if (!url.startsWith("./") && !url.startsWith("../")) return url
+        val base = SubscriptionStore(this).subscribeUrl()
+        if (!base.contains("://")) return url
+        val dir = base.substringBeforeLast('/', base) + "/"
+        return if (url.startsWith("../")) {
+            dir.trimEnd('/').substringBeforeLast('/', dir) + "/" + url.removePrefix("../")
+        } else {
+            dir + url.removePrefix("./")
+        }
+    }
+
     private fun showConfigDialog(type: Int) {
         val view = layoutInflater.inflate(R.layout.dialog_config, null)
         val code = view.findViewById<android.widget.ImageView>(R.id.code)

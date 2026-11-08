@@ -82,7 +82,10 @@ class LiveActivity : Activity() {
             return
         }
         Thread {
-            val json = Engine.execute("live", "", JSONObject().put("url", liveUrl).toString())
+            val json = Engine.execute(
+                "live", "",
+                JSONObject().put("url", liveUrl).put("ua", Settings(this).liveUa).toString()
+            )
             val list = runCatching {
                 val arr = JSONObject(json).optJSONArray("class") ?: JSONObject(json).optJSONArray("list")
                 (0 until arr!!.length()).mapNotNull { i ->
@@ -124,7 +127,11 @@ class LiveActivity : Activity() {
         currentTid = tid
         Thread {
             val liveUrl = Settings(this).liveUrl
-            val params = JSONObject().put("url", liveUrl).put("tid", tid).toString()
+            val params = JSONObject()
+                .put("url", liveUrl)
+                .put("tid", tid)
+                .put("ua", Settings(this).liveUa)
+                .toString()
             val json = Engine.execute("live", "", params)
             val list = runCatching {
                 val arr = JSONObject(json).optJSONArray("list") ?: return@runCatching emptyList()

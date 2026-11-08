@@ -43,6 +43,11 @@ class Settings(context: Context) {
         set(value) = prefs.edit().putString(KEY_UA, value).apply()
 
 
+    /** 直播源 UA（订阅 lives 里每个源自带的 ua，选源时一并记下；空=用全局 UA） */
+    var liveUa: String
+        get() = prefs.getString(KEY_LIVE_UA, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LIVE_UA, value).apply()
+
     /** 直播 EPG 源（XMLTV 地址），空=不显示节目单（对齐原项目 EPG 数据源） */
     var epgUrl: String
         get() = prefs.getString(KEY_EPG_URL, "") ?: ""
@@ -221,6 +226,7 @@ class Settings(context: Context) {
         private const val KEY_UA = "ua"
         private const val KEY_EPG_URL = "epg_url"
         private const val KEY_LIVE_URL = "live_url"
+        private const val KEY_LIVE_UA = "live_ua"
         private const val KEY_UI_SIZE = "ui_size"
         private const val KEY_PLAYER_SCALE = "player_scale"
 

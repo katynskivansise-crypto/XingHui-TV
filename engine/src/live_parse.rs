@@ -14,11 +14,16 @@
 use crate::net::Net;
 
 /// 入口：抓取直播源 → 按 tid 返回分组或频道 JSON。
-pub fn live_source(url: &str, tid: &str) -> String {
+pub fn live_source(url: &str, tid: &str, ua: &str) -> String {
     if url.is_empty() {
         return r#"{"class":[],"list":[]}"#.to_string();
     }
-    let net = Net::new();
+    // 订阅 lives 里每个源都自带 ua（如 okhttp/3.8.1）。之前这里用裸 Net::new()，
+    // 等于拿默认 UA 去拉，对 UA 敏感的源（migu 这类）会直接取不到内容。
+    let mut net = Net::new();
+    if !ua.is_empty() {
+        net.set_ua(ua);
+    }
     let text = net.string(url);
     if text.is_empty() {
         return r#"{"class":[],"list":[]}"#.to_string();

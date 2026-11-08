@@ -309,8 +309,8 @@
                 android:layout_weight="1"
                 android:orientation="horizontal"
                 android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
+                android:focusable="false"
+                android:focusableInTouchMode="false">
 
                 <TextView
                     android:layout_width="0dp"

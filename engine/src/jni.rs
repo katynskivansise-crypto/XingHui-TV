@@ -350,7 +350,12 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
                             .to_string();
-                        crate::live_parse::live_source(&url, &tid)
+                        let ua = pv
+                            .get("ua")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        crate::live_parse::live_source(&url, &tid, &ua)
                     }
                 }
                 "proxy" => match spider.proxy_local(&extend) {
