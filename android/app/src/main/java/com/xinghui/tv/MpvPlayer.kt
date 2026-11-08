@@ -41,6 +41,9 @@ class MpvPlayer(
     private var playPending = false
     /** mpv_create 是否已成功：init() 失败重试时不能重复 create，否则会多实例泄漏 */
     private var created = false
+    /** 初始化期抛出的原因：那时 onFailed 还没接上，先存着，等 play() 时报出来 */
+    private var initError: String? = null
+    private val logFile: java.io.File by lazy { java.io.File(activity.filesDir, "mpv.log") }
     private var pendingStartMs = 0L
     private var pendingSeekMs = 0L
     private var paused = true
@@ -78,6 +81,10 @@ class MpvPlayer(
             }
             `is`.xyz.mpv.MPVLib.create(activity.applicationContext)
             `is`.xyz.mpv.MPVLib.setOptionString("config", "no")
+            // 让 mpv 把自己的日志写到私有目录。VO 建不起来时平台侧到底报了什么，
+            // 只有它自己知道；只报「中断」等于永远查不到真因。
+            `is`.xyz.mpv.MPVLib.setOptionString("log-file", logFile.absolutePath)
+            `is`.xyz.mpv.MPVLib.setOptionString("msg-level", "all=v")
             `is`.xyz.mpv.MPVLib.setOptionString("idle", "yes")
             `is`.xyz.mpv.MPVLib.setOptionString("vo", "gpu")
             // ★ 官方 mpv-android MPVView.kt:92-96 的必备项，之前一直漏掉。
@@ -113,7 +120,9 @@ class MpvPlayer(
             inited = true
             Log.i(TAG, "[mpv] 内嵌内核已初始化")
         }.onFailure {
-            Log.e(TAG, "[mpv] 初始化失败（so 未打进包或 ABI 不匹配）", it)
+            val msg = it.message ?: it.javaClass.simpleName
+            initError = msg
+            Log.e(TAG, "[mpv] 初始化失败（so 未打进包或 ABI 不匹配）：$msg", it)
         }
     }
 
@@ -122,6 +131,15 @@ class MpvPlayer(
         // 初始化失败时绝不能继续调 native，否则 libmpv 内部空指针会直接 SEGV
         if (!inited) return
         runCatching { `is`.xyz.mpv.MPVLib.attachSurface(holder.surface) }
+        // attach 完立刻把真实尺寸报给 mpv：只等 surfaceChanged 的话，
+        // 有些机型在首次是全屏尺寸、尺寸没变化时不会回调，mpv 就拿着 0 尺寸建渲染目标
+        runCatching {
+            val w = holder.surfaceFrame.width()
+            val h = holder.surfaceFrame.height()
+            if (w > 0 && h > 0) {
+                `is`.xyz.mpv.MPVLib.setPropertyString("android-surface-size", "${w}x${h}")
+            }
+        }
         surfaceReady = true
         // surface 晚于 play 到达时补一次起播（playPending 保证不会和 play() 里的那次重复 loadfile）
         if (playPending && pendingUrl.isNotBlank()) {
@@ -201,6 +219,10 @@ class MpvPlayer(
         // addCallback 时 surface 已经有效的话，系统不会再补发 surfaceCreated，
         // 那样 inited/surfaceReady 会一直停在 false，起播就永远等下去
         if (!inited) initWithOptions()
+        if (!inited) {
+            onFailed?.invoke("mpv 初始化失败｜${initError ?: "无错误码"}")
+            return
+        }
         pendingUrl = url
         pendingHeaders = headers
         pendingStartMs = startMs
@@ -235,6 +257,24 @@ class MpvPlayer(
             Log.i(TAG, "[mpv] 起播 $url")
         }.onFailure { Log.e(TAG, "[mpv] 起播失败", it) }
     }
+
+    /**
+     * 从 mpv 自己的日志里捞最后几条关键行。
+     * VO/EGL/解码失败的信息只在这里有，拿到它才能判断到底是渲染后端没起来还是别的原因。
+     */
+    private fun tailOfMpvLog(): String = runCatching {
+        if (!logFile.exists()) return "无日志"
+        val all = logFile.readText()
+        val lines = all.split("\n").filter { it.isNotBlank() }
+        val key = lines.filter {
+            val l = it.lowercase()
+            l.contains("error") || l.contains("fail") || l.contains("could not") ||
+                l.contains("vo/") || l.contains("gpu") || l.contains("egl") ||
+                l.contains("surface") || l.contains("context")
+        }.takeLast(2)
+        val picked = if (key.isNotEmpty()) key else lines.takeLast(2)
+        picked.joinToString(" / ") { it.trim().take(90) }.ifBlank { "日志为空" }
+    }.getOrElse { "读日志失败" }
 
     // ---------------------------------------------------------------- 控制（与 EXO 同一套语义）
 
@@ -474,7 +514,8 @@ class MpvPlayer(
                         }.getOrNull()
                         Log.e(TAG, "[mpv] 异常结束 vo=${voName ?: "空"} cfg=$voReady ver=$ver url=$pendingUrl")
                         onFailed?.invoke(
-                            "mpv 中断｜vo=${voName?.ifBlank { "空" } ?: "空"} cfg=${voReady ?: false}"
+                            "mpv 中断｜vo=${voName?.ifBlank { "空" } ?: "空"} cfg=${voReady ?: false}" +
+                                "｜${tailOfMpvLog()}"
                         )
                     }
                 }, 800)
