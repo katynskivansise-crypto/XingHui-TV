@@ -1027,7 +1027,7 @@ class PlayActivity : Activity() {
         runCatching { player?.release() }
         player = null
         playerView?.visibility = View.GONE
-        val surface = findViewById<android.view.SurfaceView>(R.id.mpvView)
+        val surface = findViewById<android.view.TextureView>(R.id.mpvView)
         surface.visibility = View.VISIBLE
         mpvLoaded = false
         // mpv 没有 ExoPlayer 的 STATE_BUFFERING/READY 回调，等价时机是 onLoaded（FILE_LOADED）。
@@ -1069,7 +1069,7 @@ class PlayActivity : Activity() {
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
-        findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility = View.GONE
+        findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
         playerView?.visibility = View.VISIBLE
         updatePlayerText()
         resumeOverride = mpvPos
@@ -1222,7 +1222,7 @@ class PlayActivity : Activity() {
             Toast.makeText(this, "已切换到 EXO", Toast.LENGTH_SHORT).show()
             mpv?.release()
             mpv = null
-            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility = View.GONE
+            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
             playerView?.visibility = View.VISIBLE
             if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
@@ -1373,7 +1373,7 @@ class PlayActivity : Activity() {
     private fun mpvDebugLine(): String {
         val m = mpv
         val surfaceVis = runCatching {
-            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility
+            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
