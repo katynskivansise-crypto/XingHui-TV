@@ -181,6 +181,26 @@ data class Site(
             null
         }
 
+        /**
+         * 从引擎 `subscription` 命令返回的站点 JSON 还原 Site。
+         * 字段名与 Rust 侧 `site_from` 输出一一对应（camelCase）。
+         */
+        fun fromEngine(o: JSONObject): Site = Site(
+            key = o.optString("key"),
+            name = o.optString("name", o.optString("key")),
+            api = o.optString("api", ""),
+            ext = o.optString("ext", ""),
+            siteJson = o.optString("siteJson", ""),
+            jar = o.optString("jar", ""),
+            styleType = o.optString("styleType", ""),
+            styleRatio = o.optDouble("styleRatio", 0.0).toFloat(),
+            headerJson = o.optString("headerJson", ""),
+            siteType = o.optInt("siteType", 1),
+            searchable = o.optInt("searchable", 1),
+            changeable = o.optInt("changeable", 1),
+            categoriesJson = o.optString("categoriesJson", ""),
+        )
+
         /** 解析订阅条目里的 style 对象（可能不存在） */
         fun styleOf(o: JSONObject): Pair<String, Float> {
             val st = o.optJSONObject("style") ?: return "" to 0f

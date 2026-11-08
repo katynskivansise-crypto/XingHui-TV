@@ -45,16 +45,37 @@ object SnifferRules {
         ads = emptyList()
     }
 
-    /** 从订阅 JSON 原文读取顶层 rules / ads（也兼容 video.rules 的嵌套写法） */
+    /**
+     * 从订阅原文载入规则。
+     *
+     * **解析已下沉到引擎**（`cmd=subscription` → rules/ads）：holder 取法、
+     * hosts 为空的规则丢弃、数组取值这些都在 Rust 侧完成，壳只做映射。
+     * 判定（[isAd] / [ruleOf] / [regexes] / [scripts]）仍留在壳：
+     * 这些是每次嗅探都会调的高频路径，走 JNI 往返不划算。
+     */
     @Synchronized
     fun load(subscriptionText: String?) {
         if (subscriptionText.isNullOrBlank()) return
-        try {
-            val root = JSONObject(subscriptionText)
-            val holder = root.optJSONObject("video")?.takeIf { it.has("sites") } ?: root
+        val json = runCatching {
+            Engine.execute(
+                "subscription", "",
+                JSONObject().put("text", subscriptionText).put("jar", "").put("url", "").toString()
+            )
+        }.getOrElse {
+            Log.e(TAG, "[rules] 引擎解析失败 ${it.message}")
+            return
+        }
+        loadFromJson(json)
+    }
 
+    /** 已经有引擎结果时直接喂进来，省掉一次重复解析（SubscriptionParser.parse 用这条）。 */
+    @Synchronized
+    fun loadFromJson(engineJson: String) {
+        if (engineJson.isBlank()) return
+        runCatching {
+            val root = JSONObject(engineJson)
             val parsed = ArrayList<Rule>()
-            holder.optJSONArray("rules")?.let { arr ->
+            root.optJSONArray("rules")?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
                     val r = Rule()
@@ -69,18 +90,15 @@ object SnifferRules {
             rules = parsed
 
             val adList = ArrayList<String>()
-            holder.optJSONArray("ads")?.let { arr ->
+            root.optJSONArray("ads")?.let { arr ->
                 for (i in 0 until arr.length()) {
-                    val s = arr.optString(i, "")
-                    if (s.isNotEmpty()) adList.add(s)
+                    val a = arr.optString(i, "")
+                    if (a.isNotEmpty()) adList.add(a)
                 }
             }
             ads = adList
-
             Log.e(TAG, "[rules] 载入 rules=${rules.size} ads=${ads.size}")
-        } catch (e: Throwable) {
-            Log.e(TAG, "[rules] 解析失败 ${e.message}")
-        }
+        }.onFailure { Log.e(TAG, "[rules] 映射失败 ${it.message}") }
     }
 
     private fun listOf(arr: JSONArray?): List<String> {

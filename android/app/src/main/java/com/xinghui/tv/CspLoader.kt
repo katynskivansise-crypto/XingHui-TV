@@ -155,8 +155,17 @@ object CspLoader {
             loaders[key]?.let { return it }
             val (url, expectMd5) = splitJar(jar)
             if (url.isBlank()) return null
-            // 原版 Path.jar(url)：本地文件按 jar 地址区分，避免多 jar 互相覆盖
-            val file = File(context.filesDir, "spider_" + md5Of(url) + ".jar")
+            // 原版 Path.jar(url)：jar 文件与 dex 优化产物都落在同一个专用子目录（cache/jar）。
+            // 我们把 jar 从 filesDir 根挪进来，但**先迁移旧文件、不重下**（4.97MB 的 spider.jar
+            // 重下一遍没必要，而且弱网下反而容易拿到残缺文件）。
+            val dexDir = File(context.filesDir, "dexcache").apply { if (!exists()) mkdirs() }
+            val file = File(dexDir, "spider_" + md5Of(url) + ".jar")
+            val legacyFile = File(context.filesDir, "spider_" + md5Of(url) + ".jar")
+            if (!file.exists() && legacyFile.exists() && legacyFile.length() > 1024) {
+                runCatching {
+                    if (legacyFile.renameTo(file)) Log.i(TAG, "[csp.prepare] 旧 jar 已迁移到 dexcache")
+                }
+            }
             val fileOk = file.exists() && file.length() > 1024
             // 严格校验：订阅提供了 md5 就必须匹配（对齐原版 JarLoader.parseJar 的 Util.equals）。
             // 实际教训：曾把判定放宽成"文件 >1KB 就复用"，结果一个早期下载失败留下的残缺
@@ -209,9 +218,12 @@ object CspLoader {
             } else {
                 Log.e(TAG, "[csp.prepare] 缓存命中且校验通过 len=${file.length()}")
             }
+            // 优化产物同样落在这个目录（原版 Path.jar() = cache/jar）。
+            // 之前直接把 filesDir 根当优化目录，API 25 会往根目录散布 spider_<md5>.dex，
+            // 既污染根目录、又让「缓存」清理漏掉它们。
             val dl = DexClassLoader(
                 file.absolutePath,
-                context.filesDir.absolutePath,
+                dexDir.absolutePath,
                 null,
                 context.classLoader
             )

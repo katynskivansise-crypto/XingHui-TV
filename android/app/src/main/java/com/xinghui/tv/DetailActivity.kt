@@ -134,7 +134,11 @@ class DetailActivity : Activity() {
                     .setAllowCrossProtocolRedirects(true)
                 setMediaSourceFactory(DefaultMediaSourceFactory(http))
             }
-            .build().also { inlineView.player = it }
+            .build().also {
+                // 官方 Players.java:158：HDMI / 蓝牙音频断开时自动暂停
+                it.setHandleAudioBecomingNoisy(true)
+                inlineView.player = it
+            }
         applyCaptionStyle()
         // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
         // 比例约 2.6:1，画面只能居中留大黑边（真机上看着就是「缩放不对」）。
@@ -366,6 +370,8 @@ class DetailActivity : Activity() {
             len > 4 -> 8
             else -> 10
         }
+        // 集数区高度是 match_parent，横向单行会把每个格子撑满整屏高，所以这里只做网格。
+        // 列数按名称长度自适应（原版 setEpisodeAdapter 的算法），不需要用户再选「选集样式」。
         rv.layoutManager = GridLayoutManager(this, cols)
         if (rv.itemDecorationCount == 0) {
             // 列间隙 8dp：左右各 4dp，相邻两格加起来正好 8dp（对齐原版 colWidth 的扣减方式）

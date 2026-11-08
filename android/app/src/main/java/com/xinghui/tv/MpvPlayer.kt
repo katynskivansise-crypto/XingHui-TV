@@ -54,8 +54,12 @@ class MpvPlayer(
     private var focusListener: android.media.AudioManager.OnAudioFocusChangeListener? = null
 
     init {
-        // 关键：mpv 用独立 surface，不设 MediaOverlay 会把控制条盖住
-        runCatching { surfaceView.setZOrderMediaOverlay(true) }
+        // 这里**不要**调 setZOrderMediaOverlay(true)。
+        // 原版全工程零命中；而它的语义是把 surface 放到「窗口之下的独立媒体层」，
+        // 弹窗（AlertDialog / BottomSheet 都是独立 window）出现后这层的 z-order 在
+        // 部分老 ROM（T1 的 Amlogic 7.1）上不会恢复 —— 表现为关掉菜单后 mpv 永久黑屏但声音正常。
+        // 不设它时 surface 走默认的「窗口内 punch-through」，控制条是窗口里的 View，
+        // 布局里 mpvView 声明在前、controlBar 在后，控制条照样盖在上面。
         surfaceView.holder.addCallback(this)
         // addCallback 时 surface 若已经有效，系统不会再补发 surfaceCreated，这里手动走一遍
         val h = surfaceView.holder
@@ -191,6 +195,11 @@ class MpvPlayer(
             val ua = Settings(activity).ua
             if (ua.isNotBlank()) `is`.xyz.mpv.MPVLib.setOptionString("user-agent", ua)
             `is`.xyz.mpv.MPVLib.init()
+            // 照官方 BaseMPVView.initialize：init 之后立刻关掉 force-window。
+            // 官方原注释「would crash before the surface is attached」——
+            // surface 还没到时若 force-window 开着，mpv 会试图建一个没有 surface 的窗口。
+            // 之后 surfaceCreated 会把它重新打开。
+            runCatching { `is`.xyz.mpv.MPVLib.setOptionString("force-window", "no") }
             created = true
             `is`.xyz.mpv.MPVLib.addObserver(this)
             observeAll()
@@ -207,7 +216,14 @@ class MpvPlayer(
         if (!inited) initWithOptions()
         // 初始化失败时绝不能继续调 native，否则 libmpv 内部空指针会直接 SEGV
         if (!inited) return
-        runCatching { `is`.xyz.mpv.MPVLib.attachSurface(holder.surface) }
+        runCatching {
+            `is`.xyz.mpv.MPVLib.attachSurface(holder.surface)
+            // 照官方 BaseMPVView.surfaceCreated 的三步：attach → force-window=yes → 重开 vo。
+            // surfaceDestroyed 里把 vo 置成 null 了，这里必须重开，否则 vo 一直指向
+            // 那个已经销毁的 surface —— 画面永久黑、声音照走。
+            `is`.xyz.mpv.MPVLib.setOptionString("force-window", "yes")
+            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "gpu")
+        }
         // attach 完立刻把真实尺寸报给 mpv：只等 surfaceChanged 的话，
         // 有些机型在首次是全屏尺寸、尺寸没变化时不会回调，mpv 就拿着 0 尺寸建渲染目标
         runCatching {
@@ -237,7 +253,14 @@ class MpvPlayer(
         surfaceReady = false
         // release() 之后 SurfaceView 还会回调一次，此时 handle 已销毁，再调 native 会崩
         if (!inited) return
-        runCatching { `is`.xyz.mpv.MPVLib.detachSurface() }
+        // 照官方 BaseMPVView.surfaceDestroyed：先关视频输出、关 force-window，再 detach。
+        // 只 detach 不关 vo 的话，mpv 的 vo 子系统仍持有旧 surface 句柄，
+        // 下次 surfaceCreated 再 attach 也不会真正重建 —— 这就是「关掉菜单后永久黑屏」的机制。
+        runCatching {
+            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "null")
+            `is`.xyz.mpv.MPVLib.setOptionString("force-window", "no")
+            `is`.xyz.mpv.MPVLib.detachSurface()
+        }
     }
 
     fun release() {
@@ -247,6 +270,11 @@ class MpvPlayer(
         inited = false
         surfaceReady = false
         playPending = false
+        // 清掉已播地址：否则释放后若 surface 再次创建，会把旧地址重新 loadfile
+        pendingUrl = ""
+        // 照官方 BaseMPVView.destroy：先摘掉 surface 回调再 destroy，
+        // 否则释放后 SurfaceView 的可视性变化还会回调进来，把已经 destroy 的 libmpv 再 init 一遍
+        runCatching { surfaceView.holder.removeCallback(this) }
         runCatching { `is`.xyz.mpv.MPVLib.removeObserver(this) }
         runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("stop")) }
         runCatching { `is`.xyz.mpv.MPVLib.destroy() }

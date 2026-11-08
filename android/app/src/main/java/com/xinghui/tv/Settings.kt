@@ -37,6 +37,22 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_HOME_HISTORY, true)
         set(value) = prefs.edit().putBoolean(KEY_HOME_HISTORY, value).apply()
 
+    /**
+     * 无痕模式（对齐原项目 Setting.isIncognito，原版在 SettingCustomActivity.setIncognito）。
+     * 开启后不写播放历史、不写收藏 —— 拦在 PlayActivity.recordHistory / setPosition 两处。
+     */
+    var isIncognito: Boolean
+        get() = prefs.getBoolean(KEY_INCOGNITO, false)
+        set(value) = prefs.edit().putBoolean(KEY_INCOGNITO, value).apply()
+
+    /**
+     * 聚合搜索（对齐原项目 Setting.isAggregatedSearch）。
+     * 开：跨站点 searchAll（当前行为）；关：只搜当前站点。
+     */
+    var aggregatedSearch: Boolean
+        get() = prefs.getBoolean(KEY_AGG_SEARCH, true)
+        set(value) = prefs.edit().putBoolean(KEY_AGG_SEARCH, value).apply()
+
     /** 全局 User-Agent（对齐原项目设置 UA），默认空=引擎内置 */
     var ua: String
         get() = prefs.getString(KEY_UA, "") ?: ""
@@ -224,6 +240,8 @@ class Settings(context: Context) {
         private const val KEY_POSTER = "show_poster"
         private const val KEY_HOME_HISTORY = "home_history"
         private const val KEY_UA = "ua"
+        private const val KEY_INCOGNITO = "incognito"
+        private const val KEY_AGG_SEARCH = "aggregated_search"
         private const val KEY_EPG_URL = "epg_url"
         private const val KEY_LIVE_URL = "live_url"
         private const val KEY_LIVE_UA = "live_ua"

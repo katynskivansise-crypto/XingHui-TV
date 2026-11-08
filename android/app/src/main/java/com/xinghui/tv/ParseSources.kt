@@ -39,9 +39,56 @@ object ParseSources {
     @Volatile
     var current: Item? = null
 
+    /**
+     * 载入解析源。**解析已下沉到引擎**（`cmd=subscription` → parses）：
+     * name/url 空值跳过、type0/1 必须 http、ext.header 提取、extJson 序列化，
+     * 全在 Rust 侧完成。壳只做映射。
+     */
     fun load(subscriptionText: String) {
-        val parsed = runCatching { doLoad(subscriptionText) }.getOrElse {
-            Log.e(TAG, "[parse] 解析源载入失败 ${it.message}")
+        if (subscriptionText.isBlank()) return
+        val json = runCatching {
+            Engine.execute(
+                "subscription", "",
+                JSONObject().put("text", subscriptionText).put("jar", "").put("url", "").toString()
+            )
+        }.getOrElse {
+            Log.e(TAG, "[parse] 引擎解析失败 ${it.message}")
+            return
+        }
+        loadFromJson(json)
+    }
+
+    /** 已有引擎结果时直接喂（省一次重复解析）。 */
+    fun loadFromJson(engineJson: String) {
+        if (engineJson.isBlank()) return
+        val parsed = runCatching {
+            val root = JSONObject(engineJson)
+            val arr = root.optJSONArray("parses") ?: return@runCatching emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val name = o.optString("name").trim()
+                val url = o.optString("url").trim()
+                if (name.isEmpty() || url.isEmpty()) return@mapNotNull null
+                val headers = HashMap<String, String>()
+                o.optJSONObject("headers")?.let { h ->
+                    val keys = h.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val v = h.optString(k, "")
+                        if (v.isNotBlank()) headers[k] = v
+                    }
+                }
+                Item(
+                    name = name,
+                    type = o.optInt("type", 0),
+                    url = url,
+                    click = o.optString("click", ""),
+                    headers = headers,
+                    extJson = o.optString("extJson", ""),
+                )
+            }
+        }.getOrElse {
+            Log.e(TAG, "[parse] 映射失败 ${it.message}")
             emptyList()
         }
         items = parsed
@@ -61,43 +108,6 @@ object ParseSources {
 
     /** 按名字找（`playUrl = "parse:名字"` 那条路径用） */
     fun byName(name: String): Item? = items.firstOrNull { it.name == name }
-
-    private fun doLoad(text: String): List<Item> {
-        if (text.isBlank()) return emptyList()
-        val root = runCatching { JSONObject(text) }.getOrNull() ?: return emptyList()
-        val holder = root.optJSONObject("video")?.takeIf { it.has("parses") } ?: root
-        val arr = holder.optJSONArray("parses") ?: return emptyList()
-
-        val out = ArrayList<Item>()
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val type = o.optInt("type", 0)
-            val name = o.optString("name", "").trim()
-            val url = o.optString("url", "").trim()
-            if (name.isEmpty() || url.isEmpty()) continue
-            // type0/1 必须是 http 前缀；type2/3 的 url 是 jar 里的类名后缀，不能要求 http
-            if ((type == 0 || type == 1) && !url.startsWith("http")) {
-                Log.e(TAG, "[parse] 跳过非 http 解析源 $name → ${url.take(40)}")
-                continue
-            }
-            val extObj = o.opt("ext")
-            out.add(
-                Item(
-                    name = name,
-                    type = type,
-                    url = url,
-                    click = o.optString("click", ""),
-                    headers = headerOf(extObj),
-                    extJson = when (extObj) {
-                        is JSONObject -> extObj.toString()
-                        is String -> extObj
-                        else -> ""
-                    },
-                )
-            )
-        }
-        return out
-    }
 
     /** ext 既可能是 {"header":{"User-Agent":"..."}} 也可能是字符串（原版 Parse.getHeaders 同义） */
     private fun headerOf(ext: Any?): Map<String, String> {

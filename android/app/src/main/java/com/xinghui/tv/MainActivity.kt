@@ -383,6 +383,31 @@ class MainActivity : Activity() {
      * 之前这里写的是 0→6 / 1→5 / 2→4 / 其余→3，整体比原版少一列 ——
      * 表现为卡片比原版大一圈、每行少一张，越往后偏差越大。
      */
+    /**
+     * 首页菜单键（逐字对齐原版 HomeActivity:508-519 的 dispatchKeyEvent）：
+     *   KeyUtil.isMenuKey = ACTION_UP && KEYCODE_MENU
+     * 原版是首页 pager 第 0 页才响应；我们只有单页首页，所以直接分发。
+     * 0/2/6 三档（选项弹窗 / 切换线路 / 推送页面）我们尚无对应实现，设置页负责把循环跳过它们，
+     * 这里再兜一次底，避免历史遗留值撞上空档。
+     */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_UP &&
+            event.keyCode == android.view.KeyEvent.KEYCODE_MENU
+        ) {
+            when (Settings(this).homeMenuKey) {
+                1 -> startActivity(android.content.Intent(this, SitesActivity::class.java))
+                3 -> startActivity(android.content.Intent(this, LiveActivity::class.java))
+                4 -> startActivity(android.content.Intent(this, HistoryActivity::class.java))
+                5 -> startActivity(android.content.Intent(this, SearchActivity::class.java))
+                7 -> startActivity(android.content.Intent(this, CollectActivity::class.java))
+                8 -> startActivity(android.content.Intent(this, SettingsActivity::class.java))
+                else -> return super.dispatchKeyEvent(event)
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     private fun uiColumns(): Int = (7 - Settings(this).uiSize).coerceAtLeast(1)
 
     /**
