@@ -15,7 +15,9 @@ import java.security.MessageDigest
  *
  * 与原版一致的关键语义：
  * 1) 多 jar：loaders / proxyMethods 以 **md5(完整 jar 字符串)** 为 key，不同站点可用不同 jar；
- * 2) md5 校验：jar 形如 "url;md5;xxxx"，本地缓存文件 md5 与声明一致才复用，否则重新下载；
+ * 2) md5 只用于「缓存要不要重下」：jar 形如 "url;md5;xxxx"。md5 与声明一致或声明没变 → 复用；
+ *    下载完成后按原版 JarLoader 的语义不校验 md5（声明值经常是上游忘记更新的旧值），
+ *    完整性只认 zip 结构（能否打开 + 包内有没有 .dex）；
  * 3) 爬虫实例：key = md5(jar) + site.key（原版 spKey = jaKey + key），Gz360 等 init 含鉴权网络调用必须复用；
  * 4) recent jar：最近访问站点的 jar，供 /proxy 播放代理取对应 Proxy.proxy(Map)。
  *
@@ -125,11 +127,27 @@ object CspLoader {
         ""
     }
 
+    /**
+     * jar 是否真的是一个能加载的 dex 包（zip 结构完整 + 含 classes.dex）。
+     *
+     * 这是"下载有没有被截断"唯一可靠的判据：md5 只能说明"和订阅声明一样不一样"，
+     * 而声明本身常常是旧的；zip 结构坏了才是 DexClassLoader 抛
+     * ClassNotFoundException / ZipException 的真因。
+     */
+    private fun jarUnusableReason(file: File): String = runCatching {
+        java.util.zip.ZipFile(file).use { zip ->
+            // 只要有一个 .dex 就认为结构可用；DexClassLoader 认的是包内 classes.dex，
+            // 没有 dex 的包再怎么完整也加载不了，属于"不可用"而不是"下载不完整"
+            if (zip.entries().asSequence().any { it.name.endsWith(".dex") }) "" else "包内没有 .dex"
+        }
+    }.getOrDefault("zip 结构损坏（文件被截断）")
+
     /** 拆 "url;md5;hash" → (url, hash)；无 md5 段时 hash 为空 */
     private fun splitJar(jar: String): Pair<String, String> {
         val idx = jar.indexOf(";md5;")
         return if (idx >= 0) {
-            jar.substring(0, idx).trim() to jar.substring(idx + 5).trim()
+            // 声明里偶尔还带着后续段（"url;md5;hash;xxx"），只认第一段，别把整串当 md5
+            jar.substring(0, idx).trim() to jar.substring(idx + 5).substringBefore(';').trim()
         } else {
             jar.trim() to ""
         }
@@ -142,6 +160,9 @@ object CspLoader {
 
     private fun loadJar(context: Context, jar: String): DexClassLoader? {
         if (jar.isBlank()) return null
+        // lastJarError 是全局状态：上一次失败的文案如果不清，后面哪怕加载成功，
+        // 首页提示仍会挂着「jar 下载不完整」这种过期原因（曾实测会误导排查）。
+        lastJarError = ""
         // 原版 App.onCreate 里有 Init.set(base)。spider.jar 内的 Path.cache()/Prefers 都靠它拿 Context，
         // 不设置的话 AppDrama 一碰文件或配置就 NoClassDefFoundError/NPE。
         runCatching { com.github.catvod.Init.set(context) }
@@ -167,19 +188,34 @@ object CspLoader {
                 }
             }
             val fileOk = file.exists() && file.length() > 1024
-            // 严格校验：订阅提供了 md5 就必须匹配（对齐原版 JarLoader.parseJar 的 Util.equals）。
-            // 实际教训：曾把判定放宽成"文件 >1KB 就复用"，结果一个早期下载失败留下的残缺
-            // jar 被永久缓存，DexClassLoader 每次都抛
-            //   ClassNotFoundException: com.github.catvod.spider.AppDrama
-            // 而同一个 URL 在电脑上完整下载 4.97MB 的 classes.dex（dex 版本 035、4014 个类、
-            // AppDrama 确实定义）是完全可加载的 —— 所以问题从来不在 dex，而在这个文件。
-            val md5Ok = expectMd5.isEmpty() || (fileOk && md5OfFile(file) == expectMd5)
-            val cacheOk = fileOk && md5Ok
+            // 历史教训：曾把判定放宽成"文件 >1KB 就复用"，结果一个下载失败留下的残缺 jar
+            // 被永久缓存，DexClassLoader 每次都抛 ClassNotFoundException: AppDrama —— 问题不在
+            // dex 内容，而在文件本身。所以"截断"必须挡住，只是判据要选对（见下面三层）。
+            // 缓存判定分三层：
+            //   zipOk       —— 文件结构完整、含 classes.dex（挡住截断的残缺文件）
+            //   md5Ok       —— 订阅声明的 md5 与实际文件一致
+            //   declaredSame —— 订阅这次声明的 md5 与我们上次下载时声明的一模一样
+            //
+            // 为什么需要 declaredSame：大量订阅更新了 spider.jar 却没有同步 md5（声明值恒旧）。
+            // 严格比对等于"永久不命中"：每次启动都重下 5MB，下完又因为 md5 不符把文件删掉，
+            // 整站直接不可用 —— 真机上那条「jar 下载不完整（md5 不符）」就是这么来的。
+            // 原版 JarLoader.parseJar 只在「本地缓存」阶段看 md5，一旦进下载分支，
+            // download() 完成后不做任何 md5 校验就直接 load()，所以同一份订阅在原版能跑。
+            val stampFile = File(dexDir, "spider_" + md5Of(url) + ".md5")
+            val declaredBefore = runCatching {
+                if (stampFile.exists()) stampFile.readText().trim() else ""
+            }.getOrDefault("")
+            val jarIssue = if (fileOk) jarUnusableReason(file) else "文件不存在或不足 1KB"
+            val zipOk = jarIssue.isEmpty()
+            val actualMd5 = if (fileOk) runCatching { md5OfFile(file) }.getOrDefault("") else ""
+            val md5Ok = expectMd5.isEmpty() || actualMd5.equals(expectMd5, ignoreCase = true)
+            val declaredSame = expectMd5.isNotEmpty() && declaredBefore.equals(expectMd5, ignoreCase = true)
+            val cacheOk = zipOk && (md5Ok || declaredSame)
             if (!cacheOk && file.exists()) {
                 Log.e(
                     TAG,
                     "[csp.prepare] 旧缓存不可用，删除重下：len=${file.length()} " +
-                        "期望md5=$expectMd5 实际=${runCatching { md5OfFile(file) }.getOrDefault("?")}"
+                        "zipOk=$zipOk 期望md5=$expectMd5 实际=$actualMd5 上次声明=$declaredBefore"
                 )
                 file.delete()
             }
@@ -205,18 +241,32 @@ object CspLoader {
                     return null
                 }
                 Log.e(TAG, "[csp.prepare] jar 下载完成 len=${file.length()}")
-                // 下载返回 true 也可能被连接中断截断（HTTP 200 + 提前 EOF），必须再校验一次
-                if (expectMd5.isNotEmpty()) {
-                    val real = md5OfFile(file)
-                    if (real != expectMd5) {
-                        lastJarError = "jar 下载不完整（md5 不符）"
-                        Log.e(TAG, "[csp.prepare] 下载后 md5 校验失败 期望=$expectMd5 实际=$real，删除重试")
-                        file.delete()
-                        return null
-                    }
+                // 下载后的完整性只认 zip 结构：HTTP 200 + 提前 EOF 会留下一个打不开的半截文件，
+                // 这个必须挡。而 md5 声明经常是上游忘了同步的旧值，拿它当硬门槛会把"能用的 jar"
+                // 判死（原版在这里根本不校验）。所以 md5 不符只记日志，继续加载。
+                val issueAfter = jarUnusableReason(file)
+                if (issueAfter.isNotEmpty()) {
+                    lastJarError = "jar 不可用（$issueAfter）"
+                    Log.e(TAG, "[csp.prepare] 下载后校验失败：$issueAfter len=${file.length()}，删除")
+                    file.delete()
+                    return null
                 }
+                if (expectMd5.isNotEmpty() && !md5OfFile(file).equals(expectMd5, ignoreCase = true)) {
+                    Log.e(
+                        TAG,
+                        "[csp.prepare] 警告：md5 与订阅声明不符（声明=$expectMd5 实际=${md5OfFile(file)}）" +
+                            "，按原版语义继续加载"
+                    )
+                }
+                // 记住"这次是按哪个声明下的"，下次订阅没改声明就复用，不再重下 5MB
+                runCatching { stampFile.writeText(expectMd5) }
             } else {
-                Log.e(TAG, "[csp.prepare] 缓存命中且校验通过 len=${file.length()}")
+                Log.e(
+                    TAG,
+                    "[csp.prepare] 缓存命中 len=${file.length()} zipOk=$zipOk md5Ok=$md5Ok declaredSame=$declaredSame"
+                )
+                // 老缓存可能是升级前下的（没有旁文件），这里补写一次，后续判定才稳定
+                if (md5Ok) runCatching { stampFile.writeText(expectMd5) }
             }
             // 优化产物同样落在这个目录（原版 Path.jar() = cache/jar）。
             // 之前直接把 filesDir 根当优化目录，API 25 会往根目录散布 spider_<md5>.dex，
