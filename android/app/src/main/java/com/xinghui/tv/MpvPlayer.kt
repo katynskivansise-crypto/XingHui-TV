@@ -26,6 +26,19 @@ class MpvPlayer(
         @Volatile
         var liveCount: Int = 0
             private set
+
+        /**
+         * 当前活着的那个实例。
+         *
+         * MPVLib 的句柄是**静态单例**：同进程里第二个 MpvPlayer 一旦 create，
+         * 静态句柄就指到新实例上，旧实例还在渲染、还在出声，但任何 command/property
+         * 都打到新实例（它没 loadfile，是空转状态）—— 表现就是
+         * 「按暂停没反应、左右键不跳、回主页还在播」。
+         * 真机 /debug 里抓到过同一秒两次「内核已释放」，就是两个实例并存。
+         * 所以这里做单实例闸门：新实例创建前，先把旧的释放掉。
+         */
+        @Volatile
+        private var current: MpvPlayer? = null
     }
 
     var onLoaded: (() -> Unit)? = null
@@ -81,6 +94,14 @@ class MpvPlayer(
         // 部分老 ROM（T1 的 Amlogic 7.1）上不会恢复 —— 表现为关掉菜单后 mpv 永久黑屏但声音正常。
         // 不设它时 surface 走默认的「窗口内 punch-through」，控制条是窗口里的 View，
         // 布局里 mpvView 声明在前、controlBar 在后，控制条照样盖在上面。
+        // 单实例闸门：先放掉残留的旧内核，再接管静态句柄
+        current?.let { old ->
+            if (old !== this) {
+                MpvDebug.log("[mpv] 发现残留实例，先释放（旧 live=${liveCount}）")
+                runCatching { old.release() }
+            }
+        }
+        current = this
         surfaceView.holder.addCallback(this)
         liveCount++
         // addCallback 时 surface 若已经有效，系统不会再补发 surfaceCreated，这里手动走一遍
@@ -322,6 +343,7 @@ class MpvPlayer(
         runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("stop")) }
         runCatching { `is`.xyz.mpv.MPVLib.destroy() }
         created = false
+        if (current === this) current = null
         liveCount--
         MpvDebug.log("[mpv] 内核已释放 存活实例=${liveCount}")
     }
