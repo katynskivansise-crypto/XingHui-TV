@@ -1,111 +1,142 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 搜索页：返回 + 关键词输入 + 搜索历史 + TV软键盘 + 结果网格 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- 搜索页，结构照原版 leanback/activity_search.xml：
+     左 128dp = 历史列表；中间 = 麦克风 + 输入框 + 6 列键盘（7 个功能图标 + 36 个字符）；
+     原版第三栏「热搜」按用户要求不做，所以整行只剩两块。
+     搜索结果不是原版那种另起一页，这里用覆盖层显示，视觉上等价。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="@android:color/transparent"
-    android:padding="24dp">
-
-    <TextView
-        android:id="@+id/btnBack"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:padding="10dp"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp"
-        android:focusable="true"
-        android:clickable="true"
-        android:background="@drawable/selector_tv_btn"
-        android:text="← 返回" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:paddingBottom="8dp"
-        android:textColor="#FFFFFF"
-        android:textSize="20sp"
-        android:text="搜索" />
+    android:layout_height="match_parent">
 
     <LinearLayout
+        android:id="@+id/searchPanel"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:layout_height="match_parent"
+        android:animateLayoutChanges="true"
+        android:keepScreenOn="true"
+        android:orientation="horizontal"
+        android:paddingStart="24dp"
+        android:paddingTop="24dp"
+        android:paddingEnd="24dp">
 
-        <EditText
-            android:id="@+id/searchInput"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:hint="输入片名 / 关键词"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#80FFFFFF"
-            android:textSize="16sp"
-            android:inputType="text" />
+        <LinearLayout
+            android:id="@+id/recordLayout"
+            android:layout_width="152dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="40dp"
+            android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/btnSearch"
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:text="历史"
+                android:textColor="@color/white"
+                android:textSize="24sp" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recordRecycler"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipChildren="false"
+                android:clipToPadding="false"
+                android:overScrollMode="never"
+                android:paddingBottom="24dp" />
+        </LinearLayout>
+
+        <RelativeLayout
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="12dp"
-            android:textColor="#000000"
-            android:textSize="16sp"
-            android:focusable="true"
-            android:clickable="true"
-            android:background="#FFCC00"
-            android:text="搜索" />
+            android:layout_height="match_parent">
 
+            <ImageView
+                android:id="@+id/mic"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="16dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_search_mic" />
+
+            <EditText
+                android:id="@+id/keyword"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignEnd="@+id/keyboard"
+                android:layout_marginBottom="20dp"
+                android:layout_toEndOf="@+id/mic"
+                android:background="@null"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:hint="关键字…"
+                android:imeOptions="actionDone"
+                android:inputType="textCapWords|textAutoCorrect|textAutoComplete"
+                android:letterSpacing="0.02"
+                android:maxLength="255"
+                android:singleLine="true"
+                android:textColor="@color/white"
+                android:textColorHint="@color/white"
+                android:textCursorDrawable="@drawable/shape_cursor"
+                android:textSize="26sp" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/keyboard"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_below="@+id/keyword"
+                android:overScrollMode="never" />
+        </RelativeLayout>
     </LinearLayout>
 
-    <!-- 搜索历史 -->
+    <!-- 结果覆盖层：点搜索后盖在搜索面板上，返回键退回到搜索面板 -->
     <LinearLayout
+        android:id="@+id/resultPanel"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:layout_height="match_parent"
+        android:background="#E6000000"
+        android:orientation="vertical"
+        android:visibility="gone">
 
-        <TextView
-            android:id="@+id/histTitle"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="8dp"
-            android:paddingBottom="4dp"
-            android:textColor="#B0FFFFFF"
-            android:textSize="14sp"
-            android:text="搜索历史" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="24dp"
+            android:paddingTop="24dp"
+            android:paddingEnd="24dp"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:id="@+id/resultBack"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:text="← 返回"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/resultTitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:textColor="@color/white"
+                android:textSize="24sp" />
+        </LinearLayout>
 
         <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/searchWords"
+            android:id="@+id/searchList"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:maxHeight="150dp"
-            android:clipToPadding="false" />
-
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingBottom="24dp" />
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/searchLabel"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
-        android:textColor="#B0FFFFFF"
-        android:textSize="14sp"
-        android:text="输入关键词后点搜索" />
-
-    <!-- TV 软键盘 -->
-    <com.xinghui.tv.view.TvSoftKeyboard
-        android:id="@+id/keyboard"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:visibility="gone" />
-
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/searchList"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:clipToPadding="false" />
-
-</LinearLayout>
+</FrameLayout>
