@@ -30,7 +30,11 @@ import java.net.URLDecoder
  *   /file   —— file:// 与 clan:// 的落点，缺它播放器与图片加载器全是 404
  *   兜底    —— local:// 与 assets:// 的落点，读 APK 内资源
  *
- * 其余（/action /media /parse /go /tvbus /device）属遥控投屏类功能，本项目不做，直接拒绝。
+ * /action 只做三条（原版 /action 还有 file/cast/sync/refresh/transmit 等设备间同步，
+ * 本项目不做）：
+ *   do=setting —— 手机网页改订阅地址 / UA
+ *   do=search  —— 手机网页搜片，电视端开搜索页
+ *   do=push    —— 手机网页推链接，电视端直接播放
  *
  * 注意：本类不是 NanoHTTPD 子类，所有静态方法/嵌套类型都必须显式带 NanoHTTPD 前缀，
  * 否则 Kotlin 编译报 Unresolved reference。
@@ -39,6 +43,16 @@ object ProxyServer {
 
     private const val TAG = "XingHuiTV"
     private const val PORT = 9978
+
+    /**
+     * 原版 `Sniffer.AI_PUSH`：
+     *   Pattern.compile("(http|https|rtmp|rtsp|smb|ftp|thunder|magnet|ed2k|mitv|tvbox-xg|jianpian|video):[^\\s]+")
+     * 手机分享出来的通常是一段文案带链接，得先把链接抠出来再送播放器。
+     */
+    private val AI_PUSH = Regex(
+        "(http|https|rtmp|rtsp|smb|ftp|thunder|magnet|ed2k|mitv|tvbox-xg|jianpian|video):\\S+",
+        setOf(RegexOption.MULTILINE)
+    )
 
     @Volatile
     private var http: NanoHTTPD? = null
@@ -88,8 +102,8 @@ object ProxyServer {
     /**
      * 对齐原版 server/process/Action.java 的 doResponse：
      *   do=setting  {text, name}  —— 写配置。name 为空时原版写的是点播订阅地址
-     *   do=push     {url}         —— 推送到电视播放（本工程暂无投屏播放链路，只回 OK）
-     *   do=search   {word}        —— 电视端搜索（同上，只回 OK）
+     *   do=push     {url}         —— 推送到电视播放
+     *   do=search   {word}        —— 电视端搜索
      */
     private fun handleAction(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         val p = HashMap<String, String>()
@@ -101,7 +115,10 @@ object ProxyServer {
         val act = p["do"].orEmpty().trim()
         val text = p["text"].orEmpty().trim()
         val name = p["name"].orEmpty().trim()
-        Log.i(TAG, "[proxy.action] do=$act name=$name text=${text.take(80)}")
+        // 原版 Action.onPush 读的是 url 参数（手机网页 js 里也是 push_url → do=push&url=），
+        // 之前这里只读了 text，所以推送分支拿不到地址。text 作为兜底。
+        val pushUrl = p["url"].orEmpty().trim().ifBlank { text }
+        Log.i(TAG, "[proxy.action] do=$act name=$name text=${text.take(80)} url=${pushUrl.take(80)}")
         val ctx = appCtx
         when (act) {
             "setting" -> if (ctx != null && text.isNotBlank()) {
@@ -115,7 +132,6 @@ object ProxyServer {
                 }
             }
             // do=search：手机网页搜片 → 电视直接打开搜索页并开搜。
-            // do=push 仍留空（投屏播放链路未做，见文件头说明）。
             "search" -> if (ctx != null && text.isNotBlank()) {
                 runCatching {
                     ctx.startActivity(
@@ -125,9 +141,44 @@ object ProxyServer {
                     )
                 }.onFailure { Log.e(TAG, "[proxy.action] 启动搜索失败", it) }
             }
-            "push" -> Unit
+            // do=push：对齐原版 Action.onPush → ServerEvent.push → VideoActivity.push：
+            //   1) Sniffer.getUrl 从分享文案里抠真实地址；
+            //   2) 直接进播放页（原版 start(..., clear=true)，对应 CLEAR_TOP|NEW_TASK）。
+            // magnet / thunder / ed2k 由 PlayActivity.playUrl 内部转 ThunderPlay，这里不区分。
+            "push" -> if (ctx != null && pushUrl.isNotBlank()) {
+                val real = extractPushUrl(pushUrl)
+                runCatching {
+                    ctx.startActivity(
+                        android.content.Intent(ctx, PlayActivity::class.java)
+                            .putExtra("direct_url", real)
+                            // 原版 start(activity, url) → start(activity, "push_agent", url, url, clear)
+                            // id 与 name 都是 url 本身；id 一起带上，历史记录才能被再次点开回放
+                            .putExtra("vod_id", real)
+                            .putExtra("vod_name", real)
+                            // 标记「这是手机推送」：网页地址在播放页里转嗅探 WebView，直链照常直接播
+                            .putExtra("push_mode", true)
+                            .addFlags(
+                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            )
+                    )
+                    Log.i(TAG, "[proxy.action] push → ${real.take(120)}")
+                }.onFailure { Log.e(TAG, "[proxy.action] 推送启动播放页失败", it) }
+            }
         }
         return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK")
+    }
+
+    /**
+     * 原版 Sniffer.getUrl：
+     *   含 `$`（规则/配置串）→ 原样返回；
+     *   否则按 AI_PUSH 抠第一个链接；
+     *   抠不到就原样返回（让播放页自己失败，而不是这里吞掉）。
+     */
+    private fun extractPushUrl(text: String): String {
+        val t = text.trim()
+        if (t.contains("$")) return t
+        return AI_PUSH.find(t)?.value ?: t
     }
 
     // ───────────────────────── /proxy ─────────────────────────

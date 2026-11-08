@@ -41,6 +41,8 @@ class PlayActivity : Activity() {
     private var flag = ""
     private var epUrl = ""
     private var directUrl = ""
+    private var pushMode = false          // 手机推送进来（网页地址要走嗅探）
+    private val MEDIA_SUFFIXES = listOf(".m3u8", ".mp4", ".flv", ".mkv", ".ts", ".mp3", ".m4a", ".aac", ".mpd")
     private var siteKey = ""
 
     private var vodLines: List<PlayLine> = emptyList()
@@ -84,6 +86,10 @@ class PlayActivity : Activity() {
         flag = intent.getStringExtra("flag") ?: ""
         epUrl = intent.getStringExtra("ep_url") ?: ""
         directUrl = intent.getStringExtra("direct_url") ?: ""
+        pushMode = intent.getBooleanExtra("push_mode", false)
+        // 直播频道与手机推送写入历史时，vod_id 存的就是播放地址本身（原版同样如此）。
+        // 从历史点回来时不会有 direct_url，这里补认一次，否则会去站点详情接口查一个 URL，必然失败。
+        if (directUrl.isBlank() && (looksLikeMedia(vodId) || ThunderPlay.match(vodId))) directUrl = vodId
         siteKey = SubscriptionStore(this).currentKey() ?: ""
 
         playerView = findViewById<PlayerView>(R.id.playView)
@@ -152,8 +158,22 @@ class PlayActivity : Activity() {
 
         // 直播直链：直接播放；影片：先拉详情拿线路（供选集面板），再解析播放
         if (directUrl.isNotBlank()) {
-            playUrl(directUrl)
-            recordHistory()
+            // 手机推送（push_mode）有两种来源：
+            //   1) 直链 m3u8/mp4/磁力/迅雷 —— 直接进播放器；
+            //   2) 网页分享地址 —— 交给嗅探 WebView 抓真实流地址，等价原版
+            //      VideoActivity.push → 播放失败后转解析/嗅探的路径。
+            // 直播直链（push_mode=false）保持原样，不受影响。
+            // 只有 http/https 的「页面地址」才进嗅探；rtmp/rtsp/smb/ftp 这类协议直接交播放器，
+            // 否则 WebView 会去加载一个它根本不支持的 scheme。认不出的 scheme 同样不进 WebView。
+            val scheme = directUrl.substringBefore(':', "").lowercase()
+            val pageLike = scheme == "http" || scheme == "https"
+            if (pushMode && pageLike && !ThunderPlay.match(directUrl) && !looksLikeMedia(directUrl)) {
+                startSniff(directUrl, emptyMap())
+            } else {
+                playUrl(directUrl)
+            }
+            // 历史由上面的守卫统一写一次：push / 直播 / 历史回放三条来源都带了 vod_id，
+            // 这里再写一次会是同一 key 的重复入库（addHistory 虽幂等，但没必要双写）。
         } else {
             Thread { fetchAndPlay(vodId, flag, epUrl) }.start()
         }
@@ -486,7 +506,11 @@ class PlayActivity : Activity() {
             onFound = { u, h ->
                 runOnUiThread {
                     val merged = if (hdrs.isEmpty()) h else hdrs + h
-                    playUrl(toPlayableUrl(u) ?: u, merged)
+                    val playable = toPlayableUrl(u) ?: u
+                    // 推送进来的网页地址本身不可播：抓到真流后把 vod_id 换成流地址，
+                    // 历史里这条记录才能被再次点开回放（否则点回去又是那个网页地址）。
+                    if (pushMode) vodId = playable
+                    playUrl(playable, merged)
                     updateQualityBtn()
                     recordHistory()
                 }
@@ -520,9 +544,10 @@ class PlayActivity : Activity() {
         // 之前只用后缀判断，导致火山/抖音/农民/七新这类白名单地址被误判成解析页，
         // 白白弹一次全屏 WebView。这里把规则判定提到前面，后缀兜底。
         if (Sniffer.isVideoFormat(u)) return true
-        val lower = u.lowercase()
-        return lower.contains(".m3u8") || lower.contains(".mp4") || lower.contains(".flv") ||
-            lower.contains(".mkv") || lower.contains(".ts") || lower.contains(".mp3")
+        // 后缀兜底必须锚定在路径结尾：原版用 contains 时，`/play/x.ts.html?u=` 这种会被误判成
+        // 媒体直链，进而跳过嗅探直接送播放器，结果必然黑屏。带 token 的地址先砍掉 query。
+        val lower = u.lowercase().substringBefore('?').substringBefore('#')
+        return MEDIA_SUFFIXES.any { lower.endsWith(it) }
     }
 
     /**
