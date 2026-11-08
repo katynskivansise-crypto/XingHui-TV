@@ -1378,7 +1378,7 @@ class PlayActivity : Activity() {
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
             "mpvView=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
-            "controlBar=${controlBar?.visibility} pos=${mpvPos}ms dur=${mpvDur}ms " +
+            "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${mpvDur}ms " +
             "url=${activeUrl.take(60)}"
     }
 
@@ -1405,6 +1405,8 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.btnNext)?.requestFocus()
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
+        // 控制条一出现，mpv 侧就做一次渲染自检：vo 掉了就地复位，不等系统重建 surface
+        if (isMpvMode()) runCatching { mpv?.recoverRendering() }
     }
 
     /** 收起控制条（原版 hideControl(true)：控制条与顶部片名一起收，5 秒 INTERVAL_HIDE 自动触发） */
@@ -1412,6 +1414,8 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        // 控制条收起同样可能带掉 vo，这里也补一次自检
+        if (isMpvMode()) runCatching { mpv?.recoverRendering() }
     }
 
     /** 菜单键：原版默认 fullscreen_menu_key=0 → onToggle（控制条开/关），不是直接弹选集 */
@@ -1794,6 +1798,13 @@ class PlayActivity : Activity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             applyImmersive()
+            // 关掉选集弹窗、从系统框回来时，mpv 的 vo 可能已经被窗口变化带掉；
+            // 等布局稳定后再自检一次，避免黑屏只剩声音
+            if (isMpvMode()) {
+                uiHandler.postDelayed({
+                    runCatching { mpv?.recoverRendering() }
+                }, 300)
+            }
             // 尺寸自检：若 内容区 < 屏幕，说明窗口仍未真正铺满（白边就是壁纸从这个缝里露出来的）
             runCatching {
                 val dm = resources.displayMetrics

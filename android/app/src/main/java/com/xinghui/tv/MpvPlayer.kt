@@ -51,6 +51,10 @@ class MpvPlayer(
 
     private var inited = false
     private var surfaceReady = false
+    /** 当前 attach 到 mpv 的那块 surface，渲染自检复位时要重新用上它 */
+    private var attachedSurface: android.view.Surface? = null
+    private var lastSurfaceW = 0
+    private var lastSurfaceH = 0
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
@@ -260,6 +264,7 @@ class MpvPlayer(
         if (!inited) initWithOptions()
         // 初始化失败时绝不能继续调 native，否则 libmpv 内部空指针会直接 SEGV
         if (!inited) return
+        attachedSurface = holder.surface
         runCatching {
             `is`.xyz.mpv.MPVLib.attachSurface(holder.surface)
             // 照官方 BaseMPVView.surfaceCreated 的三步：attach → force-window=yes → 重开 vo。
@@ -302,6 +307,8 @@ class MpvPlayer(
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        lastSurfaceW = width
+        lastSurfaceH = height
         MpvDebug.log("[mpv] surfaceChanged ${width}x${height}")
         if (!inited) return
         // mpv 要知道 surface 的实际尺寸才能建对渲染目标；不报的话在某些设备上会渲染成 0 尺寸
@@ -313,6 +320,7 @@ class MpvPlayer(
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         MpvDebug.log("[mpv] surfaceDestroyed inited=$inited")
         surfaceReady = false
+        attachedSurface = null
         // release() 之后 SurfaceView 还会回调一次，此时 handle 已销毁，再调 native 会崩
         if (!inited) return
         // 照官方 BaseMPVView.surfaceDestroyed：先关视频输出、关 force-window，再 detach。
@@ -505,6 +513,54 @@ class MpvPlayer(
         }
         pendingResume = false
         applyPause(false)
+    }
+
+    /**
+     * 调试用：mpv 当前的视频输出后端。
+     * 空串/null = vo 没起来（画面黑但声音照走就是这种）；"gpu" = 渲染后端在。
+     */
+    fun voNow(): String {
+        if (!inited) return "未初始化"
+        return runCatching {
+            `is`.xyz.mpv.MPVLib.getPropertyString("current-vo") ?: "空"
+        }.getOrElse { "读取失败" }
+    }
+
+    /**
+     * 渲染自检 + 复位。
+     *
+     * 黑屏有声时 current-vo 是空串：surface 还在、mpv 也在播（声音照走），
+     * 但渲染后端没挂到这块 surface 上，于是没有一帧输出。
+     * 这里不依赖系统重建 surface，直接 detach 再 attach 一遍、把 vo 从 null 拉回 gpu。
+     *
+     * @return true 表示确实做过复位
+     */
+    fun recoverRendering(): Boolean {
+        if (!inited || !surfaceReady) return false
+        val surface = attachedSurface ?: return false
+        if (!surface.isValid) return false
+        val vo = voNow()
+        if (vo != "空" && vo != "未初始化" && vo != "读取失败" && vo.isNotBlank()) {
+            MpvDebug.log("[mpv] 渲染自检 vo=$vo（正常，不处理）")
+            return false
+        }
+        MpvDebug.log("[mpv] 渲染自检 vo=$vo → 复位")
+        runCatching {
+            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "null")
+            `is`.xyz.mpv.MPVLib.detachSurface()
+        }
+        runCatching {
+            `is`.xyz.mpv.MPVLib.attachSurface(surface)
+            `is`.xyz.mpv.MPVLib.setOptionString("force-window", "yes")
+            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "gpu")
+            if (lastSurfaceW > 0 && lastSurfaceH > 0) {
+                `is`.xyz.mpv.MPVLib.setPropertyString(
+                    "android-surface-size", "${lastSurfaceW}x${lastSurfaceH}"
+                )
+            }
+        }
+        MpvDebug.log("[mpv] vo 已复位 gpu")
+        return true
     }
 
     /** 调试用：surface 是否还挂着（控制条呼出后黑屏要先看这个） */
