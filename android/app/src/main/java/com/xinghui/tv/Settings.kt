@@ -42,10 +42,6 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_UA, "") ?: ""
         set(value) = prefs.edit().putString(KEY_UA, value).apply()
 
-    /** 代理地址 scheme://user:pass@host:port（对齐原项目代理设置），空=关闭 */
-    var proxy: String
-        get() = prefs.getString(KEY_PROXY, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_PROXY, value).apply()
 
     /** 直播 EPG 源（XMLTV 地址），空=不显示节目单（对齐原项目 EPG 数据源） */
     var epgUrl: String
@@ -223,7 +219,6 @@ class Settings(context: Context) {
         private const val KEY_POSTER = "show_poster"
         private const val KEY_HOME_HISTORY = "home_history"
         private const val KEY_UA = "ua"
-        private const val KEY_PROXY = "proxy"
         private const val KEY_EPG_URL = "epg_url"
         private const val KEY_LIVE_URL = "live_url"
         private const val KEY_UI_SIZE = "ui_size"

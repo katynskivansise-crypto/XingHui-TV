@@ -40,7 +40,6 @@ class SettingsPlayerActivity : Activity() {
         refreshScale()
         refreshBuffer()
         refreshUa()
-        refreshProxy()
         refreshMpvParams()
         // 必须在这里就应用一次分组：XML 里 exoGroup / mpvGroup 默认都是 VISIBLE，
         // 只在点「播放核心」时才切分组的话，第一次进页面两组会同时显示，
@@ -93,8 +92,6 @@ class SettingsPlayerActivity : Activity() {
             settings.exoBufferSec = steps[(cur + 1) % steps.size]
             refreshBuffer()
         }
-        // 代理（原版中心页 Proxy 项，这里保留以免能力丢失）
-        findViewById<View>(R.id.plyProxy)?.setOnClickListener { editProxy() }
         // User-Agent
         findViewById<View>(R.id.plyUa)?.setOnClickListener { editUa() }
     }
@@ -236,34 +233,6 @@ class SettingsPlayerActivity : Activity() {
             settings.mpvTscale = cycleAlgo(settings.mpvTscale, ALGO_TSCALE)
             refreshAlgo()
         }
-    }
-
-    private fun refreshProxy() {
-        findViewById<TextView>(R.id.valPlyProxy)?.text =
-            if (settings.proxy.isBlank()) "关闭" else "已启用"
-    }
-
-    private fun editProxy() {
-        val input = android.widget.EditText(this).apply {
-            setText(settings.proxy)
-            setSingleLine()
-            setHint("http://user:pass@host:port")
-        }
-        AlertDialog.Builder(this)
-            .setTitle("代理")
-            .setMessage("留空保存即关闭代理")
-            .setView(input)
-            .setPositiveButton("保存") { _, _ ->
-                settings.proxy = input.text.toString().trim()
-                refreshProxy()
-                android.widget.Toast.makeText(
-                    this,
-                    if (settings.proxy.isBlank()) "代理已关闭" else "代理已启用",
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
-            }
-            .setNegativeButton("取消", null)
-            .show()
     }
 
     private fun show(id: Int, options: Array<String>, index: Int) {

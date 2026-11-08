@@ -4,7 +4,7 @@
      行背景 selector_item；标签 18sp 白 weight 0.3、值 18sp 白 weight 0.7 gravity=end。
 
      与原版的不同：EXO 与 mpv 支持的参数不一样，所以拆成两组（exoGroup / mpvGroup），
-     进页面时按当前内核只显示对应那一组。共用项（缩放比例、字幕样式、线路播放、代理、UA）始终显示。
+     进页面时按当前内核只显示对应那一组。共用项（缩放比例、字幕样式、线路播放、UA）始终显示。
      分组依据见官方 mpv-android MPVView.initOptions()：mpv 侧是 hwdec / profile / deband /
      interpolation / fastdecode / cache，EXO 侧是 RenderersFactory / resizeMode / MediaSource。 -->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
@@ -632,38 +632,7 @@
             android:layout_marginTop="16dp"
             android:orientation="horizontal">
 
-            <LinearLayout
-                android:id="@+id/plyProxy"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
 
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="代理"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPlyProxy"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="关闭" />
-            </LinearLayout>
             <LinearLayout
                 android:id="@+id/plyUa"
                 android:layout_width="0dp"

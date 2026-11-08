@@ -223,7 +223,6 @@ class MainActivity : Activity() {
 
             // 全局 UA / 代理（对齐原项目设置，注入所有 drpy 源）
             val ua = Settings(this).ua
-            val proxy = Settings(this).proxy
 
             // 兜底：旧版界面导入的订阅缺 jar/subscribeUrl（表现为 csp 站空白、drpy 站注册失败），
             // 启动时自动用默认订阅补齐，无需用户重导
@@ -284,7 +283,7 @@ class MainActivity : Activity() {
                 return@Thread
             }
             val homeKey = current.key
-            if (registerSite(current, current.key, dir, ua, proxy)) {
+            if (registerSite(current, current.key, dir, ua)) {
                 registered.add(homeKey)
             } else {
                 Log.e("XingHuiTV", "[init] 站点注册失败 key=$homeKey，继续直连尝试（csp 站无需注册）")
@@ -307,7 +306,7 @@ class MainActivity : Activity() {
             for (site in store.sites()) {
                 if (site.key == homeKey || registered.contains(site.key)) continue
                 if (site.isDrpy() || site.ext.startsWith("http")) continue
-                if (registerSite(site, site.key, dir, ua, proxy)) registered.add(site.key)
+                if (registerSite(site, site.key, dir, ua)) registered.add(site.key)
             }
 
             // 4) 网络自检：用与 spider 相同的 compat 客户端探测各网盘「取 token」接口。
@@ -333,12 +332,11 @@ class MainActivity : Activity() {
     }
 
     /** 注册单个站点到引擎；返回是否成功。不改变全局当前站 key。 */
-    private fun registerSite(site: Site, key: String, dir: String, ua: String, proxy: String): Boolean {
+    private fun registerSite(site: Site, key: String, dir: String, ua: String): Boolean {
         // csp_ 源是 spider.jar 内 Java 类，由壳侧 CspLoader 执行，不注册引擎
         if (site.isCsp()) return true
         val params = JSONObject().put("dir", dir)
         if (ua.isNotBlank()) params.put("ua", ua)
-        if (proxy.isNotBlank()) params.put("proxy", proxy)
         return try {
             when {
                 // JS 规则源（对齐原项目 BaseLoader：api 含 .js 即 js 源）。
@@ -502,7 +500,7 @@ class MainActivity : Activity() {
                 val dir = filesDir.absolutePath
                 // csp_ 源由 CspLoader 执行（实例已缓存），其余站重新注册该站即可
                 if (!site.isCsp()) {
-                    registerSite(site, site.key, dir, Settings(this).ua, Settings(this).proxy)
+                    registerSite(site, site.key, dir, Settings(this).ua)
                 }
                 val home = if (site.isCsp()) {
                     CspLoader.home(this, site)

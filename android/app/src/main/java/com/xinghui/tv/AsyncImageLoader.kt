@@ -213,22 +213,20 @@ object AsyncImageLoader {
      * 取图字节。顺序经过调整：
      *  - 没配代理时先走系统栈直连（等价原版 okhttp 那条路径，实测能出图），
      *    失败再交给引擎——避免引擎侧的长超时把线程池全部占死。
-     *  - 配了代理时反过来：代理只在引擎侧生效，先走引擎。
+     *  - 代理已从壳里摘掉（路由器统一接管），不再有「先走引擎」的分支。
      * 注意：内嵌 header（@Referer= 等）只有直连能带，proxy_image 不支持 header 参数，
-     * 所以带 header 的图直连优先，无论是否配代理。
+     * 注意：内嵌 header（@Referer= 等）只有直连能带，proxy_image 不支持 header 参数。
      */
     private fun fetch(context: Context, url: String, extraHeaders: Map<String, String>): ByteArray? {
         val s = Settings(context)
-        val hasProxy = s.proxy.isNotBlank()
 
-        if (!hasProxy || extraHeaders.isNotEmpty()) {
-            directFetch(s, url, extraHeaders)?.let { return it }
-        }
+        // 代理已从壳里摘掉（路由器侧统一接管流量），所以远端取图只剩「直连」与「引擎」两条路：
+        // 一律先直连，直连拿不到再交给引擎兜底（引擎侧有自己的超时与重试）。
+        directFetch(s, url, extraHeaders)?.let { return it }
 
         val params = JSONObject()
             .put("url", url)
             .put("ua", s.ua)
-            .put("proxy", s.proxy)
             .toString()
         val b64 = Engine.execute("proxy_image", "", params)
         if (b64.isNotBlank()) {
@@ -239,7 +237,6 @@ object AsyncImageLoader {
             Log.e("XingHuiTV", "[image] 引擎取图返回空 url=$url")
         }
 
-        if (hasProxy) directFetch(s, url, extraHeaders)?.let { return it }
         return null
     }
 

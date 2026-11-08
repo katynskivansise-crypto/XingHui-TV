@@ -112,6 +112,12 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.setOptionString("opengl-es", "yes")
             // ao 不显式指定时可能一个音频输出都找不到，结果是没声音或整条播放失败
             `is`.xyz.mpv.MPVLib.setOptionString("ao", "audiotrack,opensles")
+            // 官方 MPVView.kt:97 无条件设。不设时安卓会把这条音频流当成普通/通知类，
+            // 表现为遥控器音量键调的是铃声而不是播放音量、HDMI/蓝牙音频路由也可能不对。
+            `is`.xyz.mpv.MPVLib.setOptionString("audio-set-media-role", "yes")
+            // 官方 MPVView.kt:101 无条件设：蓝光盘里同一部片的多个 edition 合并成单轨，
+            // 否则遇到这类源会多出一条轨道、选轨界面里看着莫名其妙。点播源基本遇不到，设了无害。
+            `is`.xyz.mpv.MPVLib.setOptionString("flatten-editions", "yes")
             // 只让这些编码走硬解，其余走软解，避免 mediacodec 对不认识的编码直接报错
             `is`.xyz.mpv.MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
             // 硬解开关是 mpv 自己的偏好（官方 key hardware_decoding），和 EXO 的软/硬解各存各的
@@ -130,10 +136,13 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.setOptionString("ytdl", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("cache", "yes")
             val cacheMb = if (mpvSet.mpvCacheMb in 32..64) mpvSet.mpvCacheMb else 64
-            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-bytes", "${cacheMb}MiB")
+            // 用纯字节数而不是 "64MiB" 后缀：官方 MPVView.kt:104 就是 ${cacheMegs * 1024 * 1024}，
+            // 后缀写法依赖 mpv 的单位解析，一旦不被识别会静默忽略整条选项、缓存其实没生效。
+            val cacheBytes = cacheMb * 1024 * 1024
+            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-bytes", "$cacheBytes")
             // 官方 MPVView.kt:104-105 是 max-bytes 与 max-back-bytes 一起设的。
             // 只设前向缓存时，往回拖/倒退播放会重新走网络，表现为卡一下。
-            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-back-bytes", "${cacheMb}MiB")
+            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
             // 官方 MPVView.kt:114：播放位置由宿主自己管（我们记在 HistoryStore），
             // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
             `is`.xyz.mpv.MPVLib.setOptionString("save-position-on-quit", "no")
