@@ -105,10 +105,17 @@ class DetailActivity : Activity() {
                 else
                     androidx.media3.exoplayer.DefaultRenderersFactory(this@DetailActivity)
                 setRenderersFactory(rf.setEnableDecoderFallback(true))
-                val bufMs = Settings(this@DetailActivity).exoBufferSec.coerceIn(1, 15) * 1000
+                // 参数顺序 min / max / 起播门槛 / 重缓冲门槛。
+                // media3 硬校验 min 必须 >= 后两个，写反了构造就抛 IllegalArgumentException。
+                val minBufMs = Settings(this@DetailActivity).exoBufferSec.coerceIn(1, 15) * 1000
                 setLoadControl(
                     androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                        .setBufferDurationsMs(bufMs, bufMs, bufMs * 2, 50_000)
+                        .setBufferDurationsMs(
+                            minBufMs,
+                            minBufMs * 2,
+                            minOf(minBufMs, 2500),
+                            minOf(minBufMs, 5000)
+                        )
                         .build()
                 )
                 val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@DetailActivity)

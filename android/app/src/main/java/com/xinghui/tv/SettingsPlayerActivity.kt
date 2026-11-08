@@ -146,6 +146,27 @@ class SettingsPlayerActivity : Activity() {
         findViewById<View>(R.id.mpvGroup)?.visibility = if (mpv) View.VISIBLE else View.GONE
     }
 
+    // 缩放算法档位。第一档「默认」= 不下发给 mpv（对应官方「偏好为空则跳过」的语义），
+    // 实际走 libmpv 编译默认的 bilinear。后面按 GPU 开销从轻到重排。
+    // ewa_lanczos 系列在 T1（Mali-T820 MP3）上做 4K→1080p 缩放大概率掉帧，放最后让用户自己决定。
+    private val ALGO_SCALE = arrayOf("默认", "bilinear", "bicubic", "spline36", "lanczos", "ewa_lanczos")
+    private val ALGO_TSCALE = arrayOf("默认", "bilinear", "bicubic", "oversample")
+
+    private fun algoLabel(v: String) = if (v.isBlank()) "默认" else v
+
+    /** 在「默认 / 各算法」之间循环；循环回「默认」时存空串，恢复成不下发 */
+    private fun cycleAlgo(cur: String, arr: Array<String>): String {
+        val i = arr.indexOf(if (cur.isBlank()) "默认" else cur).let { if (it < 0) 0 else it }
+        val next = arr[(i + 1) % arr.size]
+        return if (next == "默认") "" else next
+    }
+
+    private fun refreshAlgo() {
+        findViewById<TextView>(R.id.valPlyScaleAlgo)?.text = algoLabel(settings.mpvScale)
+        findViewById<TextView>(R.id.valPlyDscaleAlgo)?.text = algoLabel(settings.mpvDscale)
+        findViewById<TextView>(R.id.valPlyTscaleAlgo)?.text = algoLabel(settings.mpvTscale)
+    }
+
     /** mpv 侧全部参数：绑定点击 + 回显。每一项都来自官方 MPVView.initOptions() */
     private fun refreshMpvParams() {
         val DEBAND = arrayOf("关闭", "gradfun", "gpu")
@@ -159,6 +180,7 @@ class SettingsPlayerActivity : Activity() {
         findViewById<TextView>(R.id.valPlyFastDecode)?.text =
             if (settings.mpvFastDecode) "开启" else "关闭"
         findViewById<TextView>(R.id.valPlyCache)?.text = "${settings.mpvCacheMb} MB"
+        refreshAlgo()
 
         // 硬件解码（官方 key hardware_decoding：hwdec=mediacodec / no）
         findViewById<View>(R.id.plyHwdec)?.setOnClickListener {
@@ -194,6 +216,21 @@ class SettingsPlayerActivity : Activity() {
         findViewById<View>(R.id.plyCache)?.setOnClickListener {
             settings.mpvCacheMb = if (settings.mpvCacheMb >= 64) 32 else 64
             findViewById<TextView>(R.id.valPlyCache)?.text = "${settings.mpvCacheMb} MB"
+        }
+
+        // 缩放算法三件套（官方 video_scale / video_downscale / video_tscale）。
+        // 1080p 片源在 1080p 输出上不触发缩放，这三项只对 4K→1080p、720p→1080p 这类场景有意义。
+        findViewById<View>(R.id.plyScaleAlgo)?.setOnClickListener {
+            settings.mpvScale = cycleAlgo(settings.mpvScale, ALGO_SCALE)
+            refreshAlgo()
+        }
+        findViewById<View>(R.id.plyDscaleAlgo)?.setOnClickListener {
+            settings.mpvDscale = cycleAlgo(settings.mpvDscale, ALGO_SCALE)
+            refreshAlgo()
+        }
+        findViewById<View>(R.id.plyTscaleAlgo)?.setOnClickListener {
+            settings.mpvTscale = cycleAlgo(settings.mpvTscale, ALGO_TSCALE)
+            refreshAlgo()
         }
     }
 

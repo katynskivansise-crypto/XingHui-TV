@@ -146,6 +146,19 @@ class MpvPlayer(
             if (mpvSet.mpvFastProfile) {
                 `is`.xyz.mpv.MPVLib.setOptionString("profile", "fast")
             }
+            // 缩放算法（官方 MPVView.kt:48-59 的 video_scale / video_downscale / video_tscale）。
+            // 官方只在偏好非空时下发，空就交给 mpv 默认；这里保持同样的语义。
+            // 注意：1080p 片源在 1080p 输出上不触发缩放，这三个值对那种场景完全没作用；
+            // 真正生效的是 4K→1080p（dscale）和 720p→1080p（scale）。
+            mpvSet.mpvScale.takeIf { it.isNotBlank() }?.let {
+                `is`.xyz.mpv.MPVLib.setOptionString("scale", it)
+            }
+            mpvSet.mpvDscale.takeIf { it.isNotBlank() }?.let {
+                `is`.xyz.mpv.MPVLib.setOptionString("dscale", it)
+            }
+            mpvSet.mpvTscale.takeIf { it.isNotBlank() }?.let {
+                `is`.xyz.mpv.MPVLib.setOptionString("tscale", it)
+            }
             // 去色带（官方 video_debanding）：gradfun 走 vf，gpu 走 deband 滤镜
             when (mpvSet.mpvDeband) {
                 1 -> `is`.xyz.mpv.MPVLib.setOptionString("vf", "gradfun=radius=12")

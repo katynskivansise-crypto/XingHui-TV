@@ -93,6 +93,26 @@ class Settings(context: Context) {
         get() = prefs.getInt("exo_buffer", 5).coerceIn(1, 15)
         set(value) = prefs.edit().putInt("exo_buffer", value.coerceIn(1, 15)).apply()
 
+    // ==== mpv 缩放算法（官方 MPVView.kt:48-59 的 video_scale / video_downscale / video_tscale）====
+    // 官方做法是「偏好里取字符串，空则不下发」，空 = 走 mpv 编译默认（bilinear）。
+    // 我们照抄这个语义：默认空串，只有用户选过才下发。
+    // 实测 libmpv.so 里硬编码 scale=bilinear / dscale=bilinear，所以默认档就是 bilinear。
+
+    /** 放大算法（官方 video_scale → scale）。空 = 不下发，走 bilinear */
+    var mpvScale: String
+        get() = prefs.getString("mpv_scale", "") ?: ""
+        set(value) = prefs.edit().putString("mpv_scale", value).apply()
+
+    /** 缩小算法（官方 video_downscale → dscale）。空 = 不下发，走 bilinear */
+    var mpvDscale: String
+        get() = prefs.getString("mpv_dscale", "") ?: ""
+        set(value) = prefs.edit().putString("mpv_dscale", value).apply()
+
+    /** 时域缩放算法（官方 video_tscale → tscale）。空 = 不下发，走 bilinear */
+    var mpvTscale: String
+        get() = prefs.getString("mpv_tscale", "") ?: ""
+        set(value) = prefs.edit().putString("mpv_tscale", value).apply()
+
     /**
      * 字幕样式（对应原版 select_caption：Default / System）。
      * 0=预设：白字 + 黑描边（原版 CaptionStyleCompat(WHITE, TRANSPARENT, TRANSPARENT, EDGE_TYPE_OUTLINE, BLACK, null)）

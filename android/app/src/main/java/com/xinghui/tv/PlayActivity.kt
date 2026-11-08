@@ -832,10 +832,21 @@ class PlayActivity : Activity() {
      * min=13MB / 起播=2.5s / 重缓冲=5s / 上限=50s 的默认档。
      * 这里按秒数换算：起播前攒 N 秒，卡顿重缓冲后等 2N 秒，上限仍保持 50 秒。
      */
+    /**
+     * 签名是 setBufferDurationsMs(minBufferMs, maxBufferMs, bufferForPlaybackMs, bufferForPlaybackAfterRebufferMs)。
+     * media3 有硬校验：minBufferMs 必须 >= bufferForPlaybackMs，也必须 >= bufferForPlaybackAfterRebufferMs，
+     * 否则构造时直接抛 IllegalArgumentException，Activity 起不来。
+     * 之前写成 (ms, ms, ms*2, 50000)：起播门槛和重缓冲门槛都比 min 大，必崩。
+     */
     private fun buildLoadControl(): androidx.media3.exoplayer.LoadControl {
-        val ms = Settings(this).exoBufferSec.coerceIn(1, 15) * 1000
+        val minMs = Settings(this).exoBufferSec.coerceIn(1, 15) * 1000
         return androidx.media3.exoplayer.DefaultLoadControl.Builder()
-            .setBufferDurationsMs(ms, ms, ms * 2, 50_000)
+            .setBufferDurationsMs(
+                minMs,                             // 至少要缓冲到这么多才认为够
+                minMs * 2,                         // 缓冲上限，给两倍
+                minOf(minMs, 2500),                // 起播门槛：不能超过 min
+                minOf(minMs, 5000)                 // 重缓冲门槛：不能超过 min
+            )
             .build()
     }
 
