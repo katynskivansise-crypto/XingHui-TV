@@ -792,16 +792,18 @@ class PlayActivity : Activity() {
         builder.setRenderersFactory(buildRenderersFactory())
         builder.setTrackSelector(buildTrackSelector())
         builder.setLoadControl(buildLoadControl())
-        if (headers.isNotEmpty()) {
-            // 网络超时也真正接上：之前 networkTimeoutSec 只在设置页里改，没有任何一处读它。
-            val timeoutMs = Settings(this).networkTimeoutSec.coerceIn(5, 120) * 1000
-            val dataSourceFactory =
-                DefaultHttpDataSource.Factory()
-                    .setDefaultRequestProperties(headers)
-                    .setConnectTimeoutMs(timeoutMs)
-                    .setReadTimeoutMs(timeoutMs)
-            builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
-        }
+        // 工厂必须无条件设：之前写成 `if (headers.isNotEmpty())`，
+        // 没有请求头的源就拿不到超时、拿不到跨协议重定向，设了等于没设。
+        val timeoutMs = Settings(this).networkTimeoutSec.coerceIn(5, 120) * 1000
+        val dataSourceFactory = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(timeoutMs)
+            .setReadTimeoutMs(timeoutMs)
+            // 允许 302 跳到另一个协议。默认关着时，http→https 这种重定向会直接抛
+            // HttpDataSourceException，表现为某些源「起播就报错」而别的源正常。
+            // Manifest 已声明 usesCleartextTraffic="true"，https→http 也不会被系统拦。
+            .setAllowCrossProtocolRedirects(true)
+        if (headers.isNotEmpty()) dataSourceFactory.setDefaultRequestProperties(headers)
+        builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
         player = builder.build().also { playerView?.player = it }
         applyCaptionStyle()
         attachPlayerListeners()

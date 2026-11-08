@@ -119,6 +119,13 @@ class DetailActivity : Activity() {
                         .setTunnelingEnabled(Settings(this@DetailActivity).tunnelMode == 1)
                 )
                 setTrackSelector(ts)
+                // 内嵌播放器之前是裸 build()：没有超时、没有跨协议重定向。
+                val timeoutMs = Settings(this@DetailActivity).networkTimeoutSec.coerceIn(5, 120) * 1000
+                val http = DefaultHttpDataSource.Factory()
+                    .setConnectTimeoutMs(timeoutMs)
+                    .setReadTimeoutMs(timeoutMs)
+                    .setAllowCrossProtocolRedirects(true)
+                setMediaSourceFactory(DefaultMediaSourceFactory(http))
             }
             .build().also { inlineView.player = it }
         applyCaptionStyle()
