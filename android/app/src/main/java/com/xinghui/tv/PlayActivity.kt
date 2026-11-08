@@ -96,6 +96,7 @@ class PlayActivity : Activity() {
         // 切回 EXO 时 rebuildPlayer() 会补建，所以这里可以省。
         if (!isMpvMode()) {
             player = ExoPlayer.Builder(this).build().also { playerView?.player = it }
+            applyCaptionStyle()
             attachPlayerListeners()
         }
         findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
@@ -788,16 +789,71 @@ class PlayActivity : Activity() {
         player?.release()
         activeHeaders = headers
         val builder = ExoPlayer.Builder(this)
-        // 解码方式：0=软解（过滤硬件 codec），1=硬解（默认）—— 对齐原版 Setting.getDecode
-        if (Settings(this).decodeMode == 0) builder.setRenderersFactory(SoftRenderersFactory(this))
+        builder.setRenderersFactory(buildRenderersFactory())
+        builder.setTrackSelector(buildTrackSelector())
+        builder.setLoadControl(buildLoadControl())
         if (headers.isNotEmpty()) {
+            // 网络超时也真正接上：之前 networkTimeoutSec 只在设置页里改，没有任何一处读它。
+            val timeoutMs = Settings(this).networkTimeoutSec.coerceIn(5, 120) * 1000
             val dataSourceFactory =
-                DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers)
+                DefaultHttpDataSource.Factory()
+                    .setDefaultRequestProperties(headers)
+                    .setConnectTimeoutMs(timeoutMs)
+                    .setReadTimeoutMs(timeoutMs)
             builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
         }
         player = builder.build().also { playerView?.player = it }
+        applyCaptionStyle()
         attachPlayerListeners()
         player?.setPlaybackSpeed(speedSteps[speedIdx])
+    }
+
+    /**
+     * 渲染器工厂。
+     *   1. 解码方式：0=软解（换成过滤硬件 codec 的选择器），1=硬解（默认）—— 对齐原版 Setting.getDecode
+     *   2. setEnableDecoderFallback(true) —— 原版 NextRenderersFactory 构造里就开着这一条。
+     *      硬解的 MediaCodec 初始化失败时（T1 上某些编码会），它会自动退到下一个候选解码器，
+     *      而不是直接抛 ERROR_CODE_DECODER_INIT_FAILED 把整条播放打断。
+     *      只开这个开关不引入任何 so，纯兜底。
+     */
+    private fun buildRenderersFactory(): androidx.media3.exoplayer.RenderersFactory {
+        val factory = if (Settings(this).decodeMode == 0)
+            SoftRenderersFactory(this)
+        else
+            androidx.media3.exoplayer.DefaultRenderersFactory(this)
+        return factory.setEnableDecoderFallback(true)
+    }
+
+    /**
+     * 缓冲策略。设置页「缓冲时间」（原版 exo_buffer，1~15 秒）真正落地的地方。
+     * 原版这个值存了没人读；不设 LoadControl 时 ExoPlayer 用的是
+     * min=13MB / 起播=2.5s / 重缓冲=5s / 上限=50s 的默认档。
+     * 这里按秒数换算：起播前攒 N 秒，卡顿重缓冲后等 2N 秒，上限仍保持 50 秒。
+     */
+    private fun buildLoadControl(): androidx.media3.exoplayer.LoadControl {
+        val ms = Settings(this).exoBufferSec.coerceIn(1, 15) * 1000
+        return androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(ms, ms, ms * 2, 50_000)
+            .build()
+    }
+
+    /**
+     * 照原版 ExoUtil.buildTrackSelector() 的三个参数：
+     *   1. setPreferredTextLanguage —— 字幕按系统语言优先
+     *   2. setForceHighestSupportedBitrate(true) —— 自适应流里强制拿最高码率。
+     *      不设这项时 ExoPlayer 会按带宽估计算着挑档，电视上看到的就是「糊」。
+     *      原版是开着的，这是画质和原版不一致的一个隐藏原因。
+     *   3. setTunnelingEnabled —— 隧道模式（设置页那一项真正落地的地方）
+     */
+    private fun buildTrackSelector(): androidx.media3.exoplayer.trackselection.TrackSelector {
+        val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this)
+        ts.setParameters(
+            ts.buildUponParameters()
+                .setPreferredTextLanguage(java.util.Locale.getDefault().getISO3Language())
+                .setForceHighestSupportedBitrate(true)
+                .setTunnelingEnabled(Settings(this).tunnelMode == 1)
+        )
+        return ts
     }
 
     private fun recordHistory() {
@@ -829,6 +885,38 @@ class PlayActivity : Activity() {
     private var mpvFallbackExo = false
 
     /** 当前内核是不是 mpv（内嵌，不再依赖外部 app）；mpv 起播失败时本页临时回退 EXO */
+
+    /**
+     * 字幕样式 —— 原版 ExoUtil.applySubtitleStyle() 的等价实现。
+     *   预设（默认）：白字 + 黑描边 + 透明底
+     *   系统：跟随系统「字幕样式」设置（CaptioningManager.getUserStyle()）
+     * 原版同时设了 setApplyEmbeddedStyles(!isCaption())：选「预设」时用 ASS 里自带样式，
+     * 选「系统」时用系统样式覆盖内嵌样式。
+     */
+    private fun applyCaptionStyle() {
+        val pv = playerView ?: return
+        val sv = pv.subtitleView ?: return
+        val system = Settings(this).captionMode == 1
+        val style = if (system) {
+            val cm = getSystemService(CAPTIONING_SERVICE) as? android.view.accessibility.CaptioningManager
+            if (cm != null) androidx.media3.ui.CaptionStyleCompat.createFromCaptionStyle(cm.userStyle)
+            else androidx.media3.ui.CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK, null)
+        } else {
+            androidx.media3.ui.CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK, null)
+        }
+        sv.setStyle(style)
+        sv.setApplyEmbeddedStyles(!system)
+        sv.setApplyEmbeddedFontSizes(false)
+    }
+
     private fun isMpvMode(): Boolean =
         !mpvFallbackExo && PlayerManager.shouldUseMpv(this) &&
             android.os.Build.VERSION.SDK_INT >= 23   // 官方 libmpv 构建要求 API 23+
@@ -903,7 +991,13 @@ class PlayActivity : Activity() {
             }
         } else if (directUrl.isBlank()) {
             setKeepScreenOn(false)
-            switchEpisode(1)
+            // 线路播放（原版 select_flag）：全自动=切下一集；手动=只提示，等用户自己选。
+            // 原版 VideoActivity.seamless() 的 true 分支就是只做临时高亮、不写历史、不自动切。
+            if (Settings(this).flagMode == 0) {
+                switchEpisode(1)
+            } else {
+                Toast.makeText(this@PlayActivity, "手动模式：请自行选择下一集", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -986,20 +1080,18 @@ class PlayActivity : Activity() {
 
     /**
      * 播放内核切换。
-     * 原版 PlayerDialog 的三种是 系统 / IJK / EXO；本包内置 EXO 与 mpv（mpv 已内嵌，
-     * 不再是外部调用），IJK 没有编进来。
+     * 本包只有两颗内核：内置 EXO 与内嵌 mpv，都真正可用，不存在「列出来但点不动」的项。
      */
     private fun openPlayerDialog() {
-        val items = arrayOf("EXO（内置）", "mpv（内置）", "IJK（未编入）")
+        val items = arrayOf("EXO（内置）", "mpv（内置）")
         val cur = if (isMpvMode()) 1 else 0
         android.app.AlertDialog.Builder(this)
             .setTitle("播放内核")
             .setSingleChoiceItems(items, cur) { d, which ->
                 d.dismiss()
                 when (which) {
-                    2 -> Toast.makeText(this, "IJK 未编译进本包", Toast.LENGTH_SHORT).show()
-                    1 -> if (isMpvMode()) return@setSingleChoiceItems else switchKernel(Settings.KERNEL_MPV)
-                    0 -> if (!isMpvMode()) return@setSingleChoiceItems else switchKernel(Settings.KERNEL_EXO)
+                    1 -> if (!isMpvMode()) switchKernel(Settings.KERNEL_MPV)
+                    0 -> if (isMpvMode()) switchKernel(Settings.KERNEL_EXO)
                 }
             }
             .setNegativeButton("关闭", null)
@@ -1040,12 +1132,12 @@ class PlayActivity : Activity() {
     /** 解码方式（对齐原版 onDecode → Players.toggleDecode + init + setMediaSource） */
     private fun toggleDecode() {
         if (isMpvMode()) {
-            // 与 EXO 的软/硬解对齐：mpv 走 hwdec=mediacodec / no
+            // mpv 走 hwdec=mediacodec / no，开关单独存在 mpvHwdec（不再和 EXO 的 decodeMode 共用）
             val st = Settings(this)
-            st.decodeMode = if (st.decodeMode == 1) 0 else 1
-            mpv?.setHardwareDecode(st.decodeMode == 1)
+            st.mpvHwdec = !st.mpvHwdec
+            mpv?.setHardwareDecode(st.mpvHwdec)
             updateDecodeText()
-            Toast.makeText(this, if (st.decodeMode == 1) "mpv 已切到硬解" else "mpv 已切到软解",
+            Toast.makeText(this, if (st.mpvHwdec) "mpv 已切到硬解" else "mpv 已切到软解",
                 Toast.LENGTH_SHORT).show()
             return
         }
@@ -1062,9 +1154,9 @@ class PlayActivity : Activity() {
     }
 
     private fun updateDecodeText() {
-        // 对齐原版 select_decode = [软解, 硬解]
-        findViewById<TextView>(R.id.btnDecode)?.text =
-            if (Settings(this).decodeMode == 1) "硬解" else "软解"
+        // 对齐原版 select_decode = [软解, 硬解]；两内核各有各的开关，按当前内核取值显示
+        val hard = if (isMpvMode()) Settings(this).mpvHwdec else Settings(this).decodeMode == 1
+        findViewById<TextView>(R.id.btnDecode)?.text = if (hard) "硬解" else "软解"
     }
 
     /** 原版 onLoop 只翻转 activated；真正生效在 checkEnded（激活则重播本集，否则下一集） */

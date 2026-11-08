@@ -78,46 +78,86 @@ class Settings(context: Context) {
         get() = prefs.getInt("small_window_back_key", 0)
         set(value) = prefs.edit().putInt("small_window_back_key", value).apply()
 
-    /** 返回键/菜单键配置是否生效，见 MainActivity.dispatchKeyEvent */
-    var keyConfigEnabled: Boolean
-        get() = prefs.getBoolean("key_config_enabled", true)
-        set(value) = prefs.edit().putBoolean("key_config_enabled", value).apply()
+    // ==== 播放核心：EXO / mpv 两套参数彼此独立 ====
+    // 两个内核支持的东西不一样，参数不能共用一个键：
+    // EXO（media3）走 RenderersFactory / resizeMode / MediaSource 那一套；
+    // mpv 走 hwdec / profile / deband / interpolation 那一套（见官方 MPVView.initOptions）。
+    // 共用一个开关的后果是「在 EXO 选软解，切到 mpv 后变成 hwdec=no」，两边都别扭。
 
-    // ==== 对齐原版 SettingPlayerActivity（播放核心）====
-    /** 播放核心：0=EXO，1=IJK（本壳仅内置 EXO，IJK 选项保留定义） */
-    var playCore: Int
-        get() = prefs.getInt("play_core", 0)
-        set(value) = prefs.edit().putInt("play_core", value).apply()
+    /**
+     * EXO 缓冲秒数（对应原版 `exo_buffer`，原版允许 1~15）。
+     * 原版这个值存了但没人读；我们把它真正接到 DefaultLoadControl 上，
+     * 由它决定「起播前要攒多少数据」和「卡顿重缓冲后要等多久再播」。
+     */
+    var exoBufferSec: Int
+        get() = prefs.getInt("exo_buffer", 5).coerceIn(1, 15)
+        set(value) = prefs.edit().putInt("exo_buffer", value.coerceIn(1, 15)).apply()
 
-    /** 解码方式：0=软解，1=硬解 */
+    /**
+     * 字幕样式（对应原版 select_caption：Default / System）。
+     * 0=预设：白字 + 黑描边（原版 CaptionStyleCompat(WHITE, TRANSPARENT, TRANSPARENT, EDGE_TYPE_OUTLINE, BLACK, null)）
+     * 1=系统：跟随系统「字幕样式」设置（CaptioningManager.getUserStyle()）
+     * 原版真消费点：ExoUtil.applySubtitleStyle() → SubtitleView.setStyle()
+     */
+    var captionMode: Int
+        get() = prefs.getInt("caption_mode", 0)
+        set(value) = prefs.edit().putInt("caption_mode", value.coerceIn(0, 1)).apply()
+
+    /**
+     * 线路播放（对应原版 select_flag：Auto / Manual，原版 key 就叫 flag）。
+     * 0=全自动：一集播完自动切下一集（原版 VideoActivity.seamless() 的 else 分支）
+     * 1=手动：播完只提示，等用户自己选（原版 true 分支只做临时高亮、不写历史）
+     */
+    var flagMode: Int
+        get() = prefs.getInt("flag", 0)
+        set(value) = prefs.edit().putInt("flag", value.coerceIn(0, 1)).apply()
+
+    /** EXO 解码方式：0=软解（过滤硬件 codec），1=硬解。EXO 专属，mpv 见 mpvHwdec */
     var decodeMode: Int
         get() = prefs.getInt("decode_mode", 1)
         set(value) = prefs.edit().putInt("decode_mode", value).apply()
-
-    /** 渲染方式：0=Surface，1=Texture */
-    var renderMode: Int
-        get() = prefs.getInt("render_mode", 0)
-        set(value) = prefs.edit().putInt("render_mode", value).apply()
-
-    /** 缩放比例：0原始 1=16:9 2=4:3 3填充 4裁剪 */
-    var videoScale: Int
-        get() = prefs.getInt("video_scale", 0)
-        set(value) = prefs.edit().putInt("video_scale", value).apply()
 
     /** 隧道模式：0=关，1=开 */
     var tunnelMode: Int
         get() = prefs.getInt("tunnel_mode", 0)
         set(value) = prefs.edit().putInt("tunnel_mode", value).apply()
 
-    /** AAC 优先：0=关，1=开 */
-    var aacFirst: Int
-        get() = prefs.getInt("aac_first", 0)
-        set(value) = prefs.edit().putInt("aac_first", value).apply()
+    /**
+     * mpv 快速档（对应 mpv 的 profile=fast）。
+     * 官方 mpv-android 无条件开着它 —— 会关掉 gradfun/deband 这类高成本滤镜。
+     * 低端盒子（如 T1）建议保持开启；对画质有要求时可以关。
+     */
+    var mpvFastProfile: Boolean
+        get() = prefs.getBoolean(KEY_MPV_FAST, true)
+        set(value) = prefs.edit().putBoolean(KEY_MPV_FAST, value).apply()
 
-    /** 后台播放：0=关，1=开 */
-    var backgroundPlay: Int
-        get() = prefs.getInt("background_play", 1)
-        set(value) = prefs.edit().putInt("background_play", value).apply()
+    /** mpv 硬件解码（官方 key hardware_decoding → hwdec=mediacodec / no），默认开 */
+    var mpvHwdec: Boolean
+        get() = prefs.getBoolean("mpv_hwdec", true)
+        set(value) = prefs.edit().putBoolean("mpv_hwdec", value).apply()
+
+    /**
+     * mpv 去色带（官方 key video_debanding）：0=关，1=gradfun（vf=gradfun=radius=12），2=gpu（deband=yes）。
+     * 吃性能，默认关。
+     */
+    var mpvDeband: Int
+        get() = prefs.getInt("mpv_deband", 0)
+        set(value) = prefs.edit().putInt("mpv_deband", value).apply()
+
+    /** mpv 插帧（官方 key video_interpolation），默认关；开启时必须配 video-sync=display-resample */
+    var mpvInterpolation: Boolean
+        get() = prefs.getBoolean("mpv_interpolation", false)
+        set(value) = prefs.edit().putBoolean("mpv_interpolation", value).apply()
+
+    /** mpv 快速解码（官方 key video_fastdecode：vd-lavc-fast + skiploopfilter），默认关 */
+    var mpvFastDecode: Boolean
+        get() = prefs.getBoolean("mpv_fastdecode", false)
+        set(value) = prefs.edit().putBoolean("mpv_fastdecode", value).apply()
+
+    /** mpv 缓存大小（MB），官方按 SDK 给 64 / 32，默认 64 */
+    var mpvCacheMb: Int
+        get() = prefs.getInt("mpv_cache_mb", 64)
+        set(value) = prefs.edit().putInt("mpv_cache_mb", value).apply()
 
     /** UA 当前档位中文名，用于设置界面展示 */
     fun uaLabel(): String = when (ua) {
@@ -147,6 +187,7 @@ class Settings(context: Context) {
         if (playerKernel == KERNEL_MPV) "mpv（内置）" else "ExoPlayer（内置）"
 
     companion object {
+        private const val KEY_MPV_FAST = "mpv_fast_profile"
         const val KERNEL_EXO = "exo"
         const val KERNEL_MPV = "mpv"
 

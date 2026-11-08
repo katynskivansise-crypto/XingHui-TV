@@ -95,7 +95,33 @@ class DetailActivity : Activity() {
         // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
         runCatching { WallpaperStore.apply(this) }
         inlineView = findViewById(R.id.inlinePlayer)
-        player = ExoPlayer.Builder(this).build().also { inlineView.player = it }
+        // 内嵌播放器之前是裸 build()：没有轨道选择参数，没有解码方式，也没有请求头。
+        // 照原版 ExoUtil 补齐 TrackSelector（最高码率 / 字幕语言 / 隧道模式），
+        // 解码方式跟播放页共用同一个值。
+        player = ExoPlayer.Builder(this)
+            .apply {
+                val rf = if (Settings(this@DetailActivity).decodeMode == 0)
+                    SoftRenderersFactory(this@DetailActivity)
+                else
+                    androidx.media3.exoplayer.DefaultRenderersFactory(this@DetailActivity)
+                setRenderersFactory(rf.setEnableDecoderFallback(true))
+                val bufMs = Settings(this@DetailActivity).exoBufferSec.coerceIn(1, 15) * 1000
+                setLoadControl(
+                    androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                        .setBufferDurationsMs(bufMs, bufMs, bufMs * 2, 50_000)
+                        .build()
+                )
+                val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@DetailActivity)
+                ts.setParameters(
+                    ts.buildUponParameters()
+                        .setPreferredTextLanguage(java.util.Locale.getDefault().getISO3Language())
+                        .setForceHighestSupportedBitrate(true)
+                        .setTunnelingEnabled(Settings(this@DetailActivity).tunnelMode == 1)
+                )
+                setTrackSelector(ts)
+            }
+            .build().also { inlineView.player = it }
+        applyCaptionStyle()
         // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
         // 比例约 2.6:1，画面只能居中留大黑边（真机上看着就是「缩放不对」）。
         findViewById<View>(R.id.playerBox)?.let { boxView ->
@@ -157,6 +183,35 @@ class DetailActivity : Activity() {
     }
 
     /** 显示影片信息 + 线路列表 */
+    /**
+     * 字幕样式 —— 原版 ExoUtil.applySubtitleStyle() 的等价实现。
+     *   预设：白字 + 黑描边 + 透明底
+     *   系统：跟随系统「字幕样式」（CaptioningManager.getUserStyle()）
+     * 同时按原版设 setApplyEmbeddedStyles(!system)：选预设用字幕自带样式，选系统用系统样式覆盖。
+     */
+    private fun applyCaptionStyle() {
+        val sv = inlineView.subtitleView ?: return
+        val system = Settings(this).captionMode == 1
+        val style = if (system) {
+            val cm = getSystemService(CAPTIONING_SERVICE) as? android.view.accessibility.CaptioningManager
+            if (cm != null) androidx.media3.ui.CaptionStyleCompat.createFromCaptionStyle(cm.userStyle)
+            else androidx.media3.ui.CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK, null)
+        } else {
+            androidx.media3.ui.CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK, null)
+        }
+        sv.setStyle(style)
+        sv.setApplyEmbeddedStyles(!system)
+        sv.setApplyEmbeddedFontSizes(false)
+    }
+
     private fun renderLines() {
         val v = vod ?: return
         showLines = true

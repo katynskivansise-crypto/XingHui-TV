@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 排版照原版 leanback/res/layout/activity_setting*.xml：
+<!-- 播放核心子页。排版照原版 leanback/res/layout/activity_setting*.xml：
      外层 padding 24dp；行间距 16dp；双列各 weight=1、列间 marginEnd 16dp；
-     行背景 selector_item；标签 18sp 白 weight 0.3、值 18sp 白 weight 0.7 gravity=end。 -->
+     行背景 selector_item；标签 18sp 白 weight 0.3、值 18sp 白 weight 0.7 gravity=end。
+
+     与原版的不同：EXO 与 mpv 支持的参数不一样，所以拆成两组（exoGroup / mpvGroup），
+     进页面时按当前内核只显示对应那一组。共用项（缩放比例、字幕样式、线路播放、代理、UA）始终显示。
+     分组依据见官方 mpv-android MPVView.initOptions()：mpv 侧是 hwdec / profile / deband /
+     interpolation / fastdecode / cache，EXO 侧是 RenderersFactory / resizeMode / MediaSource。 -->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -18,6 +23,7 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
             android:orientation="horizontal">
 
             <LinearLayout
@@ -53,76 +59,6 @@
                     android:text="EXO" />
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/plyDecode"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="解码方式"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPlyDecode"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="硬解" />
-            </LinearLayout>
-        </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/plyRender"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="渲染方式"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPlyRender"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="Surface" />
-            </LinearLayout>
-            <LinearLayout
                 android:id="@+id/plyScale"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
@@ -154,6 +90,7 @@
                     android:text="原始" />
             </LinearLayout>
         </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -224,6 +161,53 @@
                     android:text="全自动" />
             </LinearLayout>
         </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/exoGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/plyDecode"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="16dp"
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="解码方式"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valPlyDecode"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="硬解" />
+            </LinearLayout>
+        </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -262,38 +246,8 @@
                     android:textSize="18sp"
                     android:text="关闭" />
             </LinearLayout>
-            <LinearLayout
-                android:id="@+id/plyHttp"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="连线方式"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPlyHttp"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="自动" />
-            </LinearLayout>
         </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -330,10 +284,59 @@
                     android:ellipsize="middle"
                     android:textColor="@color/white"
                     android:textSize="18sp"
-                    android:text="15 秒" />
+                    android:text="5 秒" />
+            </LinearLayout>
+        </LinearLayout>
+
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/mpvGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/plyHwdec"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="16dp"
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="硬件解码"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valPlyHwdec"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="开启" />
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/plyRtsp"
+                android:id="@+id/plyMpvFast"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -347,12 +350,83 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="0.3"
                     android:layout_marginEnd="12dp"
-                    android:text="RTSP 通道"
+                    android:text="mpv 快速档"
                     android:textColor="@color/white"
                     android:textSize="18sp" />
 
                 <TextView
-                    android:id="@+id/valPlyRtsp"
+                    android:id="@+id/valPlyMpvFast"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="开启" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/plyDeband"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="16dp"
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="去色带"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valPlyDeband"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="关闭" />
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/plyInterp"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="插帧"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valPlyInterp"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="0.7"
@@ -364,6 +438,80 @@
                     android:text="关闭" />
             </LinearLayout>
         </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/plyFastDecode"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="16dp"
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="快速解码"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valPlyFastDecode"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="关闭" />
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/plyCache"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:background="@drawable/selector_item"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.3"
+                    android:layout_marginEnd="12dp"
+                    android:text="缓存"
+                    android:textColor="@color/white"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/valPlyCache"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.7"
+                    android:gravity="end"
+                    android:singleLine="true"
+                    android:ellipsize="middle"
+                    android:textColor="@color/white"
+                    android:textSize="18sp"
+                    android:text="64 MB" />
+            </LinearLayout>
+        </LinearLayout>
+
+        </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -434,48 +582,6 @@
                     android:text="默认" />
             </LinearLayout>
         </LinearLayout>
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:orientation="horizontal">
 
-            <LinearLayout
-                android:id="@+id/plyBackground"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="16dp"
-                android:orientation="horizontal"
-                android:background="@drawable/selector_item"
-                android:focusable="true"
-                android:focusableInTouchMode="true">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.3"
-                    android:layout_marginEnd="12dp"
-                    android:text="后台播放"
-                    android:textColor="@color/white"
-                    android:textSize="18sp" />
-
-                <TextView
-                    android:id="@+id/valPlyBackground"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="0.7"
-                    android:gravity="end"
-                    android:singleLine="true"
-                    android:ellipsize="middle"
-                    android:textColor="@color/white"
-                    android:textSize="18sp"
-                    android:text="开启" />
-            </LinearLayout>
-            <View
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
-        </LinearLayout>
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

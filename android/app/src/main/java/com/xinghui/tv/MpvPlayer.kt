@@ -83,10 +83,26 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.setOptionString("config", "no")
             // 让 mpv 把自己的日志写到私有目录。VO 建不起来时平台侧到底报了什么，
             // 只有它自己知道；只报「中断」等于永远查不到真因。
+            //
+            // 级别用 w（warning + error）而不是 v（verbose）：ytdl_hook 失败、VO 建不起来、
+            // 解码器报错这些都在 w 里，全量 v 只会把每次播放写成几十 MB，
+            // 在只剩 32MB 预算的盒子上纯属白占盘。
+            // 另外 log-file 每次 init 是覆盖写，不会跨次累积；下面的上限是防单次播放写太大。
+            runCatching {
+                if (logFile.exists() && logFile.length() > 2L * 1024 * 1024) logFile.delete()
+            }
             `is`.xyz.mpv.MPVLib.setOptionString("log-file", logFile.absolutePath)
-            `is`.xyz.mpv.MPVLib.setOptionString("msg-level", "all=v")
+            `is`.xyz.mpv.MPVLib.setOptionString("msg-level", "all=w")
             `is`.xyz.mpv.MPVLib.setOptionString("idle", "yes")
             `is`.xyz.mpv.MPVLib.setOptionString("vo", "gpu")
+            // 官方 MPVView.kt:42 无条件把显示器实测刷新率喂给 mpv（display-fps-override）。
+            // 不设的话 mpv 自己探，探错就会按 60Hz 去排 50Hz 的片源，表现为轻微抖动 / 隔几秒一顿。
+            runCatching {
+                val fps = activity.windowManager.defaultDisplay.refreshRate
+                if (fps > 0f) {
+                    `is`.xyz.mpv.MPVLib.setOptionString("display-fps-override", fps.toString())
+                }
+            }
             // ★ 官方 mpv-android MPVView.kt:92-96 的必备项，之前一直漏掉。
             //   缺 gpu-context=android 时 mpv 会去用默认的 gpu 上下文（桌面平台的），
             //   在 Android 上创建 GL 上下文直接失败 → VO 初始化失败 → loadfile 之后立刻 END_FILE，
@@ -98,14 +114,53 @@ class MpvPlayer(
             `is`.xyz.mpv.MPVLib.setOptionString("ao", "audiotrack,opensles")
             // 只让这些编码走硬解，其余走软解，避免 mediacodec 对不认识的编码直接报错
             `is`.xyz.mpv.MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
-            `is`.xyz.mpv.MPVLib.setOptionString("hwdec", "mediacodec")
+            // 硬解开关是 mpv 自己的偏好（官方 key hardware_decoding），和 EXO 的软/硬解各存各的
+            val mpvSet = Settings(activity)
+            `is`.xyz.mpv.MPVLib.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec" else "no")
             `is`.xyz.mpv.MPVLib.setOptionString("keep-open", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("pause", "yes")
             `is`.xyz.mpv.MPVLib.setOptionString("osc", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("input-default-bindings", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("input-vo-keyboard", "no")
+            // ★★ 真正的根因：mpv 默认 ytdl=auto，遇到没有可识别扩展名的 http 直链
+            //   会先走 ytdl_hook 去调 youtube-dl。安卓上没有 youtube-dl，
+            //   于是 [ytdl_hook] youtube-dl failed → [cplayer] finished playback, loading failed，
+            //   文件根本没加载成功，VO 自然一个都建不起来（这就是 vo=空 cfg=false）。
+            //   关掉它，让 mpv 直接把 URL 交给 lavf demuxer。
+            `is`.xyz.mpv.MPVLib.setOptionString("ytdl", "no")
             `is`.xyz.mpv.MPVLib.setOptionString("cache", "yes")
-            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-bytes", "64MiB")
+            val cacheMb = if (mpvSet.mpvCacheMb in 32..64) mpvSet.mpvCacheMb else 64
+            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-bytes", "${cacheMb}MiB")
+            // 官方 MPVView.kt:104-105 是 max-bytes 与 max-back-bytes 一起设的。
+            // 只设前向缓存时，往回拖/倒退播放会重新走网络，表现为卡一下。
+            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-back-bytes", "${cacheMb}MiB")
+            // 官方 MPVView.kt:114：播放位置由宿主自己管（我们记在 HistoryStore），
+            // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
+            `is`.xyz.mpv.MPVLib.setOptionString("save-position-on-quit", "no")
+            // 官方 MPVView.kt:98-99 用 tls-verify=yes + filesDir/cacert.pem。
+            // 我们没有这个 ca bundle，留 yes 会让 https 片源在证书链不全时直接失败，
+            // 电视盒子场景（片源多变、证书不规范）取 no 更实用；只连片源，不涉及登录凭据。
+            `is`.xyz.mpv.MPVLib.setOptionString("tls-verify", "no")
+            // 官方 MPVView.kt:23 是无条件设 profile=fast（关掉 gradfun/deband 这类高成本滤镜）。
+            // 这里做成设置页开关：T1 这类低端芯片默认开，想拿画质细节时可以关掉。
+            if (mpvSet.mpvFastProfile) {
+                `is`.xyz.mpv.MPVLib.setOptionString("profile", "fast")
+            }
+            // 去色带（官方 video_debanding）：gradfun 走 vf，gpu 走 deband 滤镜
+            when (mpvSet.mpvDeband) {
+                1 -> `is`.xyz.mpv.MPVLib.setOptionString("vf", "gradfun=radius=12")
+                2 -> `is`.xyz.mpv.MPVLib.setOptionString("deband", "yes")
+            }
+            // 插帧（官方 video_interpolation）：必须配 display-resample 才有意义
+            if (mpvSet.mpvInterpolation) {
+                `is`.xyz.mpv.MPVLib.setOptionString("video-sync", "display-resample")
+                `is`.xyz.mpv.MPVLib.setOptionString("interpolation", "yes")
+            }
+            // 快速解码（官方 video_fastdecode）
+            if (mpvSet.mpvFastDecode) {
+                `is`.xyz.mpv.MPVLib.setOptionString("vd-lavc-fast", "yes")
+                `is`.xyz.mpv.MPVLib.setOptionString("vd-lavc-skiploopfilter", "nonkey")
+            }
             // 中文环境：音轨/字幕优先中文，避免默认选中英文字幕
             `is`.xyz.mpv.MPVLib.setOptionString("alang", "zh,chi,zho,eng")
             `is`.xyz.mpv.MPVLib.setOptionString("slang", "zh,chi,zho,eng")
