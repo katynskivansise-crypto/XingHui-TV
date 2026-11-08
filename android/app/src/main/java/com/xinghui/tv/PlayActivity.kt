@@ -936,10 +936,13 @@ class PlayActivity : Activity() {
 
     /** 起播走 mpv：切显示层 → 建内核 → 下发地址与起始位置 */
     private fun startMpv(url: String, headers: Map<String, String>, startMs: Long) {
-        // 关键：EXO 若还在跑，会和 mpv 同时出声。切内嵌 mpv 前必须把它停掉
-        runCatching { player?.pause() }
-        runCatching { player?.stop() }
-        runCatching { player?.clearMediaItems() }
+        // EXO 若还在跑，会和 mpv 同时出声，所以切到 mpv 前必须把它收掉。
+        // 这里用 release 而不是 stop：stop 只是把状态推到 IDLE，MediaCodec / Surface 还挂着，
+        // 紧接着把 PlayerView 置 GONE 会让它的 Surface 被销毁，而播放器仍然持有那个句柄 ——
+        // 这是从 EXO 热切 mpv 时黑屏、甚至进程直接挂掉的来源。
+        // 彻底释放并置空，切回 EXO 时走 rebuildPlayer 重建，虽然慢一点但状态是干净的。
+        runCatching { player?.release() }
+        player = null
         playerView?.visibility = View.GONE
         val surface = findViewById<android.view.SurfaceView>(R.id.mpvView)
         surface.visibility = View.VISIBLE

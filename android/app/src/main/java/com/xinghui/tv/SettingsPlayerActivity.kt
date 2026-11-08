@@ -42,6 +42,10 @@ class SettingsPlayerActivity : Activity() {
         refreshUa()
         refreshProxy()
         refreshMpvParams()
+        // 必须在这里就应用一次分组：XML 里 exoGroup / mpvGroup 默认都是 VISIBLE，
+        // 只在点「播放核心」时才切分组的话，第一次进页面两组会同时显示，
+        // 看起来就是「内核设置错乱」——EXO 模式下还带着一堆 mpv 选项。
+        applyKernelGroup()
 
         // 播放核心：EXO / mpv（mpv 已内嵌在壳里，不再走外部调用）
         findViewById<View>(R.id.plyCore)?.setOnClickListener {
