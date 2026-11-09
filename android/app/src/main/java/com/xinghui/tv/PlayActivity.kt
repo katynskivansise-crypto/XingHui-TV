@@ -75,6 +75,13 @@ class PlayActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_play)
+        // 根容器当画面容器用（原版 @id/video 的等价物）：可聚焦，收控制条时焦点回这里
+        rootView = runCatching {
+            (findViewById<View>(android.R.id.content) as? android.view.ViewGroup)?.getChildAt(0)
+        }.getOrNull()
+        // 对齐原版 VideoActivity:614「进页面就把焦点放到画面容器」：
+        // 有焦点时这条 ROM 上按键分发最稳，也是控制条收起时的落点。
+        rootView?.post { rootView?.requestFocus() }
         // 调试快照：手机浏览器打开 http://盒子IP:9978/debug 就能看到这份状态（界面零改动）
         MpvDebug.snapshot = { mpvDebugLine() }
         // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」
@@ -120,16 +127,22 @@ class PlayActivity : Activity() {
         // mpv 内核下不必先建 EXO 实例：T1 只有 2GB 内存，两套解码器并存很吃紧。
         // 切回 EXO 时 rebuildPlayer() 会补建，所以这里可以省。
         if (!isMpvMode()) {
-            player = ExoPlayer.Builder(this).build().also { playerView?.player = it }
+            player = ExoPlayer.Builder(this).build().also { p ->
+                // 对齐原版 Players.java:155：setAudioAttributes(AudioAttributes.DEFAULT, !isPlayWithOthers())
+                // 原版默认 play_with_others=false → 第二参数 true = 请求音频焦点。
+                // 少了这一步，详情页小窗和播放页互不压制，就是「两个不同的声音」。
+                p.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
+                playerView?.player = p
+            }
             applyCaptionStyle()
             attachPlayerListeners()
         } else {
             // mpv 内核：先把原生实例建好，按键（暂停/快进）从第一秒起就有效。
             // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
-            val texture = findViewById<android.view.TextureView>(R.id.mpvView)
-            texture?.visibility = View.VISIBLE
+            val mpvTexture = findViewById<android.view.TextureView>(R.id.mpvView)
+            mpvTexture?.visibility = View.VISIBLE
             playerView?.visibility = View.GONE
-            texture?.let { ensureMpv(it) }
+            mpvTexture?.let { ensureMpv(it) }
             MpvDebug.log("[mpv] 进页面即建实例（未加载文件，按键已可用）")
         }
         findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
@@ -144,22 +157,12 @@ class PlayActivity : Activity() {
         // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
         // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
         // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
-        uiHandler.postDelayed({
-            runCatching {
-                val bar = controlBar ?: return@runCatching
-                bar.alpha = 0f
-                bar.visibility = View.VISIBLE
-                uiHandler.postDelayed({
-                    runCatching { bar.visibility = View.GONE }
-                    bar.alpha = 1f
-                    MpvDebug.log("[ui] 控制条预热完成")
-                }, 32)
-            }
-        }, 80)
+        uiHandler.postDelayed({ warmUpControlBarOnce() }, 250)
         updateDecodeText()
         updatePlayerText()
-        openingMs = HistoryStore(this).openingOf(vodId)
-        endingMs = HistoryStore(this).endingOf(vodId)
+        val marks0 = HistoryStore(this).marks(vodId)
+        openingMs = marks0[0]
+        endingMs = marks0[1]
         updateOpeningText()
         updateEndingText()
         // 倍速：点击循环档位，对齐原项目 addSpeed()
@@ -800,14 +803,15 @@ class PlayActivity : Activity() {
         val effHeaders = withUa(headers)
         activeUrl = url
         // 片头/片尾按片记忆（对齐原版 History.getOpening/getEnding）
-        openingMs = HistoryStore(this).openingOf(vodId)
-        endingMs = HistoryStore(this).endingOf(vodId)
+        val marks = HistoryStore(this).marks(vodId, epUrl)
+        openingMs = marks[0]
+        endingMs = marks[1]
         endingDone = false
         updateOpeningText()
         updateEndingText()
         // 起播定位：原版 VideoActivity.setPosition(Math.max(opening, position))
         pendingSeek = if (resumeOverride >= 0) resumeOverride
-                      else maxOf(openingMs, HistoryStore(this).position(vodId, epUrl))
+                      else maxOf(openingMs, marks[2])
         // 用户起播前就按过快进：优先按用户的意图起播，不再压上续播点
         if (pendingJumpMs >= 0) pendingSeek = 0
         resumeOverride = -1
@@ -815,7 +819,11 @@ class PlayActivity : Activity() {
         // mpv 内核：本进程内 libmpv（内嵌），播放页控制条直接控它
         if (isMpvMode()) {
             // 起播前按过快进就用用户的位置，否则用续播点
-            val at = if (pendingJumpMs >= 0) pendingJumpMs else pendingSeek
+            val userAt = pendingJumpMs
+            val at = if (userAt >= 0) userAt else pendingSeek
+            // 意图只消费一次。不清零的话，这个位置会一直留在 pendingJumpMs 里：
+            // 下一集起播时既会把续播点压成 0（丢掉历史进度），又会跳回上一集的旧位置。
+            if (userAt >= 0) pendingJumpMs = -1
             startMpv(url, effHeaders, at)
             return
         }
@@ -911,14 +919,14 @@ class PlayActivity : Activity() {
         // 工厂必须无条件设：之前写成 `if (headers.isNotEmpty())`，
         // 没有请求头的源就拿不到超时、拿不到跨协议重定向，设了等于没设。
         val timeoutMs = Settings(this).networkTimeoutSec.coerceIn(5, 120) * 1000
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
+        val httpFactory = DefaultHttpDataSource.Factory()
             .setConnectTimeoutMs(timeoutMs)
             .setReadTimeoutMs(timeoutMs)
             // 允许 302 跳到另一个协议。默认关着时，http→https 这种重定向会直接抛
             // HttpDataSourceException，表现为某些源「起播就报错」而别的源正常。
             // Manifest 已声明 usesCleartextTraffic="true"，https→http 也不会被系统拦。
             .setAllowCrossProtocolRedirects(true)
-        if (headers.isNotEmpty()) dataSourceFactory.setDefaultRequestProperties(headers)
+        if (headers.isNotEmpty()) httpFactory.setDefaultRequestProperties(headers)
         // 解析器参数对齐原版 ExoUtil 的 getExtractorsFactory（原版 MediaSourceFactory.java 同一行）：
         //   FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS —— TS 里 HDMV 封装的 DTS 音轨默认会被丢弃，
         //     这类片源表现为「有画面没声音」，加上才认；
@@ -933,11 +941,18 @@ class PlayActivity : Activity() {
             .setTsExtractorTimestampSearchBytes(
                 androidx.media3.extractor.ts.TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 3
             )
-        builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory, extractors))
+        // 对齐原版 MediaSourceFactory:90：原版数据源是 DefaultDataSource.Factory(http)，
+        // 除 http 外还认 file:// / content:// / asset:// / data://。
+        // 只用 DefaultHttpDataSource 时，任何没被 UrlConvert 转写的本地路径都会起不来
+        // （表现为 EXO 放不了、mpv 能放）。包一层后不依赖调用方自觉。
+        val dataSource = androidx.media3.datasource.DefaultDataSource.Factory(this, httpFactory)
+        builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSource, extractors))
         player = builder.build().also {
             // 官方 Players.java:158 setHandleAudioBecomingNoisy(true)：
             // HDMI / 蓝牙音频突然断开时自动暂停，而不是继续无声播放。
             it.setHandleAudioBecomingNoisy(true)
+            // 同 onCreate：音频焦点必须请求（原版 Players.java:155 同一句）
+            it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
             playerView?.player = it
         }
         // 玩家表面探针必须在 setPlayer 之后挂：media3 会在这时把 surface 交给播放器
@@ -1193,17 +1208,18 @@ class PlayActivity : Activity() {
             setKeepScreenOn(false)
             // 线路播放（原版 select_flag）：全自动=切下一集；手动=只提示，等用户自己选。
             // 原版 VideoActivity.seamless() 的 true 分支就是只做临时高亮、不写历史、不自动切。
-            if (Settings(this).flagMode == 0) {
-                switchEpisode(1)
-            } else {
-                Toast.makeText(this@PlayActivity, "手动模式：请自行选择下一集", Toast.LENGTH_SHORT).show()
-            }
+            // 手动模式只做高亮、不自动切集（原版 seamless() 的 true 分支没有提示，这里同样不提示）
+            if (Settings(this).flagMode == 0) switchEpisode(1)
         }
     }
 
     // ===================== 底部控制条（对齐原版 view_control_vod + CustomKeyDownVod） =====================
 
     private var controlBar: View? = null
+    /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
+    private var rootView: View? = null
+    private var warmedUp = false
+    private var warmUpping = false
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoHide = Runnable { hideControl() }
 
@@ -1239,9 +1255,8 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.btnOpening).setOnLongClickListener { clearOpening(); true }
         findViewById<View>(R.id.btnEnding).setOnClickListener { markEnding() }
         findViewById<View>(R.id.btnEnding).setOnLongClickListener { clearEnding(); true }
-        findViewById<View>(R.id.btnDanmu).setOnClickListener {
-            Toast.makeText(this, "本片暂无弹幕源（未接入弹幕库）", Toast.LENGTH_SHORT).show()
-        }
+        // 弹幕未接入：原版 showControl 是按「站点是否支持弹幕」显隐这个按钮，无源时本来就隐藏。
+        // 我们没有弹幕实现，布局里已置 gone，这里不再留「点了只弹一句未接入」的死入口。
         // 单集循环（对齐原版 onLoop：按钮 setActivated 翻转，播到结尾时重播而不是下一集）
         findViewById<View>(R.id.btnLoop).setOnClickListener { toggleLoop() }
         startProgressTicker()
@@ -1498,6 +1513,8 @@ class PlayActivity : Activity() {
     private val exoHolderCallback = object : android.view.SurfaceHolder.Callback {
         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
             MpvDebug.log("[exo] surfaceCreated ${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()}")
+            // 表面已建好、画面还没出帧：把首次呼出控制条的那次重排提前吃掉
+            uiHandler.post { warmUpControlBarOnce() }
         }
         override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
             MpvDebug.log("[exo] surfaceChanged ${width}x${height} fmt=$format")
@@ -1592,31 +1609,39 @@ class PlayActivity : Activity() {
      * 双入口兜底：极少数 ROM 的按键不经过 Activity.dispatchKeyEvent 直接落到 onKeyDown，
      * 这里再认一次菜单键。dispatchKeyEvent 已经 return true 时不会走到这里，所以不会双触发。
      */
-    /** 呼出控制条（原版 onKeyDown/onKeyUp → showInfo + showControl） */
-    private fun showControl() {
+    /**
+     * 呼出控制条（对齐原版 VideoActivity.showControl:1148-1157）。
+     *
+     * 原版这一共四件事：控制条 VISIBLE、按钮可见性、`view.requestFocus()`、`setControlNextFocus()`。
+     * **没有任何"恢复渲染"的动作** —— 之前这里调 `mpv.recoverRendering()`（detach → attach → 重设 vo）
+     * 会让 mpv 真的重新出帧、重新缓冲，表现就是「第一次按菜单黑一下 + 看到加载中」，属自造负优化，已删。
+     *
+     * focusId / withTitle 也照原版分开：
+     *   ↑(onKeyUp:1755) → 焦点给片头/片尾，并 showInfo（顶部片名信息）
+     *   ↓(onKeyDown:1763) / 菜单(onToggle:1086) → 焦点给"下集"，不带 info
+     */
+    private fun showControl(focusId: Int = R.id.btnNext, withTitle: Boolean = false) {
         // 诊断档位 2：菜单键完全不呼出控制条。用来判断黑屏到底跟控制条有没有关系——
         // 如果这个档位下按菜单仍然黑，那问题就不在控制条上，别再往这里改。
         if (MpvDebug.experiment == 2) {
             MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
             return
         }
+        warmUpping = false
+        controlBar?.alpha = 1f
         controlBar?.visibility = View.VISIBLE
-        findViewById<View>(R.id.playTitle)?.visibility = View.VISIBLE
+        findViewById<View>(R.id.playTitle)?.visibility = if (withTitle) View.VISIBLE else View.GONE
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
-        if (MpvDebug.experiment != 1) findViewById<View>(R.id.btnNext)?.requestFocus()
+        if (MpvDebug.experiment != 1) findViewById<View>(focusId)?.requestFocus()
+        setControlNextFocus()
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
-        MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null}")
-        // 控制条一出现，mpv 侧先做一次渲染自检：vo 掉了就地复位
-        if (isMpvMode()) runCatching { mpv?.recoverRendering() }
+        MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null} focus=$focusId")
         // 诊断：菜单按下瞬间 vs 800ms 后，播放器还在不在播。
-        //   EXO 若从 true 变 false → 说明黑屏其实是「被暂停了」，跟合成层无关；
-        //   一直是 true 却黑 → 画面在渲染、只是被窗口盖住，属合成层问题。
-        //   同时记一次「有没有发生全局重新布局」，用来抓是谁把画面层搞坏的。
         runCatching {
-            val focusId = currentFocus?.id
+            val focusIdNow = currentFocus?.id
             val exoPlaying = runCatching { player?.isPlaying }.getOrNull()
-            MpvDebug.log("[probe] menu t0 focus=$focusId exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
+            MpvDebug.log("[probe] menu t0 focus=$focusIdNow exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
             uiHandler.postDelayed({
                 runCatching {
                     MpvDebug.log(
@@ -1631,17 +1656,68 @@ class PlayActivity : Activity() {
         // 注意：**不要**在这里重建画面层（INVISIBLE→VISIBLE）。
         // 那样每次呼出控制条都会销毁并重建 SurfaceView：EXO 会闪一次黑 shutter、
         // mpv 每次 detach/attach，等于把偶发黑屏换成每次必闪，属于负优化。
-        // 真要治「挖洞失效」，正确做法是把控制条放进独立窗口，别碰 Activity 窗口合成。
     }
 
-    /** 收起控制条（原版 hideControl(true)：控制条与顶部片名一起收，5 秒 INTERVAL_HIDE 自动触发） */
+    /** 收起控制条（对齐原版 hideControl:1159-1165：控制条与顶部信息一起收，并移走焦点） */
     private fun hideControl() {
         uiHandler.removeCallbacks(autoHide)
         if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        // 对齐原版 getFocus1(:1670)：控制条收起后焦点回画面容器。
+        // 不回收的话焦点会留在一个已经 GONE 的按钮上，方向键会跳进不可见控件里，
+        // 真机表现就是「按键有时完全没反应、按一下菜单键又好了」。
+        rootView?.requestFocus()
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
-        // 控制条收起同样可能带掉 vo，这里也补一次自检
-        if (isMpvMode()) runCatching { mpv?.recoverRendering() }
+    }
+
+    /**
+     * 对齐原版 setControlNextFocus(:1128-1145)：把不可见 / 禁用的按钮从左右焦点链里摘掉。
+     * 控制条里片头、片尾、字幕、音轨、视轨这些按钮是按能力显隐的，
+     * 不重算 nextFocus 时方向键会跳进 GONE 的按钮，看着像"跳不动"。
+     */
+    private fun setControlNextFocus() {
+        runCatching {
+            val row = findViewById<android.view.ViewGroup>(R.id.actionLayout) ?: return@runCatching
+            var prev: View? = null
+            for (i in 0 until row.childCount) {
+                val v = row.getChildAt(i)
+                if (v.visibility != View.VISIBLE || !v.isEnabled || !v.isFocusable) continue
+                prev?.let {
+                    it.nextFocusRightId = v.id
+                    v.nextFocusLeftId = it.id
+                }
+                prev = v
+            }
+        }
+    }
+
+    /**
+     * 首次呼出控制条要触发一次真正的窗口重排（这家 ROM 上这一次要重建画面层的抠洞），
+     * 表现为「第一次按菜单黑一下、之后完全正常」。
+     *
+     * 这里在画面层表面已经建好、但画面还没出帧的时刻，用 alpha=0 把**真实路径**
+     * （显隐 + 焦点 + 修焦点链）整套预演一遍：屏幕上不留任何痕迹，也不加任何提示。
+     */
+    private fun warmUpControlBarOnce() {
+        if (warmedUp) return
+        val bar = controlBar ?: return
+        warmedUp = true
+        warmUpping = true
+        runCatching {
+            bar.alpha = 0f
+            bar.visibility = View.VISIBLE
+            findViewById<View>(R.id.btnNext)?.requestFocus()
+            setControlNextFocus()
+            uiHandler.postDelayed({
+                runCatching {
+                    if (!warmUpping) return@runCatching // 用户已经真按了菜单，别把真控制条收掉
+                    if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
+                    bar.alpha = 1f
+                    rootView?.requestFocus()
+                    MpvDebug.log("[ui] 控制条预热完成")
+                }
+            }, 32)
+        }
     }
 
     /** 菜单键：原版默认 fullscreen_menu_key=0 → onToggle（控制条开/关），不是直接弹选集 */
@@ -1782,47 +1858,38 @@ class PlayActivity : Activity() {
 
     /** 时间栏刷新（原版 view_control_seek 的 position / timeBar / duration） */
     private fun startProgressTicker() {
+        // 视图引用只取一次：findViewById 每次都要遍历视图树，而这段 Runnable 是每秒一直在跑的
+        val bar = findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)
+        val posText = findViewById<TextView>(R.id.timePos)
+        val durText = findViewById<TextView>(R.id.timeDur)
         val tick = object : Runnable {
             override fun run() {
+                val pos: Long
+                val dur: Long
                 if (isMpvMode()) {
-                    val pos = mpvPos.coerceAtLeast(0L)
-                    val dur = mpvDur.coerceAtLeast(0L)
-                    findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)?.apply {
-                        setDuration(dur)
-                        setPosition(pos)
+                    pos = mpvPos.coerceAtLeast(0L)
+                    dur = mpvDur.coerceAtLeast(0L)
+                } else {
+                    val p = player
+                    if (p == null) {
+                        uiHandler.postDelayed(this, 1000)
+                        return
                     }
-                    findViewById<TextView>(R.id.timePos)?.text = fmtTime(pos)
-                    findViewById<TextView>(R.id.timeDur)?.text = fmtTime(dur)
-                    if (endingMs > 0 && dur > 0 && !endingDone && pos + endingMs >= dur) {
-                        endingDone = true
-                        if (directUrl.isBlank()) {
-                            Toast.makeText(this@PlayActivity, "已到片尾，播下一集", Toast.LENGTH_SHORT).show()
-                            switchEpisode(1)
-                        }
-                    }
-                    uiHandler.postDelayed(this, 500)
-                    return
+                    pos = if (p.currentPosition > 0) p.currentPosition else 0L
+                    dur = if (p.duration > 0) p.duration else 0L
                 }
-                val p = player
-                if (p != null) {
-                    val pos = if (p.currentPosition > 0) p.currentPosition else 0L
-                    val dur = if (p.duration > 0) p.duration else 0L
-                    findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)?.apply {
-                        setDuration(dur)
-                        setPosition(pos)
-                    }
-                    findViewById<TextView>(R.id.timePos)?.text = fmtTime(pos)
-                    findViewById<TextView>(R.id.timeDur)?.text = fmtTime(dur)
-                    // 片尾：原版 onTimeChanged 的 ending + position >= duration → checkNext()
-                    if (endingMs > 0 && dur > 0 && !endingDone && pos + endingMs >= dur) {
-                        endingDone = true
-                        if (directUrl.isBlank()) {
-                            Toast.makeText(this@PlayActivity, "已到片尾，播下一集", Toast.LENGTH_SHORT).show()
-                            switchEpisode(1)
-                        }
-                    }
+                bar?.setDuration(dur)
+                bar?.setPosition(pos)
+                posText?.text = fmtTime(pos)
+                durText?.text = fmtTime(dur)
+                // 片尾：原版 onTimeChanged 的 ending + position >= duration → checkNext()
+                // 原版这一步没有任何提示，直接切下一集（之前那句 Toast 属于画蛇添足，已删）
+                if (endingMs > 0 && dur > 0 && !endingDone && pos + endingMs >= dur) {
+                    endingDone = true
+                    if (directUrl.isBlank()) switchEpisode(1)
                 }
-                uiHandler.postDelayed(this, 500)
+                // 原版 Clock.java:66 是 1000ms
+                uiHandler.postDelayed(this, 1000)
             }
         }
         uiHandler.post(tick)
@@ -1838,15 +1905,30 @@ class PlayActivity : Activity() {
      *   控制条隐藏时 → OK 暂停/继续、↑↓ 呼出控制条、←→ 快退快进
      *   控制条显示时 → 交给系统做焦点导航，并重置 4 秒自动收起
      */
+    // 键码判定照原版 KeyUtil（app/src/leanback/.../utils/KeyUtil.java）：
+    //   OK 还认 SPACE，↑↓ 还认 CHANNEL/PAGE/MEDIA 类 —— 不同遥控器映射不同，
+    //   只认 DPAD 时，把 ↑↓ 映射成 CHANNEL_UP/DOWN 的遥控会完全没反应。
+    private fun isEnterKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+        e.keyCode == KeyEvent.KEYCODE_ENTER || e.keyCode == KeyEvent.KEYCODE_SPACE ||
+        e.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+
+    private fun isUpKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+        e.keyCode == KeyEvent.KEYCODE_CHANNEL_UP || e.keyCode == KeyEvent.KEYCODE_PAGE_UP ||
+        e.keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS
+
+    private fun isDownKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+        e.keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN || e.keyCode == KeyEvent.KEYCODE_PAGE_DOWN ||
+        e.keyCode == KeyEvent.KEYCODE_MEDIA_NEXT
+
+    private fun isLeftKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+    private fun isRightKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686 + KeyUtil.isMenuKey:35 的 ACTION_UP 判定）
-        //   Setting.getFullscreenMenuKey() == 0 → onToggle()：控制栏显示/隐藏
-        //   == 1 → onEpisodes()：弹选集，并收起控制栏
-        // 原版放在 dispatchKeyEvent 而不是 onKeyDown，因为控制栏显示时按键会先被 mKeyDown 分支接走
-        // 原版 KeyUtil.isMenuKey:35 判的是 ACTION_UP + KEYCODE_MENU（VideoActivity:1686-1687 两分支）。
-        // 语义与原版一致：档位 0 → 切控制栏显隐；档位 1 → 弹选集并收起控制栏。
+        // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
+        //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
+        //   == 1 → onEpisodes()：弹选集并收起控制栏
         if (isMenuKeyCode(event.keyCode)) {
-            // 原版 KeyUtil.isMenuKey:35 只认 ACTION_UP。这里 DOWN/UP 都接、400ms 内只算一次：
+            // 原版只认 ACTION_UP。这里 DOWN/UP 都接、400ms 内只算一次：
             // 只发 UP 的遥控器能响应，只发 DOWN 的也能响应，正常成对的不会双触发。
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) fireMenuKeyOnce()
@@ -1855,17 +1937,31 @@ class PlayActivity : Activity() {
             }
             return true
         }
+
         val shown = controlBar?.visibility == View.VISIBLE
+
+        // 返回键：对齐原版 onBackPressed:1834 的优先级 —— 控制条 → 居中提示 → 退出页面。
+        // 之前 BACK 只在"控制条隐藏"的分支里处理，控制条正显示着按返回会直接把播放页关掉。
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+            if (shown) {
+                hideControl()
+                return true
+            }
+            if (findViewById<View>(R.id.playCenter)?.visibility == View.VISIBLE) {
+                hidePlayCenter()
+                return true
+            }
+            return super.dispatchKeyEvent(event)
+        }
+
         if (shown) {
             uiHandler.removeCallbacks(autoHide)
             uiHandler.postDelayed(autoHide, 5000)
             // 原版 CustomUpDownView：片头/片尾聚焦时 ↑+1s、↓-1s
             val fid = currentFocus?.id
-            if ((fid == R.id.btnOpening || fid == R.id.btnEnding) &&
-                (event.keyCode == KeyEvent.KEYCODE_DPAD_UP || event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN)
-            ) {
+            if ((fid == R.id.btnOpening || fid == R.id.btnEnding) && (isUpKey(event) || isDownKey(event))) {
                 if (event.action == KeyEvent.ACTION_DOWN) {
-                    val add = event.keyCode == KeyEvent.KEYCODE_DPAD_UP
+                    val add = isUpKey(event)
                     val dur = player?.duration ?: 0L
                     val half = if (dur > 0) dur / 2 else Long.MAX_VALUE
                     if (fid == R.id.btnOpening) {
@@ -1878,51 +1974,49 @@ class PlayActivity : Activity() {
             }
             return super.dispatchKeyEvent(event)
         }
-        when (event.keyCode) {
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
-                // 长按倍速的收尾仍交给 onKeyUp（fastForwarding）
-                if (fastForwarding) return super.dispatchKeyEvent(event)
-                if (event.action == KeyEvent.ACTION_UP) togglePlayPause()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP -> {
-                if (event.action == KeyEvent.ACTION_UP) showControl()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                // 对齐原版 CustomKeyDownVod.check()：
-                //   DOWN（含长按 repeat）只累加偏移并刷新提示，不立刻跳
-                //   UP 之后 post 250ms 再一次性 seekTo
-                // 原来每收到一个 DOWN 就独立 seek 10 秒：按住时连续跳几十次，手感完全不同，
-                // 而且每次都弹一个 Toast，Toast 排队就变成了「提示一直挂在屏幕上」。
-                val dir = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1L else 1L
-                if (event.action == KeyEvent.ACTION_DOWN) {
-                    if (!seekingByKey) {
-                        seekingByKey = true
-                        seekBaseMs = currentPosMs()
-                        seekAccumMs = 0L
-                    }
-                    seekAccumMs += dir * SEEK_STEP_MS
-                    showSeekCenter(seekAccumMs)
-                } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
-                    seekingByKey = false
-                    uiHandler.removeCallbacks(commitSeek)
-                    uiHandler.postDelayed(commitSeek, 250)
+
+        if (isEnterKey(event)) {
+            // 长按倍速的收尾仍交给 onKeyUp（fastForwarding）
+            if (fastForwarding) return super.dispatchKeyEvent(event)
+            if (event.action == KeyEvent.ACTION_UP) togglePlayPause()
+            return true
+        }
+        if (isUpKey(event) || isDownKey(event)) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                // 原版 onKeyUp:1755 / onKeyDown:1763：
+                //   ↑ → showInfo + 控制条，焦点给片头（进度没过半）或片尾（过半）
+                //   ↓ → showInfo + 控制条，焦点给"下集"（getFocus2 默认值）
+                val dur = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+                val half = if (dur > 0L) dur / 2 else Long.MAX_VALUE
+                val atOpeningHalf = currentPosMs() < half
+                val focusId = if (isUpKey(event)) {
+                    if (atOpeningHalf) R.id.btnOpening else R.id.btnEnding
+                } else {
+                    R.id.btnNext
                 }
-                return true
+                showControl(focusId, withTitle = true)
             }
-            KeyEvent.KEYCODE_BACK -> {
-                // 对齐原版 onBackPressed 的优先级：控制条 → 居中提示 → 退出。
-                // 暂停时 center 正显示，按返回应该先把它收掉，而不是直接把播放页关掉。
-                if (event.action == KeyEvent.ACTION_UP &&
-                    findViewById<View>(R.id.playCenter)?.visibility == View.VISIBLE
-                ) {
-                    hidePlayCenter()
-                    return true
+            return true
+        }
+        if (isLeftKey(event) || isRightKey(event)) {
+            // 对齐原版 CustomKeyDownVod.check()：
+            //   DOWN（含长按 repeat）只累加偏移并刷新提示，不立刻跳
+            //   UP 之后 post 250ms 再一次性 seekTo
+            val dir = if (isLeftKey(event)) -1L else 1L
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (!seekingByKey) {
+                    seekingByKey = true
+                    seekBaseMs = currentPosMs()
+                    seekAccumMs = 0L
                 }
-                return super.dispatchKeyEvent(event)
+                seekAccumMs += dir * SEEK_STEP_MS
+                showSeekCenter(seekAccumMs)
+            } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
+                seekingByKey = false
+                uiHandler.removeCallbacks(commitSeek)
+                uiHandler.postDelayed(commitSeek, 250)
             }
-            else -> return super.dispatchKeyEvent(event)
+            return true
         }
         return super.dispatchKeyEvent(event)
     }
@@ -1963,19 +2057,15 @@ class PlayActivity : Activity() {
 
     /** 上一集/下一集：当前线路内切集，边界钳制（对齐原项目 onPrev/onNext + checkPrev/checkNext） */
     private fun switchEpisode(delta: Int) {
-        if (directUrl.isNotBlank()) {
-            Toast.makeText(this, "直播直链不支持切集", Toast.LENGTH_SHORT).show()
-            return
-        }
+        // 直播直链没有「集」的概念，直接忽略（原版同样不提示）
+        if (directUrl.isNotBlank()) return
         val line = if (vodLines.isNotEmpty()) vodLines.firstOrNull { it.name == flag } ?: vodLines.first() else return
         val eps = line.episodes
         if (eps.isEmpty()) return
         val cur = eps.indexOfFirst { it.second == epUrl }
         val next = if (delta > 0) (cur + 1).coerceAtMost(eps.lastIndex) else (cur - 1).coerceAtLeast(0)
-        if (next == cur) {
-            Toast.makeText(this, if (delta > 0) "已是最后一集" else "已是第一集", Toast.LENGTH_SHORT).show()
-            return
-        }
+        // 到头了就停在原地（原版 checkPrev/checkNext 只做按钮置灰，不弹提示）
+        if (next == cur) return
         Thread { resolvePlay(line.name, eps[next].second) }.start()
     }
 

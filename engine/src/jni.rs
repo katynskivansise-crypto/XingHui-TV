@@ -117,10 +117,11 @@ fn dispatch(action: &str, key: &str, params: &str, manager: &mut SpiderManager) 
             for k in manager.keys() {
                 if let Some(s) = manager.get(&k) {
                     if let Ok(res) = s.search_content(&keyword, false, "1") {
-                        let v = json::parse(&res);
-                        if let Some(arr) = v.get("list").and_then(|x| x.as_array()) {
-                            for item in arr {
-                                let mut it = item.clone();
+                        let mut v = json::parse(&res);
+                        if let Some(arr) = v.get_mut("list").and_then(|x| x.as_array_mut()) {
+                            // 直接取走所有权：原来每条结果 clone 一份再插 source 字段，
+                            // 搜索结果多时纯属多一轮堆分配
+                            for mut it in std::mem::take(arr) {
                                 if let Some(obj) = it.as_object_mut() {
                                     obj.insert("source".to_string(), serde_json::json!(k));
                                 }

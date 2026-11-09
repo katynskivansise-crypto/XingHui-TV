@@ -44,6 +44,7 @@ class DetailActivity : Activity() {
     private var inlinePausedByLeave = false
     /** 本次离开是「跳去独立播放页」，回来要把预览续上；按返回退出详情页则不用 */
     private var inlineResumeOnReturn = false
+    private var inlineUrl: String = ""
     /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
     private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
     /** 进全屏前小窗上的焦点边框（selector_video），退出全屏时原样还原 */
@@ -102,38 +103,7 @@ class DetailActivity : Activity() {
         // 内嵌播放器之前是裸 build()：没有轨道选择参数，没有解码方式，也没有请求头。
         // 照原版 ExoUtil 补齐 TrackSelector（最高码率 / 字幕语言 / 隧道模式），
         // 解码方式跟播放页共用同一个值。
-        player = ExoPlayer.Builder(this)
-            .apply {
-                val rf = if (Settings(this@DetailActivity).decodeMode == 0)
-                    SoftRenderersFactory(this@DetailActivity)
-                else
-                    androidx.media3.exoplayer.DefaultRenderersFactory(this@DetailActivity)
-                setRenderersFactory(rf.setEnableDecoderFallback(true))
-                // 与播放页同源，对齐原版 ExoUtil.buildLoadControl()：new DefaultLoadControl()。
-                // 之前按 exoBufferSec 把缓冲砍到 5s/10s 是负优化，已回滚（默认 50s）。
-                setLoadControl(androidx.media3.exoplayer.DefaultLoadControl())
-                val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@DetailActivity)
-                ts.setParameters(
-                    ts.buildUponParameters()
-                        .setPreferredTextLanguage(java.util.Locale.getDefault().getISO3Language())
-                        .setForceHighestSupportedBitrate(true)
-                        .setTunnelingEnabled(Settings(this@DetailActivity).tunnelMode == 1)
-                )
-                setTrackSelector(ts)
-                // 内嵌播放器之前是裸 build()：没有超时、没有跨协议重定向。
-                val timeoutMs = Settings(this@DetailActivity).networkTimeoutSec.coerceIn(5, 120) * 1000
-                val http = DefaultHttpDataSource.Factory()
-                    .setConnectTimeoutMs(timeoutMs)
-                    .setReadTimeoutMs(timeoutMs)
-                    .setAllowCrossProtocolRedirects(true)
-                setMediaSourceFactory(DefaultMediaSourceFactory(http))
-            }
-            .build().also {
-                // 官方 Players.java:158：HDMI / 蓝牙音频断开时自动暂停
-                it.setHandleAudioBecomingNoisy(true)
-                inlineView.player = it
-            }
-        applyCaptionStyle()
+        player = buildInlinePlayer()
         // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
         // 比例约 2.6:1，画面只能居中留大黑边（真机上看着就是「缩放不对」）。
         findViewById<View>(R.id.playerBox)?.let { boxView ->
@@ -201,6 +171,55 @@ class DetailActivity : Activity() {
      *   系统：跟随系统「字幕样式」（CaptioningManager.getUserStyle()）
      * 同时按原版设 setApplyEmbeddedStyles(!system)：选预设用字幕自带样式，选系统用系统样式覆盖。
      */
+
+    /**
+     * 内嵌预览播放器的唯一构建点。
+     * 抽出来是为了「进播放页释放、返回重建」这条路径不用把参数再抄一遍。
+     */
+    private fun buildInlinePlayer(): androidx.media3.exoplayer.ExoPlayer {
+        val p = ExoPlayer.Builder(this)
+            .apply {
+                val rf = if (Settings(this@DetailActivity).decodeMode == 0)
+                    SoftRenderersFactory(this@DetailActivity)
+                else
+                    androidx.media3.exoplayer.DefaultRenderersFactory(this@DetailActivity)
+                setRenderersFactory(rf.setEnableDecoderFallback(true))
+                // 与播放页同源，对齐原版 ExoUtil.buildLoadControl()：new DefaultLoadControl()。
+                // 之前按 exoBufferSec 把缓冲砍到 5s/10s 是负优化，已回滚（默认 50s）。
+                setLoadControl(androidx.media3.exoplayer.DefaultLoadControl())
+                val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@DetailActivity)
+                ts.setParameters(
+                    ts.buildUponParameters()
+                        .setPreferredTextLanguage(java.util.Locale.getDefault().getISO3Language())
+                        .setForceHighestSupportedBitrate(true)
+                        .setTunnelingEnabled(Settings(this@DetailActivity).tunnelMode == 1)
+                )
+                setTrackSelector(ts)
+                // 内嵌播放器之前是裸 build()：没有超时、没有跨协议重定向。
+                val timeoutMs = Settings(this@DetailActivity).networkTimeoutSec.coerceIn(5, 120) * 1000
+                val http = DefaultHttpDataSource.Factory()
+                    .setConnectTimeoutMs(timeoutMs)
+                    .setReadTimeoutMs(timeoutMs)
+                    .setAllowCrossProtocolRedirects(true)
+                // 同播放页：包一层 DefaultDataSource（原版 MediaSourceFactory:90），
+                // 本地路径不必再依赖 UrlConvert 转写
+                setMediaSourceFactory(
+                    DefaultMediaSourceFactory(
+                        androidx.media3.datasource.DefaultDataSource.Factory(this@DetailActivity, http)
+                    )
+                )
+            }
+            .build().also {
+                // 官方 Players.java:158：HDMI / 蓝牙音频断开时自动暂停
+                it.setHandleAudioBecomingNoisy(true)
+                // 内嵌预览同样请求音频焦点：进播放页时播放页抢焦点，这一路会自动 LOSS → 暂停，
+                // 不再依赖手动 pauseInlinePlayback 兜底（原版 Players.java:155 同一句）。
+                it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
+                inlineView.player = it
+            }
+        return p
+    }
+
     private fun applyCaptionStyle() {
         val sv = inlineView.subtitleView ?: return
         val system = Settings(this).captionMode == 1
@@ -598,7 +617,7 @@ class DetailActivity : Activity() {
         // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
         // 换集就是从 0 开始，不会出现点第 3 集跳到第 1 集进度的情况。
         val resumeMs = runCatching {
-            HistoryStore(this).position(v.vodId.ifBlank { v.vodName }, ep.second)
+            HistoryStore(this).marks(v.vodId.ifBlank { v.vodName }, ep.second)[2]
         }.getOrDefault(0L)
         // 对齐原版 VideoActivity:1269 —— 起播之前就把 History 建好，不看解析成败。
         // 放在解析之后写的话，解析慢、解析失败、看两眼就退出，三种情况都不留记录。
@@ -630,6 +649,7 @@ class DetailActivity : Activity() {
                 }
                 // ExoPlayer 缺扩展模块时会抛 IllegalStateException（No suitable media source factory），
                 // 以前没兜住，换到 m3u8 源就直接闪退回主页。这里失败就转独立播放页走完整链路。
+                inlineUrl = url
                 val ok = runCatching {
                     player?.setMediaItem(MediaItem.Builder().setUri(url).build())
                     player?.prepare()
@@ -684,7 +704,7 @@ class DetailActivity : Activity() {
         val line = currentLine ?: return
         val ep = line.episodes.getOrNull(idx) ?: return
         // 先把预览那一路停掉，再起播放页：两边同时出声就是「两个不同的声音」
-        pauseInlinePlayback()
+        releaseInlinePlayback()
         // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
         inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
@@ -765,7 +785,7 @@ class DetailActivity : Activity() {
         val line = currentLine ?: return
         val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
         // 同上：交接给播放页之前先停掉预览
-        pauseInlinePlayback()
+        releaseInlinePlayback()
         inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
             putExtra("vod_id", v.vodId)
@@ -807,6 +827,21 @@ class DetailActivity : Activity() {
      * mpv 内核不申请音频焦点，EXO 内核离开焦点也不一定立刻停，
      * 所以不能指望系统帮忙，必须自己停。
      */
+    /**
+     * 进播放页前直接释放内嵌预览。
+     * 只 pause 不 release 时，详情页这一路 ExoPlayer（含解码器、缓冲）会和播放页那一路同时活着，
+     * 2GB 的盒子上等于两套解码器常驻；这也是「两个声音」的结构性来源之一。
+     * 返回时用 buildInlinePlayer() + inlineUrl 就地重建，不再重新解析接口。
+     */
+    private fun releaseInlinePlayback() {
+        runCatching {
+            inlineView.player = null
+            player?.release()
+            player = null
+            Log.i("XingHuiTV", "[detail] 离开页面，预览播放器已释放")
+        }
+    }
+
     private fun pauseInlinePlayback() {
         runCatching {
             val p = player ?: return@runCatching
@@ -835,12 +870,31 @@ class DetailActivity : Activity() {
         if (inlineResumeOnReturn) {
             inlineResumeOnReturn = false
             runCatching {
-                val p = player ?: return@runCatching
+                // 进播放页时预览已释放，这里就地重建（参数与首次完全一致）
+                val p = player ?: buildInlinePlayer().also { player = it; applyCaptionStyle() }
                 if (p.playbackState == androidx.media3.common.Player.STATE_IDLE) {
+                    if (inlineUrl.isNotBlank()) {
+                        p.setMediaItem(MediaItem.Builder().setUri(inlineUrl).build())
+                    }
                     p.prepare()
                 }
+                // 对齐原版 updateHistory:1278-1290：
+                //   同一集才续播（换集本来就回 0），位置取 max(片头, 历史进度)。
+                // 之前只 play() 不定位，小窗一旦进过 IDLE 就从 0 播 —— 真机上就是「先回到片头」。
+                val v = vod
+                val ep = episodes.getOrNull(playingIdx)?.second
+                if (v != null && !ep.isNullOrBlank()) {
+                    val key = v.vodId.ifBlank { v.vodName }
+                    val store = HistoryStore(this)
+                    // 一次读出片头与本集进度（原来分别解析两遍历史 JSON）
+                    val m = store.marks(key, ep)
+                    val at = maxOf(m[0], m[2])
+                    if (at > 0) runCatching { p.seekTo(at) }
+                    Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播 at=${at}ms")
+                } else {
+                    Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播 at=0ms")
+                }
                 p.play()
-                Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播")
             }
         }
         inlinePausedByLeave = false

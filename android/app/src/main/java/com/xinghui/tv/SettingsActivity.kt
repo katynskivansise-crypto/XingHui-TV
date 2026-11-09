@@ -239,10 +239,16 @@ class SettingsActivity : Activity() {
      * 让数字归 0，不弹任何提示。这里同样只刷新数字。
      */
     private fun clearCache() {
-        runCatching {
-            AppCache.clear(this)
-            refresh()
-        }.onFailure { e -> toast("清理失败：${e.message}") }
+        // 原版 FileUtil.clearCache:93-98 走 App.execute，清完再 App.post 回主线程 —— 全程不占主线程。
+        // 我们之前在 UI 线程里 size() + deleteRecursively()：图片缓存上限 100MB、几百个文件，
+        // 在 T1 上点一下「清除缓存」会整页卡住一到两秒。这里换成同样的后台线程语义。
+        Thread {
+            val freed = runCatching { AppCache.clear(this) }.getOrElse { -1L }
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (freed < 0L) toast("清理失败") else refresh()
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     // ==== 刷新显示 ====

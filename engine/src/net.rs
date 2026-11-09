@@ -8,11 +8,42 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// 默认读写超时（原 TIMEOUT = 30_000ms）
 pub const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// ureq Agent 复用池。
+///
+/// 原版 `OkHttp.client()` 是**单例** client：连接池、TLS session 全复用，
+/// 同一个站点的首页/分类/搜索/播放接口基本都落在同一条已握手连接上。
+/// 我们此前在 `fetch_full` 里每个请求都 `AgentBuilder::new().build()`，
+/// 等于每个请求重新 TCP + TLS 握手 —— HTTPS 站点在 T1 这种弱 CPU 上，
+/// 一次握手就是几十到几百毫秒，直接体现在「点分类要等一下」。
+///
+/// key = (超时毫秒, 是否跟随重定向)。用户改网络设置时只会多留一份旧 agent，
+/// 数量上限就是设置组合数（实际 1~2 个），不会无限增长。
+static AGENTS: OnceLock<Mutex<HashMap<(u64, bool), ureq::Agent>>> = OnceLock::new();
+
+fn agent_for(timeout: Duration, follow_redirects: bool) -> ureq::Agent {
+    let key = (timeout.as_millis() as u64, follow_redirects);
+    let pool = AGENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = pool.lock() {
+        if let Some(a) = g.get(&key) {
+            return a.clone();
+        }
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .timeout_connect(timeout)
+        .redirects(if follow_redirects { 10 } else { 0 })
+        .build();
+    if let Ok(mut g) = pool.lock() {
+        g.insert(key, agent.clone());
+    }
+    agent
+}
 
 /// 原 `Util.CHROME`：gitcode 对非浏览器 UA 直接 403，必须按原版原样替换。
 const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -239,14 +270,10 @@ impl Net {
     /// 与 fetch 相同，但额外返回真实响应头与状态码
     /// （drpy 规则 `obj.withHeaders` 读 res.headers，`res.code` 读状态码，对齐原 Connect.success）
     fn fetch_full(&self, method: &str, url: &str, headers: Option<&HashMap<String, String>>, body: Option<&[u8]>) -> (Vec<u8>, HashMap<String, String>, u16) {
-        let builder = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
-            .timeout_connect(self.timeout)
-            .redirects(if self.follow_redirects { 10 } else { 0 });
-
-        // ureq 2.x 的 TLS 配置通过 tls_config 注入；证书校验绕过需 rustls custom config。
-        // 这里保留接口占位，Android 集成版再接入自定义 TLS 配置。
-        let agent = builder.build();
+        // 复用 agent：连接池与 TLS session 都在 agent 里，每个请求新建等于每次重新握手。
+        // ureq 2.x 的 TLS 配置通过 tls_config 注入；证书校验绕过的实际落点是 Android 侧
+        // XingHuiApp 的 SSLCompat（全局放开），所以这里不再重复配置。
+        let agent = agent_for(self.timeout, self.follow_redirects);
 
         // ---- 对齐原 RequestInterceptor.intercept() 的 URL 级处理 ----
         // ① 本地代理 URL 里的 '+' 转 %2B。原版条件：`url.contains("+") && local`，

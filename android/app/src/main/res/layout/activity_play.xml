@@ -7,7 +7,9 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/black">
+    android:background="@android:color/black"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
 
     <!-- 属性对齐原版 styles.xml 的 Player 样式：
          resize_mode=fit / use_controller=false / auto_show=false。
@@ -33,7 +35,9 @@
     <!-- 内嵌 mpv 的画面层：TextureView（**不能**加 android:background）。
          TextureView 不支持背景 drawable，设了就直接在 inflate 阶段抛
          UnsupportedOperationException —— 上一次「TextureView 崩溃」的 Caused by 就是这一句，
-         不是 ROM 不支持 TextureView。 -->
+         不是 ROM 不支持 TextureView。
+         不设 setZOrderMediaOverlay：原版零命中，且它会让弹窗开关后 media 层的 z-order
+         在老 ROM 上不恢复（表现为 mpv 永久黑屏）。默认 punch-through 下控制条照样盖住。 -->
     <TextureView
         android:id="@+id/mpvView"
         android:layout_width="match_parent"
@@ -356,8 +360,11 @@
                 android:textColor="@color/white"
                 android:textSize="14sp" />
 
+            <!-- 弹幕未接入：原版按站点是否支持弹幕显隐，无源时不显示。
+                 先固定 gone，避免出现点了只提示「未接入」的死按钮。 -->
             <TextView
                 android:id="@+id/btnDanmu"
+                android:visibility="gone"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="12dp"

@@ -348,20 +348,46 @@ fn value_to_str(v: &serde_json::Value) -> Option<String> {
 
 // ── 正则（宽松扩展，保留）────────────────────────────────────────
 
+// 已编译正则的线程缓存。
+// pdfh/pdfa 是按「每条规则 × 每个条目」调用的：一个列表页 100 条、每条约 4 个字段，
+// 就是 400 次 `Regex::new`。编译一次模式在弱 CPU 上是几十微秒，400 次约几毫秒，
+// 而且模式串就那几十个，重复编译完全是白烧。
+// 规则集规模远小于 128，超了直接整体清空（不做 LRU，实现越简单越不会出错）。
+thread_local! {
+    static RE_CACHE: std::cell::RefCell<std::collections::HashMap<String, Regex>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn with_regex<T>(pat: &str, f: impl FnOnce(&Regex) -> T) -> Option<T> {
+    RE_CACHE.with(|c| {
+        let mut m = c.borrow_mut();
+        if !m.contains_key(pat) {
+            if m.len() >= 128 {
+                m.clear();
+            }
+            let re = Regex::new(pat).ok()?;
+            m.insert(pat.to_string(), re);
+        }
+        let re = m.get(pat)?;
+        Some(f(re))
+    })
+}
+
 fn regex_first(html: &str, pat: &str) -> Option<String> {
-    let re = Regex::new(pat).ok()?;
-    let c = re.captures(html)?;
-    Some(c.get(1).map_or(c.get(0)?.as_str(), |m| m.as_str()).to_string())
+    with_regex(pat, |re| -> Option<String> {
+        let c = re.captures(html)?;
+        Some(c.get(1).map_or(c.get(0)?.as_str(), |m| m.as_str()).to_string())
+    })
+    .flatten()
 }
 
 fn regex_all(html: &str, pat: &str) -> Vec<String> {
-    let re = match Regex::new(pat) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    re.captures_iter(html)
-        .map(|c| c.get(1).map_or(c.get(0).map_or("", |m| m.as_str()), |m| m.as_str()).to_string())
-        .collect()
+    with_regex(pat, |re| {
+        re.captures_iter(html)
+            .map(|c| c.get(1).map_or(c.get(0).map_or("", |m| m.as_str()), |m| m.as_str()).to_string())
+            .collect::<Vec<String>>()
+    })
+    .unwrap_or_default()
 }
 
 #[cfg(test)]

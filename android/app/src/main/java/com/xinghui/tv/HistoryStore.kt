@@ -75,6 +75,24 @@ class HistoryStore(context: Context) {
         return obj.optLong("position", 0)
     }
 
+    /**
+     * 一次读出「片头 / 片尾 / 本集进度」，返回 LongArray(opening, ending, position)。
+     *
+     * 原来 openingOf + endingOf + position 各自调一次 history()，而 history() 每次都要
+     * 把整份历史 JSONArray 重新解析一遍；播放页起播路径上就是三次全量解析。
+     * position 只在 epUrl 与上次那集一致时才有值（与原版 updateHistory 的语义一致）。
+     */
+    fun marks(vodId: String, epUrl: String = ""): LongArray {
+        val zero = longArrayOf(0, 0, 0)
+        if (vodId.isBlank()) return zero
+        val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return zero
+        // 与 position() 完全一致：不做空串特判，否则「集地址为空、历史里也是空」这类站点
+        // 会从「能续播」变成「从 0 播」，属于把优化做成行为变更
+        val pos = if (obj.optString("position_ep", obj.optString("vod_ep_url")) == epUrl)
+            obj.optLong("position", 0) else 0L
+        return longArrayOf(obj.optLong("opening", 0), obj.optLong("ending", 0), pos)
+    }
+
     fun history(): List<JSONObject> = read(KEY_HISTORY)
 
     /** 上次看到的那一集的地址（用于详情页自动定位到该集起播），没有记录返回空串 */
