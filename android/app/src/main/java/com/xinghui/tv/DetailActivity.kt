@@ -105,19 +105,9 @@ class DetailActivity : Activity() {
                 else
                     androidx.media3.exoplayer.DefaultRenderersFactory(this@DetailActivity)
                 setRenderersFactory(rf.setEnableDecoderFallback(true))
-                // 参数顺序 min / max / 起播门槛 / 重缓冲门槛。
-                // media3 硬校验 min 必须 >= 后两个，写反了构造就抛 IllegalArgumentException。
-                val minBufMs = Settings(this@DetailActivity).exoBufferSec.coerceIn(1, 15) * 1000
-                setLoadControl(
-                    androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                        .setBufferDurationsMs(
-                            minBufMs,
-                            minBufMs * 2,
-                            minOf(minBufMs, 2500),
-                            minOf(minBufMs, 5000)
-                        )
-                        .build()
-                )
+                // 与播放页同源，对齐原版 ExoUtil.buildLoadControl()：new DefaultLoadControl()。
+                // 之前按 exoBufferSec 把缓冲砍到 5s/10s 是负优化，已回滚（默认 50s）。
+                setLoadControl(androidx.media3.exoplayer.DefaultLoadControl())
                 val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@DetailActivity)
                 ts.setParameters(
                     ts.buildUponParameters()

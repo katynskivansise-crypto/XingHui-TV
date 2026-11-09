@@ -61,6 +61,17 @@ object ProxyServer {
     private var appCtx: Context? = null
 
     /** 启动本地服务（幂等）。ctx 用于读 assets 与私有目录；缺失时 /file 仍可用，assets 兜底不可用。 */
+    /** /debug 页尾部的「上次崩溃完整堆栈」：MainActivity 的兜底处理器会写到 filesDir/crash.log */
+    private fun crashTail(): String {
+        val dir = appCtx?.filesDir
+            ?: return "== 上次崩溃 ==\n（无私有目录）"
+        return runCatching {
+            val f = File(dir, "crash.log")
+            if (!f.exists()) "== 上次崩溃 ==\n（无）"
+            else "== 上次崩溃 ==\n" + f.readText().takeLast(2400)
+        }.getOrElse { "== 上次崩溃 ==\n（读取失败：${it.message}）" }
+    }
+
     fun startServer(ctx: Context? = null) {
         ctx?.applicationContext?.let { appCtx = it }
         if (http != null) return
@@ -73,7 +84,8 @@ object ProxyServer {
                         // 调试通道：手机浏览器打开 http://盒子IP:9978/debug
                         // 只给排查用，播放页 UI 一行不加、不弹任何提示
                         path == "/debug" -> newFixedLengthResponse(
-                            Response.Status.OK, "text/plain; charset=utf-8", MpvDebug.dump()
+                            Response.Status.OK, "text/plain; charset=utf-8",
+                            MpvDebug.dump() + "\n" + crashTail()
                         )
                         // 原版 /action（server/process/Action.java）：手机网页的「設定/推送/搜尋」都打这里
                         path == "/action" -> handleAction(session)

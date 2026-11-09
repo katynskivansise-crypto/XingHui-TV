@@ -934,15 +934,12 @@ class PlayActivity : Activity() {
      * 之前写成 (ms, ms, ms*2, 50000)：起播门槛和重缓冲门槛都比 min 大，必崩。
      */
     private fun buildLoadControl(): androidx.media3.exoplayer.LoadControl {
-        val minMs = Settings(this).exoBufferSec.coerceIn(1, 15) * 1000
-        return androidx.media3.exoplayer.DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                minMs,                             // 至少要缓冲到这么多才认为够
-                minMs * 2,                         // 缓冲上限，给两倍
-                minOf(minMs, 2500),                // 起播门槛：不能超过 min
-                minOf(minMs, 5000)                 // 重缓冲门槛：不能超过 min
-            )
-            .build()
+        // 对齐原版 ExoUtil.buildLoadControl()：new DefaultLoadControl()，不做自定义。
+        // 之前按设置项 exoBufferSec 编成 min=5s / max=10s，等于把缓冲上限从默认 50s 砍到 10s，
+        // 弱网、长片、高码率下重缓冲明显变多 —— 这是我们自己造的负优化，已回滚。
+        // 原版 Setting 里也有 exo_buffer，但原版 ExoUtil 没消费它；设置项保留（界面一致），
+        // 只是不再驱动缓冲策略。
+        return androidx.media3.exoplayer.DefaultLoadControl()
     }
 
     /**

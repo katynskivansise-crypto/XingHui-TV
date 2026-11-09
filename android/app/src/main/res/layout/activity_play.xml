@@ -27,7 +27,7 @@
     <!-- 内嵌 mpv 的画面层：与 playView 二选一显示。
          不设 setZOrderMediaOverlay：原版零命中，且它会让弹窗开关后 media 层的 z-order
          在老 ROM 上不恢复（表现为 mpv 永久黑屏）。默认 punch-through 下控制条照样盖住。 -->
-    <TextureView
+    <SurfaceView
         android:id="@+id/mpvView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
