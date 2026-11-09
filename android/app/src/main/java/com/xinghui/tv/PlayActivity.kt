@@ -171,7 +171,6 @@ class PlayActivity : Activity() {
         // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
         // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
         // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
-        uiHandler.postDelayed({ warmUpControlBarOnce() }, 250)
         // 起播前这段（地址解析）屏幕本来就是黑的：不亮转圈的话，用户按一下菜单正好赶上这段，
         // 看到的就是「按菜单把画面按黑了」，而实际是还没出帧。这里从进页面就让"加载中"亮着。
         showPlayProgress()
@@ -614,7 +613,6 @@ class PlayActivity : Activity() {
     private fun showPlayProgress() {
         runOnUiThread {
             val v = findViewById<View>(R.id.playProgress)
-            // 预热时曾把它 alpha 置 0 做一次"空show"，这里归位，免得真需要显示时看不见
             v?.alpha = 1f
             v?.visibility = View.VISIBLE
         }
@@ -1260,9 +1258,6 @@ class PlayActivity : Activity() {
     private var controlBar: View? = null
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
-    private var warmedUp = false
-    private var warmedAfterFrame = false
-    private var warmUpping = false
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoHide = Runnable { hideControl() }
 
@@ -1583,8 +1578,6 @@ class PlayActivity : Activity() {
     private val exoHolderCallback = object : android.view.SurfaceHolder.Callback {
         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
             MpvDebug.log("[exo] surfaceCreated ${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()}")
-            // 表面已建好、画面还没出帧：把首次呼出控制条的那次重排提前吃掉
-            uiHandler.post { warmUpControlBarOnce() }
         }
         override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
             MpvDebug.log("[exo] surfaceChanged ${width}x${height} fmt=$format")
@@ -1700,7 +1693,6 @@ class PlayActivity : Activity() {
             MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
             return
         }
-        warmUpping = false
         controlBar?.alpha = 1f
         controlBar?.visibility = View.VISIBLE
         findViewById<View>(R.id.playTitle)?.visibility = if (withTitle) View.VISIBLE else View.GONE
@@ -1798,59 +1790,6 @@ class PlayActivity : Activity() {
                 }
                 prev = v
             }
-        }
-    }
-
-    /**
-     * 首次呼出控制条要触发一次真正的窗口重排（这家 ROM 上这一次要重建画面层的抠洞），
-     * 表现为「第一次按菜单黑一下、之后完全正常」。
-     *
-     * 这里在画面层表面已经建好、但画面还没出帧的时刻，用 alpha=0 把**真实路径**
-     * （显隐 + 焦点 + 修焦点链）整套预演一遍：屏幕上不留任何痕迹，也不加任何提示。
-     */
-    /**
-     * 预热控制条显隐。
-     * @param force 画面真正出帧后强制再来一次：
-     *   第一次按菜单黑屏发生在「已经有画面」之后，那时第一次叠加覆盖视图才会触发合成层重算；
-     *   250ms 的兜底预热通常早于出帧，成本没落在同一时刻，所以出帧后再补一次。
-     */
-    private fun warmUpControlBarOnce(force: Boolean = false) {
-        if (force) {
-            if (warmedAfterFrame) return
-            warmedAfterFrame = true
-        } else {
-            if (warmedUp) return
-            warmedUp = true
-        }
-        val bar = controlBar ?: return
-        warmUpping = true
-        runCatching {
-            bar.alpha = 0f
-            bar.visibility = View.VISIBLE
-            findViewById<View>(R.id.btnNext)?.requestFocus()
-            setControlNextFocus()
-            // 顺带把「加载中」覆盖层也空闪一次：真机上首次按菜单是「先黑、再冒出加载中」，
-            // 说明它同样参与了首次叠加的合成层重算，不能只预热控制条。
-            val progress = findViewById<View>(R.id.playProgress)
-            if (progress != null && progress.visibility == View.GONE) {
-                progress.alpha = 0f
-                progress.visibility = View.VISIBLE
-                uiHandler.postDelayed({
-                    if (progress.visibility == View.VISIBLE && progress.alpha == 0f) {
-                        progress.visibility = View.GONE
-                        progress.alpha = 1f
-                    }
-                }, 32)
-            }
-            uiHandler.postDelayed({
-                runCatching {
-                    if (!warmUpping) return@runCatching // 用户已经真按了菜单，别把真控制条收掉
-                    if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
-                    bar.alpha = 1f
-                    focusRoot("预热收尾")
-                    MpvDebug.log("[ui] 控制条预热完成")
-                }
-            }, 32)
         }
     }
 
@@ -2072,6 +2011,7 @@ class PlayActivity : Activity() {
             runCatching {
                 MpvDebug.log(
                     "[key] kc=${event.keyCode} focus=${currentFocus?.id}" +
+                        "(${currentFocus?.javaClass?.simpleName ?: "null"})" +
                         " bar=${controlBar?.visibility == View.VISIBLE}" +
                         " ready=${contentReady()} mpv=${mpv != null} exo=${player != null}"
                 )
