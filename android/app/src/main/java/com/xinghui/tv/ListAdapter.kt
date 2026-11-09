@@ -60,9 +60,26 @@ class ListAdapter(
         return VH(tv)
     }
 
+    /**
+     * 当前「正在播」的那一项的 key。
+     * 原版是 Episode.setActivated + Flag.setActivated（adapter 里 setSelected/setActivated 双设），
+     * 外观由 selector_item 的 state_activated 分支给出（shape_item_activated：black_40 底 + 4dp 圆角）。
+     * 列表里一直缺这个「当前集」标记，集数格看不出播的是第几集。
+     */
+    var activeKey: String? = null
+        private set
+
+    fun setActive(key: String?) {
+        if (activeKey == key) return
+        activeKey = key
+        notifyDataSetChanged()
+    }
+
     override fun onBindViewHolder(holder: VH, position: Int) {
         val item = items[position]
         holder.text.text = item.second
+        // 只按 key 判"当前项"；焦点态仍由 state_focused 负责，两者互不伪装
+        holder.text.isActivated = activeKey != null && item.first == activeKey
         holder.text.setOnClickListener { onClick(item.first) }
         holder.text.setOnLongClickListener {
             onLongClick?.invoke(item.first)

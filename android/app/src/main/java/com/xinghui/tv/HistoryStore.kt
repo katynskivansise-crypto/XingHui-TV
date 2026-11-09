@@ -96,6 +96,19 @@ class HistoryStore(context: Context) {
     fun history(): List<JSONObject> = read(KEY_HISTORY)
 
     /** 上次看到的那一集的地址（用于详情页自动定位到该集起播），没有记录返回空串 */
+    /**
+     * 最后一次**打开过**的那一集地址（`vod_ep_url`）。
+     *
+     * 和 epUrlOf 的区别：epUrlOf 读的是 `position_ep`，只有真的落过一次进度才会更新；
+     * 而 `vod_ep_url` 是 addHistory 每次起播就写，反映"用户最后点开的是哪一集"。
+     * 从播放页返回、集数格标当前集，都要用这个，否则换集后立刻退出会拿到旧集号。
+     */
+    fun lastEpUrl(vodId: String): String {
+        if (vodId.isBlank()) return ""
+        val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return ""
+        return obj.optString("vod_ep_url", obj.optString("position_ep"))
+    }
+
     fun epUrlOf(vodId: String): String {
         if (vodId.isBlank()) return ""
         val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return ""
