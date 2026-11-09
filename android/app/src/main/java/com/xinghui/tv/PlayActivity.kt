@@ -99,7 +99,7 @@ class PlayActivity : Activity() {
         // 调试快照：手机浏览器打开 http://盒子IP:9978/debug 就能看到这份状态（界面零改动）
         MpvDebug.snapshot = { mpvDebugLine() }
         // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」
-        MpvDebug.log("[boot] build=tk2 档位=${MpvDebug.experiment} sdk=${android.os.Build.VERSION.SDK_INT}")
+        MpvDebug.log("[boot] build=tk3 档位=${MpvDebug.experiment} sdk=${android.os.Build.VERSION.SDK_INT}")
         // 恢复：对齐原版 VideoActivity（继承 BaseActivity）—— 窗口同样挂壁纸，播放器自身黑底压住。
         // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
         // 全屏靠主题的 windowFullscreen + 原版那套 systemUiVisibility（见 applyImmersive），
@@ -607,7 +607,12 @@ class PlayActivity : Activity() {
      * 我们照同一套时机：解析开始、首次缓冲、seek 后都显示，就绪/播完/失败时收起。
      */
     private fun showPlayProgress() {
-        runOnUiThread { findViewById<View>(R.id.playProgress)?.visibility = View.VISIBLE }
+        runOnUiThread {
+            val v = findViewById<View>(R.id.playProgress)
+            // 预热时曾把它 alpha 置 0 做一次"空show"，这里归位，免得真需要显示时看不见
+            v?.alpha = 1f
+            v?.visibility = View.VISIBLE
+        }
     }
 
     private fun hidePlayProgress() {
@@ -1742,6 +1747,19 @@ class PlayActivity : Activity() {
             bar.visibility = View.VISIBLE
             findViewById<View>(R.id.btnNext)?.requestFocus()
             setControlNextFocus()
+            // 顺带把「加载中」覆盖层也空闪一次：真机上首次按菜单是「先黑、再冒出加载中」，
+            // 说明它同样参与了首次叠加的合成层重算，不能只预热控制条。
+            val progress = findViewById<View>(R.id.playProgress)
+            if (progress != null && progress.visibility == View.GONE) {
+                progress.alpha = 0f
+                progress.visibility = View.VISIBLE
+                uiHandler.postDelayed({
+                    if (progress.visibility == View.VISIBLE && progress.alpha == 0f) {
+                        progress.visibility = View.GONE
+                        progress.alpha = 1f
+                    }
+                }, 32)
+            }
             uiHandler.postDelayed({
                 runCatching {
                     if (!warmUpping) return@runCatching // 用户已经真按了菜单，别把真控制条收掉
@@ -1784,60 +1802,50 @@ class PlayActivity : Activity() {
 
     /** OK 键短按：暂停 / 继续（对齐原版 onKeyCenter），EXO / mpv 双内核同语义 */
     private fun togglePlayPause() {
-        // 起播前（还没时长/文件没加载完）也要真生效：先把意图记下来，并且立刻反映到内核上
-        //   EXO → playWhenReady=false，媒体项加载完成后就是停着的
-        //   mpv → pause 属性是全局的，设了之后加载的文件就是暂停起播
-        // 界面同时给出和正常暂停一样的居中图标，不留「按了没反应」的空白。
-        if (!contentReady()) {
-            val wantPause = pendingPauseIntent?.let { !it } ?: true
-            pendingPauseIntent = wantPause
-            if (isMpvMode()) {
-                mpv?.let { if (wantPause) it.pause() else it.resume() }
-            } else {
-                runCatching { player?.playWhenReady = !wantPause }
-            }
-            if (wantPause) {
-                setKeepScreenOn(false)
-                showPlayCenter()
-            } else {
-                setKeepScreenOn(true)
-                hidePlayCenter()
-            }
-            MpvDebug.log("[key] 起播前暂停意图=$wantPause")
-            return
-        }
-        pendingPauseIntent = null
+        // 判定依据只有一个：**内核现在的真实状态**。
+        // 以前这里先分「起播前 / 起播后」两支，起播前那支只写 pendingPauseIntent 并顺手
+        // 设一下 playWhenReady —— 只要那条路径没覆盖到（实例还没建、媒体项还没 attach、
+        // startMpv 又把 pause 冲掉），表现就是「按了没反应」。
+        // 现在统一：读真实状态 → 立刻下发 → 结果同步到界面；pendingPauseIntent 只在
+        // 还没就绪时留一份给起播路径继承。
+        val ready = runCatching { contentReady() }.getOrDefault(false)
         if (isMpvMode()) {
-            val m = mpv ?: return
-            // 用 mpv 自己的 pause 属性判断，不用缓存标记：缓存一旦被「写下去没生效」带偏，
-            // 之后每次按 OK 都会走 resume()，看起来就是 mpv 完全停不下来。
-            if (!m.isPausedActual()) {
-                m.pause()
-                setKeepScreenOn(false)
-                showPlayCenter()
-            } else {
-                m.resume()
-                setKeepScreenOn(true)
-                hidePlayCenter()
+            val m = mpv
+            // 实例还没建（TextureView 未 attach）：只能记账，startMpv 会用 startPaused 带下去
+            val pausing = if (m != null) !runCatching { m.isPausedActual() }.getOrDefault(false)
+            else (pendingPauseIntent?.let { !it } ?: true)
+            pendingPauseIntent = if (!ready) pausing else null
+            if (m != null) {
+                if (pausing) m.pause() else m.resume()
             }
+            applyPauseUi(pausing)
+            MpvDebug.log("[key] toggle mpv ready=$ready 有实例=${m != null} 意图暂停=$pausing")
             return
         }
-        val p = player ?: return
-        // 用 playWhenReady（"意图"）判断，不能看 isPlaying（"瞬时状态"）。
-        // 起播阶段缓冲/等首帧时 isPlaying 恒为 false，一旦按 isPlaying 判断，
-        // 用户按「暂停」反而走 else 调 p.play() —— 表现就是「起播前按暂停没反应」。
-        // 原版 Players.pause() 只负责置 playWhenReady=false，不参考是否正在出帧。
+        val p = player
+        val pausing = if (p != null) p.playWhenReady else (pendingPauseIntent?.let { !it } ?: true)
+        pendingPauseIntent = if (!ready) pausing else null
+        if (p != null) {
+            if (pausing) {
+                p.pause()
+            } else {
+                if (p.playbackState == Player.STATE_ENDED) p.seekTo(0)
+                p.play()
+            }
+        }
+        applyPauseUi(pausing)
         MpvDebug.log(
-            "[key] EXO 切换前 playWhenReady=${p.playWhenReady} isPlaying=${p.isPlaying}" +
-                " state=${p.playbackState} dur=${p.duration}"
+            "[key] toggle EXO ready=$ready 有实例=${p != null} playWhenReady=${p?.playWhenReady}" +
+                " state=${p?.playbackState} 意图暂停=$pausing"
         )
-        if (p.playWhenReady) {
-            p.pause()
+    }
+
+    /** 暂停/继续的界面同步（居中图标 + 常亮）：两条内核共用，避免两边各写一份走偏 */
+    private fun applyPauseUi(pausing: Boolean) {
+        if (pausing) {
             setKeepScreenOn(false)
             showPlayCenter()
         } else {
-            if (p.playbackState == Player.STATE_ENDED) p.seekTo(0)
-            p.play()
             setKeepScreenOn(true)
             hidePlayCenter()
         }
@@ -1973,6 +1981,17 @@ class PlayActivity : Activity() {
     private fun isRightKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // 按键体检：收到了什么键、当时焦点在哪、控制条显不显示、内容就绪没有。
+        // 现场判断「按了没反应」究竟是没收到键、还是收到了但状态分支走错，只靠这一行。
+        if (event.action == KeyEvent.ACTION_UP && event.repeatCount == 0) {
+            runCatching {
+                MpvDebug.log(
+                    "[key] kc=${event.keyCode} focus=${currentFocus?.id}" +
+                        " bar=${controlBar?.visibility == View.VISIBLE}" +
+                        " ready=${contentReady()} mpv=${mpv != null} exo=${player != null}"
+                )
+            }
+        }
         // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
         //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
         //   == 1 → onEpisodes()：弹选集并收起控制栏

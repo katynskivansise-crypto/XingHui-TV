@@ -302,7 +302,7 @@ class DetailActivity : Activity() {
         autoStarted = true
         val v0 = vod
         val hKey = (v0?.vodId.orEmpty()).ifBlank { v0?.vodName.orEmpty() }
-        val last = runCatching { HistoryStore(this).epUrlOf(hKey) }.getOrDefault("")
+        val last = runCatching { HistoryStore(this).lastEpUrl(hKey) }.getOrDefault("")
         val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == last }
             .takeIf { it >= 0 } ?: 0
         Log.e("XingHuiTV", "[detail] 自动起播 idx=$idx 共${episodes.size}集")
@@ -555,6 +555,7 @@ class DetailActivity : Activity() {
             for (i in from until to) pairs.add("E:$i" to episodes[i].first)
         }
         adapter.notifyDataSetChanged()
+        adapter.setActive(if (playingIdx >= 0) "E:$playingIdx" else null)
     }
 
     private var showLines = true
@@ -600,7 +601,7 @@ class DetailActivity : Activity() {
     }
 
     /** 当前线路的第 idx 集（对齐原版 setEpisodeActivated → onRefresh） */
-    private fun playInline(idx: Int, auto: Boolean = false, depth: Int = 0) {
+    private fun playInline(idx: Int, auto: Boolean = false, depth: Int = 0, quiet: Boolean = false) {
         val v = vod ?: return
         val line = currentLine ?: v.parseLines().firstOrNull() ?: return
         // 集数列表以「当前展示的 episodes」为准：磁力/种子被 expandThunder 展开后，
@@ -609,10 +610,13 @@ class DetailActivity : Activity() {
             ?: line.episodes.getOrNull(idx)
             ?: run { Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}"); return }
         playingIdx = idx
+        // 集数格里标出"当前这一集"（原版 setEpisodeActivated）
+        adapter.setActive("E:$idx")
         inlineView.visibility = View.VISIBLE
         findViewById<View>(R.id.detailImage)?.visibility = View.GONE
         showVodInfo(ep.first)
-        Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
+        // 「准备播放 X」这句是自造的，原版没有；返回列表重建时还会再弹一次，更没必要
+        if (!quiet) Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
         // 续播：原版 VideoActivity 打开即 setPosition(Math.max(opening, history.position))。
         // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
         // 换集就是从 0 开始，不会出现点第 3 集跳到第 1 集进度的情况。
@@ -869,6 +873,21 @@ class DetailActivity : Activity() {
         //   2. 从别处回来（首页回来、系统弹窗回来）→ 保持原样，不自动出声
         if (inlineResumeOnReturn) {
             inlineResumeOnReturn = false
+            // 在独立播放页里换过集：集号以历史里最后记下的那一集为准。
+            // 不这样做，返回后小窗会退回离开前那一集 —— 就是「选了第 3 集，退回来又变第 1 集」。
+            val v0 = vod
+            if (v0 != null) {
+                val key0 = v0.vodId.ifBlank { v0.vodName }
+                val lastEp = runCatching { HistoryStore(this).lastEpUrl(key0) }.getOrDefault("")
+                if (lastEp.isNotBlank()) {
+                    val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == lastEp }
+                    if (idx >= 0 && idx != playingIdx) {
+                        Log.i("XingHuiTV", "[detail] 播放页换集过：${playingIdx} → $idx，按该集重建预览")
+                        playInline(idx, quiet = true)
+                        return
+                    }
+                }
+            }
             runCatching {
                 // 进播放页时预览已释放，这里就地重建（参数与首次完全一致）
                 val p = player ?: buildInlinePlayer().also { player = it; applyCaptionStyle() }
@@ -895,6 +914,9 @@ class DetailActivity : Activity() {
                     Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播 at=0ms")
                 }
                 p.play()
+                // 回到本页后焦点要落到集数列表上：SurfaceView 重建期间焦点常常是空的，
+                // 真机表现就是「黑一下，得再按一次才好使」。这里主动收一次焦点。
+                findViewById<View>(R.id.detailList)?.requestFocus()
             }
         }
         inlinePausedByLeave = false
