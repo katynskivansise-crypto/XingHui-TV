@@ -172,6 +172,10 @@ class PlayActivity : Activity() {
         // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
         // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
         uiHandler.postDelayed({ warmUpControlBarOnce() }, 250)
+        // 起播前这段（地址解析）屏幕本来就是黑的：不亮转圈的话，用户按一下菜单正好赶上这段，
+        // 看到的就是「按菜单把画面按黑了」，而实际是还没出帧。这里从进页面就让"加载中"亮着。
+        showPlayProgress()
+        MpvDebug.log("[play] 进页面 开始解析/起播 t=${System.currentTimeMillis() % 100000}")
         updateDecodeText()
         updatePlayerText()
         val marks0 = HistoryStore(this).marks(historyKey)
@@ -822,6 +826,7 @@ class PlayActivity : Activity() {
         // 原版走 OkHttpDataSource，继承的是用户设置的 UA，所以不会踩这个坑。
         val effHeaders = withUa(headers)
         activeUrl = url
+        MpvDebug.log("[play] 起播 url=${url.take(56)}")
         // 片头/片尾按片记忆（对齐原版 History.getOpening/getEnding）
         val marks = HistoryStore(this).marks(historyKey, epUrl)
         openingMs = marks[0]
@@ -2046,6 +2051,14 @@ class PlayActivity : Activity() {
                 }
                 return true
             }
+            if (isEnterKey(event) && event.action == KeyEvent.ACTION_UP) {
+                val v = currentFocus
+                MpvDebug.log(
+                    "[key] OK 落在控制条上 id=${v?.id} cls=${v?.javaClass?.simpleName}" +
+                        " text=" + ((v as? TextView)?.text?.toString() ?: "") +
+                        " clickable=${v?.isClickable} hasClick=${v?.hasOnClickListeners()}"
+                )
+            }
             return super.dispatchKeyEvent(event)
         }
 
@@ -2191,6 +2204,12 @@ class PlayActivity : Activity() {
      */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && currentFocus == null) {
+            // 进页面时 focus=-1（真机日志确认），窗口拿到焦点但没有任何视图持有焦点，
+            // 第一下方向键常常只是"把焦点捡回来"，表现就是"要再点一次才有效"。
+            MpvDebug.log("[key] 窗口获焦但无焦点视图，补一次 requestFocus")
+            (rootView ?: findViewById<View>(android.R.id.content))?.requestFocus()
+        }
         if (hasFocus) {
             applyImmersive()
             // 关掉选集弹窗、从系统框回来时，mpv 的 vo 可能已经被窗口变化带掉；
