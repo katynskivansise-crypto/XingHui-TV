@@ -438,6 +438,10 @@ class MpvPlayer(
         pendingStartMs = startMs
         pendingSubs = subs
         pendingStartPaused = startPaused
+        // 起播前用户按过"继续"时，resume() 因为 surface 还没回来会记一笔 pendingResume。
+        // 这一笔如果留着，下一次 texture 重建就会把 pause 强行置 false ——
+        // 用户明明按了暂停，起播后却自己跑起来。新的 play() 一律清掉这笔旧账。
+        pendingResume = false
         playPending = true
         if (surfaceReady) {
             playPending = false

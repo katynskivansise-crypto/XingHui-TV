@@ -156,8 +156,16 @@ class PlayActivity : Activity() {
             val mpvTexture = findViewById<android.view.TextureView>(R.id.mpvView)
             mpvTexture?.visibility = View.VISIBLE
             playerView?.visibility = View.GONE
-            mpvTexture?.let { ensureMpv(it) }
-            MpvDebug.log("[mpv] 进页面即建实例（未加载文件，按键已可用）")
+            // 原生内核初始化要几十到几百毫秒（mpv_create + 四十多条选项 + observeProperty + attachSurface）。
+            // 放在 onCreate 里同步执行会把"首帧"和"窗口拿到输入焦点"一起往后推 ——
+            // 从详情页进来那一两秒的按键会被系统直接丢掉，表现就是"进去按 OK 没反应"。
+            // 原版 onCreate 里只有 ExoPlayer 的构造（轻得多），不存在这个空档。
+            // 挪到首帧之后：窗口先挂上、先拿到输入焦点，内核随后建好（地址解析本来也要时间）。
+            mpvTexture?.post {
+                if (isFinishing || isDestroyed) return@post
+                mpvTexture.let { ensureMpv(it) }
+                MpvDebug.log("[mpv] 首帧后建实例（未加载文件，按键已可用）")
+            }
         }
         findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
@@ -766,6 +774,7 @@ class PlayActivity : Activity() {
                 }
                 if (state != Player.STATE_READY) return
                 val p = player ?: return
+                uiHandler.post { if (controlBar?.visibility == View.VISIBLE) ensureBarFocus() }
                 // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
                 if (pendingJumpMs >= 0) {
                     val at = pendingJumpMs
@@ -871,6 +880,8 @@ class PlayActivity : Activity() {
         if (applyMediaSource(itemBuilder)) {
             // 起播前按过暂停：媒体项照样加载，但不自动播（与正常暂停的观感一致）
             val wantPlay = pendingPauseIntent != true
+            // 意图只消费一次：留着的话，下一集起播会被误判成"也要暂停"
+            pendingPauseIntent = null
             setKeepScreenOn(wantPlay)
             player?.playWhenReady = wantPlay
             if (!wantPlay) showPlayCenter()
@@ -1168,6 +1179,9 @@ class PlayActivity : Activity() {
                 }
                 hidePlayProgress()
                 recordHistory()
+                // 起播这一刻焦点最容易掉回根布局：控制条若还开着，立刻把落点拉回条内，
+                // 否则用户下一按方向键就是"空打一发"。
+                uiHandler.post { if (controlBar?.visibility == View.VISIBLE) ensureBarFocus() }
             }
             p.onEndFile = { handleEnded() }
             p.onPauseChanged = { paused -> setKeepScreenOn(!paused) }
@@ -1203,10 +1217,13 @@ class PlayActivity : Activity() {
         mpvPos = startMs
         mpvDur = 0
         setKeepScreenOn(true)
+        val startPaused = pendingPauseIntent == true
+        // 意图只消费一次：留着的话下一次换集也会被按成暂停
+        pendingPauseIntent = null
         m.play(
             url, headers, startMs, activeSubs.map { it.uri.toString() },
             // 起播前按过暂停就带下去，别让内核自己解暂停
-            startPaused = pendingPauseIntent == true,
+            startPaused = startPaused,
         )
         Log.i("XingHuiTV", "[mpv] 起播（内嵌） headers=${headers.size} subs=${activeSubs.size} start=${startMs}ms")
         // 15 秒没等到文件加载：说明 so 没打进包 / 该片源 mpv 解不了 → 本页临时退回 EXO
@@ -1758,6 +1775,38 @@ class PlayActivity : Activity() {
      * 说明 rootView.requestFocus() 一直没成功 —— 首键就成了"把焦点捡回来"，表现为要按两次。
      * 这里显式置可聚焦再请求，仍失败就退到 decorView，并把结果写进 /debug。
      */
+    /** v 是不是 parent 的后代（含自身） */
+    private fun isInside(parent: View, child: View): Boolean {
+        var v: View? = child
+        while (v != null) {
+            if (v === parent) return true
+            v = v.parent as? View
+        }
+        return false
+    }
+
+    /**
+     * 控制条可见时，焦点必须落在条内的控件上。
+     *
+     * 真机日志（22:30）: 控制条刚呼出时 `[probe] menu t0 focus=2131361874`（下集），
+     * 起播后同一批按键就变成 `focus=-1(FrameLayout)` —— 焦点被抢回了根布局，
+     * 于是 ←/→ 交给 super 时没有任何控件接住，表现就是"按了没反应、要再按一次"。
+     * 这里在每次按键分发之前兜一次：不在条内就把落点拉回去。
+     */
+    private fun ensureBarFocus(): Boolean {
+        val bar = controlBar ?: return false
+        if (bar.visibility != View.VISIBLE) return false
+        currentFocus?.let { if (isInside(bar, it)) return true }
+        var target = runCatching { bar.findFocus() }.getOrNull()
+        if (target == null || target.visibility != View.VISIBLE) {
+            target = findViewById<View>(lastBarFocusId.takeIf { it != 0 } ?: R.id.btnNext)
+        }
+        if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.btnNext)
+        val ok = target?.requestFocus() == true
+        MpvDebug.log("[ui] 控制条可见但焦点不在条上 → 重新落点 id=${target?.id} ok=$ok")
+        return ok
+    }
+
     private fun focusRoot(reason: String) {
         var v: View? = rootView
         if (v == null) {
@@ -1836,20 +1885,32 @@ class PlayActivity : Activity() {
             // 空实例的 pause 恒为 true → isPausedActual()=true → 会判成"当前在暂停、要恢复"，
             // 第一下 OK 就变成"开始播放"，看起来就是"按暂停没反应"。
             // 未就绪时一律按意图走（没意图就默认"要暂停"）。
+            val pendingPauseIntentBefore = pendingPauseIntent
             val pausing = if (m != null && ready) !runCatching { m.isPausedActual() }.getOrDefault(false)
             else (pendingPauseIntent?.let { !it } ?: true)
             pendingPauseIntent = if (!ready) pausing else null
-            if (m != null) {
+            // 未起播时**不碰内核**：这时候 resume() 会因为 surface 没回来而记 pendingResume，
+            // pause() 也会被后面 doPlay 的 startPaused 覆盖，都是无用账、还可能互相打架。
+            // 起播路径只认 pendingPauseIntent（startMpv → startPaused），这里只更新意图与界面。
+            if (m != null && ready) {
                 if (pausing) m.pause() else m.resume()
             }
             applyPauseUi(pausing)
-            MpvDebug.log("[key] toggle mpv ready=$ready 有实例=${m != null} 意图暂停=$pausing")
+            MpvDebug.log(
+                "[key] toggle mpv ready=$ready 有实例=${m != null} 意图暂停=$pausing" +
+                    " 已下发=${m != null && ready} 前值=${pendingPauseIntentBefore.let { it?.toString() ?: "null" }}"
+            )
             return
         }
         val p = player
-        val pausing = if (p != null) p.playWhenReady else (pendingPauseIntent?.let { !it } ?: true)
+        // 起播前（duration 还是 0 / 媒体项还没 attach）**不能**读 playWhenReady 当依据：
+        // ExoPlayer 刚构造时它就是 false，于是第一下会被判成"当前没在播 → 去播"，
+        // 结果是 play() 一下、界面毫无变化 —— 用户看到的就是"按了没反应"。
+        // 起播前一律按意图走：第一下就是"起播后保持暂停"，与 mpv 分支同一套语义。
+        val pausing = if (p != null && ready) p.playWhenReady
+        else (pendingPauseIntent?.let { !it } ?: true)
         pendingPauseIntent = if (!ready) pausing else null
-        if (p != null) {
+        if (p != null && ready) {
             if (pausing) {
                 p.pause()
             } else {
@@ -2017,6 +2078,13 @@ class PlayActivity : Activity() {
                 )
             }
         }
+        // OK 的按下也记一行（上面只记了抬起）：用来分辨「键根本没到 Activity」与「到了但没效果」
+        if (event.action == KeyEvent.ACTION_DOWN && isEnterKey(event)) {
+            MpvDebug.log("[key] OK 按下 kc=${event.keyCode} ready=${contentReady()} bar=${controlBar?.visibility == View.VISIBLE}")
+        }
+        // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
+        // 那一瞬间开始方向键与 OK 就全落在根上，看起来就是"没反应"。
+        if (controlBar?.visibility == View.VISIBLE) ensureBarFocus()
         // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
         //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
         //   == 1 → onEpisodes()：弹选集并收起控制栏
@@ -2093,7 +2161,14 @@ class PlayActivity : Activity() {
         if (isEnterKey(event)) {
             // 长按倍速的收尾仍交给 onKeyUp（fastForwarding）
             if (fastForwarding) return super.dispatchKeyEvent(event)
-            if (event.action == KeyEvent.ACTION_UP) togglePlayPause()
+            // 改成「按下即生效」：进入播放页本身就是按 OK 进来的，
+            // 进页面后同一个键的抬起事件最容易在窗口切换/首帧阶段丢掉 ——
+            // 丢掉抬起，旧实现就等于没收到这一下，表现就是"进去按 OK 没反应"。
+            // 现在 DOWN(repeat=0) 立刻切换，UP 只吞掉不再动作，也不会重复触发。
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount == 0) togglePlayPause()
+                return true
+            }
             return true
         }
         if (isUpKey(event) || isDownKey(event)) {
@@ -2235,6 +2310,7 @@ class PlayActivity : Activity() {
      */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        MpvDebug.log("[ui] 窗口焦点 hasFocus=$hasFocus decor=${window?.decorView?.width}x${window?.decorView?.height}")
         if (hasFocus && currentFocus == null) {
             // 进页面时 focus=-1（真机日志确认），窗口拿到焦点但没有任何视图持有焦点，
             // 第一下方向键常常只是"把焦点捡回来"，表现就是"要再点一次才有效"。
