@@ -15,6 +15,16 @@ import java.util.Locale
  */
 object MpvDebug {
 
+    /**
+     * 诊断实验档位（由 /debug?x=N 设置，只用于排查，不改默认行为）：
+     *   0 = 正常
+     *   1 = 呼出控制条时不 requestFocus
+     *   2 = 菜单键什么都不做（连控制条都不呼出），用于判断黑屏是否与控制条有关
+     * 一次装包就能在手机浏览器切换，省掉反复打包。
+     */
+    @Volatile
+    var experiment: Int = 0
+
     private const val MAX = 80
 
     private val lines = LinkedList<String>()

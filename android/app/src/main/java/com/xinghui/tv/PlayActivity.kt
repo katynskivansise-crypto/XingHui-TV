@@ -77,6 +77,8 @@ class PlayActivity : Activity() {
         setContentView(R.layout.activity_play)
         // 调试快照：手机浏览器打开 http://盒子IP:9978/debug 就能看到这份状态（界面零改动）
         MpvDebug.snapshot = { mpvDebugLine() }
+        // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」
+        MpvDebug.log("[boot] build=tk2 档位=${MpvDebug.experiment} sdk=${android.os.Build.VERSION.SDK_INT}")
         // 恢复：对齐原版 VideoActivity（继承 BaseActivity）—— 窗口同样挂壁纸，播放器自身黑底压住。
         // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
         // 全屏靠主题的 windowFullscreen + 原版那套 systemUiVisibility（见 applyImmersive），
@@ -901,6 +903,8 @@ class PlayActivity : Activity() {
             it.setHandleAudioBecomingNoisy(true)
             playerView?.player = it
         }
+        // 玩家表面探针必须在 setPlayer 之后挂：media3 会在这时把 surface 交给播放器
+        attachExoSurfaceProbe()
         applyCaptionStyle()
         attachPlayerListeners()
         player?.setPlaybackSpeed(speedSteps[speedIdx])
@@ -983,7 +987,7 @@ class PlayActivity : Activity() {
         if (!HistoryStore(this).setScaleOf(vodId, scaleIdx)) Settings(this).playerScale = scaleIdx
     }
 
-    // ===================== 内嵌 mpv 内核（libmpv + SurfaceView） =====================
+    // ===================== 内嵌 mpv 内核（libmpv + TextureView） =====================
 
     private var mpv: MpvPlayer? = null
     private var mpvPos = 0L
@@ -1039,7 +1043,7 @@ class PlayActivity : Activity() {
         runCatching { player?.release() }
         player = null
         playerView?.visibility = View.GONE
-        val surface = findViewById<android.view.SurfaceView>(R.id.mpvView)
+        val surface = findViewById<android.view.TextureView>(R.id.mpvView)
         surface.visibility = View.VISIBLE
         mpvLoaded = false
         // mpv 没有 ExoPlayer 的 STATE_BUFFERING/READY 回调，等价时机是 onLoaded（FILE_LOADED）。
@@ -1081,7 +1085,7 @@ class PlayActivity : Activity() {
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
-        findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility = View.GONE
+        findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
         playerView?.visibility = View.VISIBLE
         updatePlayerText()
         resumeOverride = mpvPos
@@ -1234,7 +1238,7 @@ class PlayActivity : Activity() {
             Toast.makeText(this, "已切换到 EXO", Toast.LENGTH_SHORT).show()
             mpv?.release()
             mpv = null
-            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility = View.GONE
+            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
             playerView?.visibility = View.VISIBLE
             if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
@@ -1385,7 +1389,7 @@ class PlayActivity : Activity() {
     private fun mpvDebugLine(): String {
         val m = mpv
         val surfaceVis = runCatching {
-            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility
+            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
@@ -1393,13 +1397,83 @@ class PlayActivity : Activity() {
             "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${mpvDur}ms " +
             "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }} " +
             "winFlags=${runCatching { Integer.toHexString(window.attributes.flags) }.getOrElse { "?" }} " +
+            "winFmt=${runCatching { Integer.toHexString(window.attributes.format) }.getOrElse { "?" }} " +
+            "insets=${runCatching { val i = window.decorView.rootWindowInsets; "${i?.systemWindowInsetLeft}x${i?.systemWindowInsetTop}x${i?.systemWindowInsetRight}x${i?.systemWindowInsetBottom}" }.getOrElse { "?" }} " +
+            "exoSurf=${runCatching { val sv = playerView?.videoSurfaceView as? android.view.View; "${sv?.width}x${sv?.height} vis=${sv?.visibility}" }.getOrElse { "?" }} " +
             "url=${activeUrl.take(60)}"
+    }
+
+    // ---------- EXO 三秒黑屏探针（只写 /debug，不改任何 UI 与播放行为） ----------
+    /**
+     * 要分清「三秒黑」到底是哪一种，只需要三个事实：
+     *   1. EXO 的 SurfaceHolder 在按菜单那一刻有没有 destroyed —— 有 = 表面真丢了（重建+起帧要几秒）
+     *   2. player.playbackState 有没有从 READY 掉到 BUFFERING —— 掉了 = 重缓冲（跟合成无关）
+     *   3. 表面一直 valid、状态一直 READY，画面还黑 —— 那就是合成层挖洞被盖住，播放器侧没毛病
+     * 这三条以前全靠猜，现在按一下菜单就同时打出来。
+     */
+    private val exoProbeHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var exoProbeSurface: android.view.SurfaceView? = null
+
+    private val exoHolderCallback = object : android.view.SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+            MpvDebug.log("[exo] surfaceCreated ${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()}")
+        }
+        override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
+            MpvDebug.log("[exo] surfaceChanged ${width}x${height} fmt=$format")
+        }
+        override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+            MpvDebug.log("[exo] surfaceDestroyed state=${exoStateName(player?.playbackState)}")
+        }
+    }
+
+    private fun exoStateName(state: Int?): String = when (state) {
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "null"
+    }
+
+    /** 给 EXO 的画面表面挂生命周期探针：只在 EXO 模式下挂，mpv 模式不动 */
+    private fun attachExoSurfaceProbe() {
+        val v = runCatching { playerView?.videoSurfaceView }.getOrNull() ?: return
+        val sv = v as? android.view.SurfaceView ?: return
+        if (sv === exoProbeSurface) return
+        runCatching { exoProbeSurface?.holder?.removeCallback(exoHolderCallback) }
+        exoProbeSurface = sv
+        runCatching { sv.holder.addCallback(exoHolderCallback) }
+        MpvDebug.log("[exo] 探针挂上 ${sv.javaClass.simpleName} surfValid=${runCatching { sv.holder.surface?.isValid }.getOrNull()}")
+    }
+
+    /** 按菜单那一刻起，按时间点连续采样 EXO 状态（0/100/300/800/1500/3000ms） */
+    private fun logExoMenuTrace() {
+        if (isMpvMode()) return
+        exoProbeHandler.post { MpvDebug.log("[exo] menu t0 " + exoSnapshot()) }
+        listOf(100L, 300L, 800L, 1500L, 3000L).forEach { ms ->
+            exoProbeHandler.postDelayed({ MpvDebug.log("[exo] menu t+${ms} " + exoSnapshot()) }, ms)
+        }
+    }
+
+    private fun exoSnapshot(): String {
+        val p = player
+        val surfValid = runCatching { exoProbeSurface?.holder?.surface?.isValid }.getOrNull()
+        val viewState = runCatching {
+            val sv = playerView?.videoSurfaceView as? android.view.View
+            "${sv?.width}x${sv?.height} vis=${sv?.visibility} attached=${sv?.isAttachedToWindow}"
+        }.getOrElse { "?" }
+        return "state=${exoStateName(p?.playbackState)} playing=${p?.isPlaying} " +
+            "pos=${p?.currentPosition}ms buffered=${runCatching { p?.bufferedPosition }.getOrNull()}ms " +
+            "surfValid=$surfValid view=$viewState playView=${playerView?.visibility} " +
+            "controlBar=${controlBar?.visibility} focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()} " +
+            "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }}"
     }
 
     private fun handleMenuKey() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
         // 调试日志（走 /debug 页面，不弹任何提示）：黑屏到底是「surface 没了」还是「内核假暂停」全靠这行区分
         MpvDebug.log("[menu] " + mpvDebugLine())
+        // EXO 模式下再补一串按时间采样的状态，用来判定三秒黑到底属于哪一类
+        logExoMenuTrace()
         if (toEpisodes) {
             hideControl()
             openEpisodes()
@@ -1414,14 +1488,40 @@ class PlayActivity : Activity() {
      */
     /** 呼出控制条（原版 onKeyDown/onKeyUp → showInfo + showControl） */
     private fun showControl() {
+        // 诊断档位 2：菜单键完全不呼出控制条。用来判断黑屏到底跟控制条有没有关系——
+        // 如果这个档位下按菜单仍然黑，那问题就不在控制条上，别再往这里改。
+        if (MpvDebug.experiment == 2) {
+            MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
+            return
+        }
         controlBar?.visibility = View.VISIBLE
         findViewById<View>(R.id.playTitle)?.visibility = View.VISIBLE
-        findViewById<View>(R.id.btnNext)?.requestFocus()
+        // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
+        if (MpvDebug.experiment != 1) findViewById<View>(R.id.btnNext)?.requestFocus()
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         // 控制条一出现，mpv 侧先做一次渲染自检：vo 掉了就地复位
         if (isMpvMode()) runCatching { mpv?.recoverRendering() }
+        // 诊断：菜单按下瞬间 vs 800ms 后，播放器还在不在播。
+        //   EXO 若从 true 变 false → 说明黑屏其实是「被暂停了」，跟合成层无关；
+        //   一直是 true 却黑 → 画面在渲染、只是被窗口盖住，属合成层问题。
+        //   同时记一次「有没有发生全局重新布局」，用来抓是谁把画面层搞坏的。
+        runCatching {
+            val focusId = currentFocus?.id
+            val exoPlaying = runCatching { player?.isPlaying }.getOrNull()
+            MpvDebug.log("[probe] menu t0 focus=$focusId exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
+            uiHandler.postDelayed({
+                runCatching {
+                    MpvDebug.log(
+                        "[probe] menu t800 exoPlaying=" + runCatching { player?.isPlaying }.getOrNull() +
+                            " mpvPaused=" + runCatching { mpv?.isPausedActual() }.getOrNull() +
+                            " focus=${currentFocus?.id} decor=${window.decorView.width}x${window.decorView.height}" +
+                            " exoSurfaceVis=${runCatching { playerView?.videoSurfaceView?.visibility }.getOrNull()}"
+                    )
+                }
+            }, 800)
+        }
         // 注意：**不要**在这里重建画面层（INVISIBLE→VISIBLE）。
         // 那样每次呼出控制条都会销毁并重建 SurfaceView：EXO 会闪一次黑 shutter、
         // mpv 每次 detach/attach，等于把偶发黑屏换成每次必闪，属于负优化。

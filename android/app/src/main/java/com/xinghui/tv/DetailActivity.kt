@@ -40,6 +40,8 @@ class DetailActivity : Activity() {
     private var player: ExoPlayer? = null
     private lateinit var inlineView: PlayerView
     private var inlineFullscreen = false
+    /** 预览是否因为离开页面被我们主动暂停（回来时不自动续播） */
+    private var inlinePausedByLeave = false
     /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
     private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
     /** 进全屏前小窗上的焦点边框（selector_video），退出全屏时原样还原 */
@@ -679,6 +681,8 @@ class DetailActivity : Activity() {
         val v = vod ?: return
         val line = currentLine ?: return
         val ep = line.episodes.getOrNull(idx) ?: return
+        // 先把预览那一路停掉，再起播放页：两边同时出声就是「两个不同的声音」
+        pauseInlinePlayback()
         startActivity(Intent(this, PlayActivity::class.java).apply {
             putExtra("vod_id", v.vodId)
             putExtra("vod_name", v.vodName)
@@ -756,6 +760,8 @@ class DetailActivity : Activity() {
         val v = vod ?: return
         val line = currentLine ?: return
         val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
+        // 同上：交接给播放页之前先停掉预览
+        pauseInlinePlayback()
         startActivity(Intent(this, PlayActivity::class.java).apply {
             putExtra("vod_id", v.vodId)
             putExtra("vod_name", v.vodName)
@@ -785,10 +791,40 @@ class DetailActivity : Activity() {
         Log.i("XingHuiTV", "[detail] 保存进度 ${pos}ms ep=${ep.first}")
     }
 
+    /**
+     * 预览播放器只有一路出声：离开本页、或转去独立播放页之前必须先停。
+     *
+     * 真机上表现为「播放有时会有两个不同的声音」—— 原因就是这里：
+     * 详情页内嵌预览是我们自己加的（原版 VodActivity 里没有任何播放器，只有列表和详情），
+     * 跳去 PlayActivity 时本页只是走到 onPause，之前只保存进度、没有 pause，
+     * 预览那一路音频继续在响，和新起的播放页叠在一起，所以「有时」（预览正在播时才会）。
+     *
+     * mpv 内核不申请音频焦点，EXO 内核离开焦点也不一定立刻停，
+     * 所以不能指望系统帮忙，必须自己停。
+     */
+    private fun pauseInlinePlayback() {
+        runCatching {
+            val p = player ?: return@runCatching
+            if (p.isPlaying || p.playWhenReady) {
+                inlinePausedByLeave = true
+                p.pause()
+                Log.i("XingHuiTV", "[detail] 离开页面，预览播放器已暂停")
+            }
+        }
+    }
+
     override fun onPause() {
         // 退到后台、按返回、切播放页，都先落一次进度；否则只有正常看完才记得住
         saveInlinePosition()
+        // 同时停声：只落进度不停播放，离开页面后音频会继续在后台响
+        pauseInlinePlayback()
         super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 回来时不自作主张续播：进度已保住，用户按播放键再继续（避免「一进页面就出声」这种多余反馈）
+        inlinePausedByLeave = false
     }
 
     override fun onDestroy() {

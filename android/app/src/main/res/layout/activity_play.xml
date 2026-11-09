@@ -15,11 +15,14 @@
          shutter_background_color 这一项，多设一项反而偏离原版。
          起播/换集那段空档由上面的 playProgress 转圈占位，与原版 Player.Vod 的行为一致
          （keep_content_on_player_reset=false，旧帧清掉后直接看到转圈）。 -->
+    <!-- EXO 画面层保持原版的 surface_view（原版全仓零处 setSurfaceType / setZOrder / shutter，
+         就是 media3 默认值）。用户实测「最新版 EXO 在原版也没问题」，说明 EXO 这条链在
+         同机同 ROM 上本来就正常，这里不做任何偏离原版的改动；要换类实现只在 mpv 侧做
+         （原版没有 mpv，不存在参照）。 -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/playView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@android:color/black"
         app:auto_show="false"
         app:resize_mode="fit"
         app:use_controller="false" />
@@ -27,11 +30,14 @@
     <!-- 内嵌 mpv 的画面层：与 playView 二选一显示。
          不设 setZOrderMediaOverlay：原版零命中，且它会让弹窗开关后 media 层的 z-order
          在老 ROM 上不恢复（表现为 mpv 永久黑屏）。默认 punch-through 下控制条照样盖住。 -->
-    <SurfaceView
+    <!-- 内嵌 mpv 的画面层：TextureView（**不能**加 android:background）。
+         TextureView 不支持背景 drawable，设了就直接在 inflate 阶段抛
+         UnsupportedOperationException —— 上一次「TextureView 崩溃」的 Caused by 就是这一句，
+         不是 ROM 不支持 TextureView。 -->
+    <TextureView
         android:id="@+id/mpvView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@android:color/black"
         android:visibility="gone" />
 
     <!-- 起播/缓冲指示：对齐原版 view_widget_vod.xml 的 @id/progress
