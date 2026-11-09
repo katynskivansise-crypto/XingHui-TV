@@ -36,6 +36,20 @@ class PlayActivity : Activity() {
     private var player: ExoPlayer? = null
 
     private var vodId = ""
+
+    /**
+     * 历史记录主键。
+     *
+     * 原版 History 的 key 是「vod_id 为空就用片名」（History.createHistory 里 cid/name 的组合），
+     * 我们 HistoryStore.addHistory 内部也是这个规则；但 setPosition / marks / setOpeningOf 这些
+     * 都先判 `vodId.isBlank() -> return`。
+     *
+     * 于是详情接口不返回 vod_id 的站点（很常见）会出现：
+     *   addHistory 用片名建了记录 → 进度却因为 vodId 为空一次都没写进去 → 回到详情页/再进播放页
+     *   读出来的 position 永远是 0，看起来就是「一按返回就跳回片头」。
+     * 统一走这个 key 后，写入与读取是同一条记录。
+     */
+    private val historyKey: String get() = vodId.ifBlank { vodName }
     private var vodName = ""
     private var vodPic = ""
     private var flag = ""
@@ -119,7 +133,7 @@ class PlayActivity : Activity() {
          * 会 release 掉 player）这条路径上生效，正常换集走 applyMediaSource 反而用不到。
          */
         // 画面缩放（对齐原版 VideoActivity.getScale：本片记录优先，-1 才回落全局 Setting.getScale）
-        scaleIdx = HistoryStore(this).scaleOf(vodId)
+        scaleIdx = HistoryStore(this).scaleOf(historyKey)
             .takeIf { it >= 0 } ?: Settings(this).playerScale
         scaleIdx = scaleIdx.coerceIn(0, scaleModes.size - 1)
         playerView?.resizeMode = scaleModes[scaleIdx]
@@ -160,7 +174,7 @@ class PlayActivity : Activity() {
         uiHandler.postDelayed({ warmUpControlBarOnce() }, 250)
         updateDecodeText()
         updatePlayerText()
-        val marks0 = HistoryStore(this).marks(vodId)
+        val marks0 = HistoryStore(this).marks(historyKey)
         openingMs = marks0[0]
         endingMs = marks0[1]
         updateOpeningText()
@@ -735,6 +749,7 @@ class PlayActivity : Activity() {
                 }
                 if (state != Player.STATE_READY) return
                 val p = player ?: return
+                uiHandler.postDelayed({ runCatching { warmUpControlBarOnce(force = true) } }, 100)
                 // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
                 if (pendingJumpMs >= 0) {
                     val at = pendingJumpMs
@@ -767,7 +782,7 @@ class PlayActivity : Activity() {
             val dur = mpvDur
             if (dur > 0 && pos >= dur - 10_000) return
             lastSavedPos = pos
-            if (!Settings(this).isIncognito) HistoryStore(this).setPosition(vodId, epUrl, pos)
+            if (!Settings(this).isIncognito) HistoryStore(this).setPosition(historyKey, epUrl, pos)
             return
         }
         val p = player ?: return
@@ -776,7 +791,7 @@ class PlayActivity : Activity() {
         val dur = runCatching { p.duration }.getOrDefault(0)
         if (dur > 0 && pos >= dur - 10_000) return
         lastSavedPos = pos
-        if (!Settings(this).isIncognito) HistoryStore(this).setPosition(vodId, epUrl, pos)
+        if (!Settings(this).isIncognito) HistoryStore(this).setPosition(historyKey, epUrl, pos)
     }
 
     /**
@@ -803,7 +818,7 @@ class PlayActivity : Activity() {
         val effHeaders = withUa(headers)
         activeUrl = url
         // 片头/片尾按片记忆（对齐原版 History.getOpening/getEnding）
-        val marks = HistoryStore(this).marks(vodId, epUrl)
+        val marks = HistoryStore(this).marks(historyKey, epUrl)
         openingMs = marks[0]
         endingMs = marks[1]
         endingDone = false
@@ -1021,7 +1036,7 @@ class PlayActivity : Activity() {
     private fun recordHistory() {
         // 无痕模式：不写历史（对齐原版 Setting.isIncognito 的语义）
         if (Settings(this).isIncognito) return
-        HistoryStore(this).addHistory(vodId, vodName, vodPic, "", flag, epUrl)
+        HistoryStore(this).addHistory(historyKey, vodName, vodPic, "", flag, epUrl)
     }
 
     /** 倍速：点击循环档位（对齐原项目 onSpeed()/addSpeed()） */
@@ -1036,7 +1051,7 @@ class PlayActivity : Activity() {
         if (isMpvMode()) mpv?.applyScale(scaleIdx) else playerView?.resizeMode = scaleModes[scaleIdx]
         findViewById<TextView>(R.id.btnScale).text = scaleNames[scaleIdx]
         // 对齐原版 VideoActivity.onScale：档位写进本片 History，不动全局 Setting
-        if (!HistoryStore(this).setScaleOf(vodId, scaleIdx)) Settings(this).playerScale = scaleIdx
+        if (!HistoryStore(this).setScaleOf(historyKey, scaleIdx)) Settings(this).playerScale = scaleIdx
     }
 
     // ===================== 内嵌 mpv 内核（libmpv + TextureView） =====================
@@ -1123,6 +1138,9 @@ class PlayActivity : Activity() {
         val p = MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
                 mpvLoaded = true
+                // 画面真正开始出帧之后再预演一次控制条显隐：第一次按菜单黑屏是「有画面之后第一次
+                // 叠一层覆盖视图」触发的合成层重算，预热必须发生在有画面之后才真的把这次重算提前掉。
+                uiHandler.postDelayed({ runCatching { warmUpControlBarOnce(force = true) } }, 100)
                 Log.i("XingHuiTV", "[mpv] 已加载 ${activeUrl.take(60)}")
                 // 加载完成前用户按过快进：这时候文件才真正可定位，补跳一次
                 if (mpvSeekAfterLoad >= 0) {
@@ -1167,7 +1185,11 @@ class PlayActivity : Activity() {
         mpvPos = startMs
         mpvDur = 0
         setKeepScreenOn(true)
-        m.play(url, headers, startMs, activeSubs.map { it.uri.toString() })
+        m.play(
+            url, headers, startMs, activeSubs.map { it.uri.toString() },
+            // 起播前按过暂停就带下去，别让内核自己解暂停
+            startPaused = pendingPauseIntent == true,
+        )
         Log.i("XingHuiTV", "[mpv] 起播（内嵌） headers=${headers.size} subs=${activeSubs.size} start=${startMs}ms")
         // 15 秒没等到文件加载：说明 so 没打进包 / 该片源 mpv 解不了 → 本页临时退回 EXO
         uiHandler.removeCallbacks(mpvWatchdog)
@@ -1219,6 +1241,7 @@ class PlayActivity : Activity() {
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
     private var warmedUp = false
+    private var warmedAfterFrame = false
     private var warmUpping = false
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoHide = Runnable { hideControl() }
@@ -1428,13 +1451,13 @@ class PlayActivity : Activity() {
 
     private fun setOpening(ms: Long) {
         openingMs = ms.coerceAtLeast(0)
-        HistoryStore(this).setOpeningOf(vodId, openingMs)
+        HistoryStore(this).setOpeningOf(historyKey, openingMs)
         updateOpeningText()
     }
 
     private fun setEnding(ms: Long) {
         endingMs = ms.coerceAtLeast(0)
-        HistoryStore(this).setEndingOf(vodId, endingMs)
+        HistoryStore(this).setEndingOf(historyKey, endingMs)
         updateEndingText()
         endingDone = false
     }
@@ -1698,10 +1721,21 @@ class PlayActivity : Activity() {
      * 这里在画面层表面已经建好、但画面还没出帧的时刻，用 alpha=0 把**真实路径**
      * （显隐 + 焦点 + 修焦点链）整套预演一遍：屏幕上不留任何痕迹，也不加任何提示。
      */
-    private fun warmUpControlBarOnce() {
-        if (warmedUp) return
+    /**
+     * 预热控制条显隐。
+     * @param force 画面真正出帧后强制再来一次：
+     *   第一次按菜单黑屏发生在「已经有画面」之后，那时第一次叠加覆盖视图才会触发合成层重算；
+     *   250ms 的兜底预热通常早于出帧，成本没落在同一时刻，所以出帧后再补一次。
+     */
+    private fun warmUpControlBarOnce(force: Boolean = false) {
+        if (force) {
+            if (warmedAfterFrame) return
+            warmedAfterFrame = true
+        } else {
+            if (warmedUp) return
+            warmedUp = true
+        }
         val bar = controlBar ?: return
-        warmedUp = true
         warmUpping = true
         runCatching {
             bar.alpha = 0f
@@ -1789,7 +1823,15 @@ class PlayActivity : Activity() {
             return
         }
         val p = player ?: return
-        if (p.isPlaying) {
+        // 用 playWhenReady（"意图"）判断，不能看 isPlaying（"瞬时状态"）。
+        // 起播阶段缓冲/等首帧时 isPlaying 恒为 false，一旦按 isPlaying 判断，
+        // 用户按「暂停」反而走 else 调 p.play() —— 表现就是「起播前按暂停没反应」。
+        // 原版 Players.pause() 只负责置 playWhenReady=false，不参考是否正在出帧。
+        MpvDebug.log(
+            "[key] EXO 切换前 playWhenReady=${p.playWhenReady} isPlaying=${p.isPlaying}" +
+                " state=${p.playbackState} dur=${p.duration}"
+        )
+        if (p.playWhenReady) {
             p.pause()
             setKeepScreenOn(false)
             showPlayCenter()
@@ -1840,6 +1882,7 @@ class PlayActivity : Activity() {
         if (!contentReady()) {
             // 起播前的定位：记下来，就绪后补跳（EXO 走 pendingJumpMs，mpv 走 mpvSeekAfterLoad）
             pendingJumpMs = target
+            MpvDebug.log("[key] 起播前快进意图 → ${target}ms（就绪后补跳）")
         }
         if (isMpvMode()) {
             if (!mpvLoaded) mpvSeekAfterLoad = target else mpv?.seekToMs(target)
@@ -1848,6 +1891,12 @@ class PlayActivity : Activity() {
         // 对齐原版 onSeekTo：跳完立刻收起居中提示并恢复播放（原版在 onSeekTo 里调了 onPlay()，
         // onPlay 里做的是 addFlags(KEEP_SCREEN_ON) + play() + hideCenter()）。
         hidePlayCenter()
+        if (!contentReady()) {
+            // 起播前按快进：文件还没加载，定位已经记进 pendingJumpMs / mpvSeekAfterLoad。
+            // 这时**不能**顺手 resume —— 会把用户刚按下的暂停冲掉（表现为「暂停没反应」）。
+            // 原版 onSeekTo 里也确实会 onPlay，但那是在已经起播的前提下。
+            return@Runnable
+        }
         if (isMpvMode()) {
             if (mpv?.isPausedActual() ?: false) mpv?.resume()
         } else {
@@ -1951,7 +2000,13 @@ class PlayActivity : Activity() {
                 hidePlayCenter()
                 return true
             }
-            return super.dispatchKeyEvent(event)
+            // 第三层：真的退出。不走 super —— 各 ROM 对 KEYCODE_BACK 的默认处理不一致，
+            // 有的会先给 Activity 一次 onKeyDown/onKeyUp 往返（部分机型伴随窗口重建、画面回到首帧），
+            // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
+            runCatching { savePosition() }
+            MpvDebug.log("[key] back 退出播放页 pos=" + currentPosMs() + " shown=" + shown)
+            finish()
+            return true
         }
 
         if (shown) {

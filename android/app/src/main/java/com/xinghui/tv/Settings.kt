@@ -80,11 +80,6 @@ class Settings(context: Context) {
         get() = prefs.getInt("episode_style", 1)
         set(value) = prefs.edit().putInt("episode_style", value).apply()
 
-    /** 首页 MENU 键：0选项弹窗 1切换站源 2切换线路 3直播 4历史 5搜索 6推送 7收藏 8设置 */
-    var homeMenuKey: Int
-        get() = prefs.getInt("home_menu_key", 8)
-        set(value) = prefs.edit().putInt("home_menu_key", value).apply()
-
     /** 全屏 MENU 键：0=控制栏，1=选集 */
     var fullscreenMenuKey: Int
         get() = prefs.getInt("fullscreen_menu_key", 0)

@@ -15,6 +15,12 @@ import java.io.File
  * 所以原版「首页风格（简洁/TVBox 两套）」这一项在我们这里没有意义，直接不放；
  * 同样，我们没有悬浮小窗、没有播放页信息栏、原版 getSearchUI() 本身也是零消费点，
  * 对应几项一并去掉，不留「未实现」占位。
+ *
+ * 2026-11 再收一轮：**海报 / 收藏 / 首页菜单键 / 首页历史 / 历史** 这五行也去掉 ——
+ * 它们都是原版才有的可调项，我们不需要在这里控制：
+ *   - 海报、首页历史：固定开启（Settings 里的字段与消费点保持不变，只是不再给开关）
+ *   - 首页菜单键：固定「设置页面」（MainActivity.dispatchKeyEvent 里兜底，见那边注释）
+ *   - 历史、收藏：清空入口挪走，各自页面里本来就有删除交互
  */
 class SettingsCustomActivity : Activity() {
 
@@ -26,18 +32,8 @@ class SettingsCustomActivity : Activity() {
         WallpaperStore.apply(this)
         settings = Settings(this)
 
-        val store = HistoryStore(this)
-
         val SIZE = arrayOf("小", "中", "大", "特大")
         val FULLSCREEN_KEY = arrayOf("控制栏", "选集")
-        val HOME_KEY = arrayOf(
-            "选项弹窗", "切换站源", "切换线路", "直播页面", "历史页面",
-            "搜索页面", "推送页面", "收藏页面", "设置页面"
-        )
-        // 0 选项弹窗 / 2 切换线路 / 6 推送页面 我们还没有对应实现，循环时跳过，
-        // 免得用户选到空档后按菜单键没反应。
-        val HOME_KEY_USABLE = intArrayOf(1, 3, 4, 5, 7, 8)
-
         // ---- 图片尺寸：首页列数（MainActivity.uiColumns / ProductColumn.of）----
         bindCycle(R.id.cusSize, R.id.valCusSize, SIZE,
             { settings.uiSize }, { settings.uiSize = it })
@@ -49,10 +45,6 @@ class SettingsCustomActivity : Activity() {
         // ---- 全屏菜单键：PlayActivity:1291 ----
         bindCycle(R.id.cusFullscreenKey, R.id.valCusFullscreenKey, FULLSCREEN_KEY,
             { settings.fullscreenMenuKey }, { settings.fullscreenMenuKey = it })
-
-        // ---- 首页菜单键：MainActivity.dispatchKeyEvent 分发 ----
-        bindCycle(R.id.cusHomeMenuKey, R.id.valCusHomeMenuKey, HOME_KEY,
-            { settings.homeMenuKey }, { settings.homeMenuKey = it }, HOME_KEY_USABLE)
 
         // ---- 聚合搜索：SearchActivity，关时只请求当前站 ----
         bindSwitch(R.id.cusAggSearch, R.id.valCusAggSearch,
@@ -67,34 +59,6 @@ class SettingsCustomActivity : Activity() {
         showCacheDir()
         findViewById<View>(R.id.cusCacheDir)?.setOnClickListener { pickCacheDir() }
 
-        // ---- 首页历史：MainActivity:169 ----
-        bindSwitch(R.id.cusHomeHistory, R.id.valCusHomeHistory,
-            { settings.isHomeHistory }, { settings.isHomeHistory = it })
-
-        // ---- 海报：DetailActivity:252 / VideoAdapter:79 ----
-        bindSwitch(R.id.cusPoster, R.id.valCusPoster,
-            { settings.showPoster }, { settings.showPoster = it })
-
-        // ---- 历史 / 收藏：点击清空 ----
-        findViewById<TextView>(R.id.valCusHistory)?.text = "${store.history().size} 条（点击清空）"
-        findViewById<TextView>(R.id.valCusFav)?.text = "${store.favorites().size} 条（点击清空）"
-
-        findViewById<View>(R.id.cusHistory)?.setOnClickListener {
-            if (store.history().isEmpty()) {
-                Toast.makeText(this, "暂无历史记录", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            store.clearHistory()
-            findViewById<TextView>(R.id.valCusHistory)?.text = "0 条（点击清空）"
-        }
-        findViewById<View>(R.id.cusFav)?.setOnClickListener {
-            if (store.favorites().isEmpty()) {
-                Toast.makeText(this, "暂无收藏", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            store.clearFavorites()
-            findViewById<TextView>(R.id.valCusFav)?.text = "0 条（点击清空）"
-        }
     }
 
     /**

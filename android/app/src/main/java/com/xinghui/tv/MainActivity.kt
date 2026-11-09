@@ -384,25 +384,19 @@ class MainActivity : Activity() {
      * 表现为卡片比原版大一圈、每行少一张，越往后偏差越大。
      */
     /**
-     * 首页菜单键（逐字对齐原版 HomeActivity:508-519 的 dispatchKeyEvent）：
+     * 首页菜单键（对齐原版 HomeActivity:508-519 的 dispatchKeyEvent）：
      *   KeyUtil.isMenuKey = ACTION_UP && KEYCODE_MENU
-     * 原版是首页 pager 第 0 页才响应；我们只有单页首页，所以直接分发。
-     * 0/2/6 三档（选项弹窗 / 切换线路 / 推送页面）我们尚无对应实现，设置页负责把循环跳过它们，
-     * 这里再兜一次底，避免历史遗留值撞上空档。
+     * 原版有九档可调（选项弹窗/切站源/切线路/直播/历史/搜索/推送/收藏/设置），
+     * 我们只保留一个固定行为：进设置页面。可调项与 Settings.homeMenuKey 字段都已移除。
      */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (event.action == android.view.KeyEvent.ACTION_UP &&
             event.keyCode == android.view.KeyEvent.KEYCODE_MENU
         ) {
-            when (Settings(this).homeMenuKey) {
-                1 -> startActivity(android.content.Intent(this, SitesActivity::class.java))
-                3 -> startActivity(android.content.Intent(this, LiveActivity::class.java))
-                4 -> startActivity(android.content.Intent(this, HistoryActivity::class.java))
-                5 -> startActivity(android.content.Intent(this, SearchActivity::class.java))
-                7 -> startActivity(android.content.Intent(this, CollectActivity::class.java))
-                8 -> startActivity(android.content.Intent(this, SettingsActivity::class.java))
-                else -> return super.dispatchKeyEvent(event)
-            }
+            // 固定行为：首页按菜单键 → 设置页面。
+            // 「首页菜单键」这个可调项已经整个拿掉了（Settings.homeMenuKey 字段一并删除），
+            // 不再读配置、也不再有 0/2/6 之类空档 —— 只有这一个默认行为。
+            startActivity(android.content.Intent(this, SettingsActivity::class.java))
             return true
         }
         return super.dispatchKeyEvent(event)

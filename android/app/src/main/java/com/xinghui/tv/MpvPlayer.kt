@@ -66,6 +66,7 @@ class MpvPlayer(
     private var initError: String? = null
     private val logFile: java.io.File by lazy { java.io.File(activity.filesDir, "mpv.log") }
     private var pendingStartMs = 0L
+    private var pendingStartPaused = false
     private var pendingSeekMs = 0L
     private var paused = true
     private var eofReached = false
@@ -411,7 +412,19 @@ class MpvPlayer(
 
     // ---------------------------------------------------------------- 播放
 
-    fun play(url: String, headers: Map<String, String>, startMs: Long = 0, subs: List<String> = emptyList()) {
+    /**
+     * @param startPaused 起播即暂停。
+     *   用户在文件还没加载时按了 OK，PlayActivity 会先 mpv.pause() 记下意图；
+     *   但 doPlay() 里 loadfile 之后无条件 `pause=false`，会把这条意图吃掉 ——
+     *   真机上表现就是「刚进播放页按暂停没反应，播了一会儿再按才正常」。
+     */
+    fun play(
+        url: String,
+        headers: Map<String, String>,
+        startMs: Long = 0,
+        subs: List<String> = emptyList(),
+        startPaused: Boolean = false,
+    ) {
         requestAudioFocus()
         // addCallback 时 surface 已经有效的话，系统不会再补发 surfaceCreated，
         // 那样 inited/surfaceReady 会一直停在 false，起播就永远等下去
@@ -424,6 +437,7 @@ class MpvPlayer(
         pendingHeaders = headers
         pendingStartMs = startMs
         pendingSubs = subs
+        pendingStartPaused = startPaused
         playPending = true
         if (surfaceReady) {
             playPending = false
@@ -449,8 +463,10 @@ class MpvPlayer(
             // 起播前的定位必须等 FILE_LOADED：文件还没加载时 seek absolute 会直接失败
             pendingSeekMs = pendingStartMs
             `is`.xyz.mpv.MPVLib.command(arrayOf("loadfile", url, "replace"))
-            paused = false
-            `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", false)
+            // 尊重起播前按下的暂停意图：不能无条件解暂停
+            val startPaused = pendingStartPaused
+            paused = startPaused
+            `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", startPaused)
             Log.i(TAG, "[mpv] 起播 $url")
         }.onFailure { Log.e(TAG, "[mpv] 起播失败", it) }
     }
