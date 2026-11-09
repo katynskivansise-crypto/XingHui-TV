@@ -79,7 +79,8 @@ class PlayActivity : Activity() {
         MpvDebug.snapshot = { mpvDebugLine() }
         // 恢复：对齐原版 VideoActivity（继承 BaseActivity）—— 窗口同样挂壁纸，播放器自身黑底压住。
         // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
-        // 白边的真正解法是让内容区真正全屏（Theme.TVBox + LAYOUT_FULLSCREEN），不是靠撤壁纸。
+        // 全屏靠主题的 windowFullscreen + 原版那套 systemUiVisibility（见 applyImmersive），
+        // 不再额外下发窗口 flag —— 那两条 flag 会让窗口反复 relayout，正是黑屏的来源。
         runCatching { WallpaperStore.apply(this) }
 
         vodId = intent.getStringExtra("vod_id") ?: ""
@@ -1390,6 +1391,8 @@ class PlayActivity : Activity() {
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
             "mpvView=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
             "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${mpvDur}ms " +
+            "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }} " +
+            "winFlags=${runCatching { Integer.toHexString(window.attributes.flags) }.getOrElse { "?" }} " +
             "url=${activeUrl.take(60)}"
     }
 
@@ -1694,56 +1697,32 @@ class PlayActivity : Activity() {
      * 缺这一步时内容区会被状态栏/导航栏占掉，PlayerView 铺不满窗口，
      * 四周露出的就是 window 背景（壁纸），浅色壁纸下表现为一圈白边。
      */
-    /** 窗口 flag 只需落一次（它一旦设上就不会消失），见 applyImmersive 里的注释 */
     /**
-     * 已经下发过的窗口 flag 位。
+     * 沉浸式全屏 —— 完全照原版 `Util.hideSystemUI(Window)`：
      *
-     * 不能用「只做一次」的布尔闸门：HDMI 改分辨率、系统栏因某些 ROM 重新出现时，
-     * 那两位会被系统清掉，布尔闸门挡着就再也不补 —— 白边会回来。
-     * 这里改成按位比对：读当前窗口真实的 flags，缺哪一位才 addFlags，
-     * 位都在就不调，避免 Window.setFlags 无条件触发 onWindowAttributesChanged → relayout
-     * → SurfaceView 重建 → EXO 黑色 shutter 重盖（T1 上约 3 秒）。
+     *     只设 systemUiVisibility，**不碰任何窗口 flag**。
+     *
+     * 原版在同一台 T1 上「按菜单键」画面不黑，我们之前却黑，差别就在这里：
+     * 我们额外下发过 FLAG_FULLSCREEN | FLAG_LAYOUT_IN_SCREEN，并加了 LAYOUT_FULLSCREEN，
+     * 只要窗口属性再变一次（呼出控制条、焦点变化、关弹窗回来都会触发 onWindowFocusChanged），
+     * WindowManager 就重新布局窗口、SurfaceView 重新挖洞；这家 ROM 上重算的结果是
+     * 整屏被窗口盖住 —— 表现为「画面全黑、声音照走」，按返回（窗口再变一次）才恢复。
+     *
+     * 主题里已经有 windowFullscreen=true，白边不靠这两条 flag 兜；
+     * HDMI 改分辨率后若真出现白边，也由主题 + LAYOUT_STABLE 兜住，不需要窗口 flag。
      */
-    private var appliedWindowFlags = 0
-
     private fun applyImmersive() {
         runCatching {
-            // 硬设窗口 flag（theme 的 windowFullscreen 在部分 ROM 上会被 DecorView insets 覆盖）：
-            // FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算。
-            // 只保留两条：FLAG_FULLSCREEN 兜住 hide 系统栏，FLAG_LAYOUT_IN_SCREEN 让内容从屏幕左上角起算。
-            // 上一轮加的 FLAG_LAYOUT_NO_LIMITS 是对悬浮窗用的，加在 Activity 上会让窗口尺寸计算异常，已移除。
-            //
-            // Window.setFlags 会**无条件**回调 onWindowAttributesChanged → WindowManager.updateViewLayout，
-            // 即使 flag 位没有变化也会走一次窗口 relayout；原版 Util.hideSystemUI 只调
-            // setSystemUiVisibility、不碰窗口 flag，所以原版没有这次多余 relayout。
-            // 而 onWindowFocusChanged 每关一次弹窗都会回来调本方法 —— 于是每关一次菜单
-            // 就 relayout 一次，SurfaceView 跟着重建，EXO 的黑色 shutter 重新盖上，
-            // 要等重新渲染出第一帧才撤（T1 上约 3 秒）。mpv 侧则因 vo 未复位而永久黑。
-            //
-            // 所以这里按位比对而不是「只做一次」：读窗口当前真实 flags，缺位才补。
-            //   - 位都在 -> 不调 addFlags -> 不 relayout -> SurfaceView 不重建
-            //   - HDMI 改分辨率 / ROM 清掉系统栏标志导致位缺失 -> 自动补回，白边不会回来
-            val wantFlags = WindowManager.LayoutParams.FLAG_FULLSCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-            val currentFlags = window.attributes.flags
-            if (currentFlags and wantFlags != wantFlags || appliedWindowFlags != wantFlags) {
-                window.addFlags(wantFlags)
-                appliedWindowFlags = wantFlags
-            }
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_LOW_PROFILE
                     or View.SYSTEM_UI_FLAG_FULLSCREEN
-                    // LAYOUT_FULLSCREEN 才是「布局真正延伸到系统栏区域」的那一位。
-                    // 原版 Util.hideSystemUI 没写它，是因为原版 Activity 主题本身带 windowFullscreen；
-                    // 少了它时 FULLSCREEN 只隐藏状态栏、内容区仍在栏下方，等于白做。
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                     or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                     or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                     or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 )
-            Log.i("XingHuiTV", "[play] 沉浸式全屏已应用")
+            Log.i("XingHuiTV", "[play] 沉浸式全屏已应用（原版语义：只设 systemUiVisibility）")
         }.onFailure { Log.e("XingHuiTV", "[play] 沉浸式全屏设置失败", it) }
     }
 
