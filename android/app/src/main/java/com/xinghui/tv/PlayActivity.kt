@@ -879,7 +879,21 @@ class PlayActivity : Activity() {
             // Manifest 已声明 usesCleartextTraffic="true"，https→http 也不会被系统拦。
             .setAllowCrossProtocolRedirects(true)
         if (headers.isNotEmpty()) dataSourceFactory.setDefaultRequestProperties(headers)
-        builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+        // 解析器参数对齐原版 ExoUtil 的 getExtractorsFactory（原版 MediaSourceFactory.java 同一行）：
+        //   FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS —— TS 里 HDMV 封装的 DTS 音轨默认会被丢弃，
+        //     这类片源表现为「有画面没声音」，加上才认；
+        //   时间戳搜索范围 ×3 —— TS 流 PTS 混乱/首包不是 PAT 时，搜索窗口太窄会起播失败或首帧错乱，
+        //     原版把 DEFAULT_TIMESTAMP_SEARCH_BYTES 放宽到三倍。
+        // 不设这两项时都是 media3 默认值，跟原版不一致。
+        val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
+            .setTsExtractorFlags(
+                androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+                    .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
+            )
+            .setTsExtractorTimestampSearchBytes(
+                androidx.media3.extractor.ts.TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 3
+            )
+        builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory, extractors))
         player = builder.build().also {
             // 官方 Players.java:158 setHandleAudioBecomingNoisy(true)：
             // HDMI / 蓝牙音频突然断开时自动暂停，而不是继续无声播放。
@@ -1027,7 +1041,7 @@ class PlayActivity : Activity() {
         runCatching { player?.release() }
         player = null
         playerView?.visibility = View.GONE
-        val surface = findViewById<android.view.TextureView>(R.id.mpvView)
+        val surface = findViewById<android.view.SurfaceView>(R.id.mpvView)
         surface.visibility = View.VISIBLE
         mpvLoaded = false
         // mpv 没有 ExoPlayer 的 STATE_BUFFERING/READY 回调，等价时机是 onLoaded（FILE_LOADED）。
@@ -1069,7 +1083,7 @@ class PlayActivity : Activity() {
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
-        findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
+        findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility = View.GONE
         playerView?.visibility = View.VISIBLE
         updatePlayerText()
         resumeOverride = mpvPos
@@ -1222,7 +1236,7 @@ class PlayActivity : Activity() {
             Toast.makeText(this, "已切换到 EXO", Toast.LENGTH_SHORT).show()
             mpv?.release()
             mpv = null
-            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
+            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility = View.GONE
             playerView?.visibility = View.VISIBLE
             if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
@@ -1373,7 +1387,7 @@ class PlayActivity : Activity() {
     private fun mpvDebugLine(): String {
         val m = mpv
         val surfaceVis = runCatching {
-            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility
+            findViewById<android.view.SurfaceView>(R.id.mpvView)?.visibility
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
@@ -1406,8 +1420,12 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null}")
-        // 控制条一出现，mpv 侧就做一次渲染自检：vo 掉了就地复位，不等系统重建 surface
+        // 控制条一出现，mpv 侧先做一次渲染自检：vo 掉了就地复位
         if (isMpvMode()) runCatching { mpv?.recoverRendering() }
+        // 注意：**不要**在这里重建画面层（INVISIBLE→VISIBLE）。
+        // 那样每次呼出控制条都会销毁并重建 SurfaceView：EXO 会闪一次黑 shutter、
+        // mpv 每次 detach/attach，等于把偶发黑屏换成每次必闪，属于负优化。
+        // 真要治「挖洞失效」，正确做法是把控制条放进独立窗口，别碰 Activity 窗口合成。
     }
 
     /** 收起控制条（原版 hideControl(true)：控制条与顶部片名一起收，5 秒 INTERVAL_HIDE 自动触发） */
