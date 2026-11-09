@@ -42,6 +42,8 @@ class DetailActivity : Activity() {
     private var inlineFullscreen = false
     /** 预览是否因为离开页面被我们主动暂停（回来时不自动续播） */
     private var inlinePausedByLeave = false
+    /** 本次离开是「跳去独立播放页」，回来要把预览续上；按返回退出详情页则不用 */
+    private var inlineResumeOnReturn = false
     /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
     private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
     /** 进全屏前小窗上的焦点边框（selector_video），退出全屏时原样还原 */
@@ -683,6 +685,8 @@ class DetailActivity : Activity() {
         val ep = line.episodes.getOrNull(idx) ?: return
         // 先把预览那一路停掉，再起播放页：两边同时出声就是「两个不同的声音」
         pauseInlinePlayback()
+        // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
+        inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
             putExtra("vod_id", v.vodId)
             putExtra("vod_name", v.vodName)
@@ -762,6 +766,7 @@ class DetailActivity : Activity() {
         val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
         // 同上：交接给播放页之前先停掉预览
         pauseInlinePlayback()
+        inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
             putExtra("vod_id", v.vodId)
             putExtra("vod_name", v.vodName)
@@ -823,7 +828,21 @@ class DetailActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // 回来时不自作主张续播：进度已保住，用户按播放键再继续（避免「一进页面就出声」这种多余反馈）
+        // 分两种「回来」：
+        //   1. 从我们自己的播放页返回 → 预览要继续播（否则小窗停在离开时那一帧，
+        //      看着像卡住/退回第一屏）；这是本页自己发起的跳转，续播是预期行为
+        //   2. 从别处回来（首页回来、系统弹窗回来）→ 保持原样，不自动出声
+        if (inlineResumeOnReturn) {
+            inlineResumeOnReturn = false
+            runCatching {
+                val p = player ?: return@runCatching
+                if (p.playbackState == androidx.media3.common.Player.STATE_IDLE) {
+                    p.prepare()
+                }
+                p.play()
+                Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播")
+            }
+        }
         inlinePausedByLeave = false
     }
 

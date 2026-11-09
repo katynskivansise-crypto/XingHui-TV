@@ -123,14 +123,39 @@ class PlayActivity : Activity() {
             player = ExoPlayer.Builder(this).build().also { playerView?.player = it }
             applyCaptionStyle()
             attachPlayerListeners()
+        } else {
+            // mpv 内核：先把原生实例建好，按键（暂停/快进）从第一秒起就有效。
+            // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
+            val texture = findViewById<android.view.TextureView>(R.id.mpvView)
+            texture?.visibility = View.VISIBLE
+            playerView?.visibility = View.GONE
+            texture?.let { ensureMpv(it) }
+            MpvDebug.log("[mpv] 进页面即建实例（未加载文件，按键已可用）")
         }
         findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
 
         applyImmersive()
+        // 窗口形态实验档（3/4），非 3/4 时什么都不做
+        applyWindowShapeExperiment()
         // 原版播放页没有返回按钮（VideoActivity 靠系统返回键），这里同样不摆
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
+        // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
+        // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
+        // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
+        uiHandler.postDelayed({
+            runCatching {
+                val bar = controlBar ?: return@runCatching
+                bar.alpha = 0f
+                bar.visibility = View.VISIBLE
+                uiHandler.postDelayed({
+                    runCatching { bar.visibility = View.GONE }
+                    bar.alpha = 1f
+                    MpvDebug.log("[ui] 控制条预热完成")
+                }, 32)
+            }
+        }, 80)
         updateDecodeText()
         updatePlayerText()
         openingMs = HistoryStore(this).openingOf(vodId)
@@ -705,14 +730,19 @@ class PlayActivity : Activity() {
                     handleEnded()
                     return
                 }
-                if (state != Player.STATE_READY || pendingSeek <= 0) return
+                if (state != Player.STATE_READY) return
+                val p = player ?: return
+                // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
+                if (pendingJumpMs >= 0) {
+                    val at = pendingJumpMs
+                    pendingJumpMs = -1
+                    p.seekTo(at)
+                    MpvDebug.log("[key] 起播前快进生效 → ${at}ms")
+                }
+                if (pendingSeek <= 0) return
                 val target = pendingSeek
                 pendingSeek = 0
-                val p = player ?: return
-                if (p.duration > 0 && target < p.duration - 5_000) {
-                    p.seekTo(target)
-                    Toast.makeText(this@PlayActivity, "续播 ${target / 1000} 秒", Toast.LENGTH_SHORT).show()
-                }
+                if (p.duration > 0 && target < p.duration - 5_000) p.seekTo(target)
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -778,11 +808,15 @@ class PlayActivity : Activity() {
         // 起播定位：原版 VideoActivity.setPosition(Math.max(opening, position))
         pendingSeek = if (resumeOverride >= 0) resumeOverride
                       else maxOf(openingMs, HistoryStore(this).position(vodId, epUrl))
+        // 用户起播前就按过快进：优先按用户的意图起播，不再压上续播点
+        if (pendingJumpMs >= 0) pendingSeek = 0
         resumeOverride = -1
         lastSavedPos = 0
         // mpv 内核：本进程内 libmpv（内嵌），播放页控制条直接控它
         if (isMpvMode()) {
-            startMpv(url, effHeaders, pendingSeek)
+            // 起播前按过快进就用用户的位置，否则用续播点
+            val at = if (pendingJumpMs >= 0) pendingJumpMs else pendingSeek
+            startMpv(url, effHeaders, at)
             return
         }
         // header 与当前播放器不一致时重建（播放接口返回的 UA/Referer 需注入数据源）；
@@ -794,8 +828,11 @@ class PlayActivity : Activity() {
         // 字幕轨：对齐原版 ExoUtil.getMediaItem → setSubtitleConfigurations(getSubtitleConfigs(subs))
         if (activeSubs.isNotEmpty()) itemBuilder.setSubtitleConfigurations(activeSubs)
         if (applyMediaSource(itemBuilder)) {
-            setKeepScreenOn(true)
-            player?.playWhenReady = true
+            // 起播前按过暂停：媒体项照样加载，但不自动播（与正常暂停的观感一致）
+            val wantPlay = pendingPauseIntent != true
+            setKeepScreenOn(wantPlay)
+            player?.playWhenReady = wantPlay
+            if (!wantPlay) showPlayCenter()
         }
     }
 
@@ -1034,6 +1071,66 @@ class PlayActivity : Activity() {
             android.os.Build.VERSION.SDK_INT >= 23   // 官方 libmpv 构建要求 API 23+
 
     /** 起播走 mpv：切显示层 → 建内核 → 下发地址与起始位置 */
+    /** 文件还没加载完时用户快进的位置：先记下来，onLoaded 再补跳一次 */
+    private var mpvSeekAfterLoad = -1L
+
+    /**
+     * 起播前按键意图（两个内核共用同一套）。
+     *
+     * 原版 VideoActivity 的按键不是直接打给播放器，而是先记在界面层再落到内核：
+     *   onSeekTo(time) → mPlayers.seekTo(time) + showProgress() + onPlay()
+     *   onPlay()       → mPlayers.play() + hideCenter()
+     * 也就是「用户意图先成立，内核就绪再执行」。我们之前是直接 `player?.seekTo` / `mpv ?: return`，
+     * 起播前这几秒既没有内核、也没有媒体项，按键全部打空 —— 表现为「刚进页面暂停/快进失效」。
+     *
+     * pendingPauseIntent: null = 未操作；true = 用户要求暂停；false = 用户要求继续
+     * pendingJumpMs:      >=0 表示用户起播前按过快进，就绪后跳到这里
+     */
+    private var pendingPauseIntent: Boolean? = null
+    private var pendingJumpMs = -1L
+
+    /** 内容就绪（可以真正暂停/定位）的判断：EXO 看有没有时长，mpv 看文件有没有加载完 */
+    private fun contentReady(): Boolean =
+        if (isMpvMode()) mpvLoaded && mpv != null
+        else runCatching { (player?.duration ?: 0L) > 0L }.getOrDefault(false)
+
+    /**
+     * 建（或复用）mpv 原生实例。
+     *
+     * 之前实例只在 startMpv 里建 —— 也就是「地址解析完、文件开始加载」时才存在。
+     * 于是刚进播放页那几秒，`mpv` 还是 null，togglePlayPause / seekByKey 全部
+     * `mpv ?: return` 直接返回：按暂停没反应、按快进没反应，要等起播了才「突然好用」。
+     * 现在进页面就先建好实例（还没文件，pause 属性照样能设、能保持），
+     * startMpv 只负责 play(url)，按键从第一秒起就有效。
+     */
+    private fun ensureMpv(surface: android.view.TextureView): MpvPlayer {
+        mpv?.let { return it }
+        val p = MpvPlayer(this, surface).also { p ->
+            p.onLoaded = {
+                mpvLoaded = true
+                Log.i("XingHuiTV", "[mpv] 已加载 ${activeUrl.take(60)}")
+                // 加载完成前用户按过快进：这时候文件才真正可定位，补跳一次
+                if (mpvSeekAfterLoad >= 0) {
+                    val at = mpvSeekAfterLoad
+                    mpvSeekAfterLoad = -1
+                    mpv?.seekToMs(at)
+                }
+                hidePlayProgress()
+                recordHistory()
+            }
+            p.onEndFile = { handleEnded() }
+            p.onPauseChanged = { paused -> setKeepScreenOn(!paused) }
+            p.onFailed = { why ->
+                Log.e("XingHuiTV", "[mpv] 播放失败：$why")
+                onPlayFail("$why（$flag）")
+            }
+            p.onTimePos = { mpvPos = it }
+            p.onDuration = { mpvDur = it }
+        }
+        mpv = p
+        return p
+    }
+
     private fun startMpv(url: String, headers: Map<String, String>, startMs: Long) {
         // EXO 若还在跑，会和 mpv 同时出声，所以切到 mpv 前必须把它收掉。
         // 这里用 release 而不是 stop：stop 只是把状态推到 IDLE，MediaCodec / Surface 还挂着，
@@ -1049,23 +1146,7 @@ class PlayActivity : Activity() {
         // mpv 没有 ExoPlayer 的 STATE_BUFFERING/READY 回调，等价时机是 onLoaded（FILE_LOADED）。
         // 这里先盖上转圈，onLoaded 里再收起，行为与原版 progress 一致。
         showPlayProgress()
-        val m = mpv ?: MpvPlayer(this, surface).also { p ->
-            p.onLoaded = {
-                mpvLoaded = true
-                Log.i("XingHuiTV", "[mpv] 已加载 $url")
-                hidePlayProgress()
-                recordHistory()
-            }
-            p.onEndFile = { handleEnded() }
-            p.onPauseChanged = { paused -> setKeepScreenOn(!paused) }
-            p.onFailed = { why ->
-                Log.e("XingHuiTV", "[mpv] 播放失败：$why")
-                onPlayFail("$why（$flag）")
-            }
-            p.onTimePos = { mpvPos = it }
-            p.onDuration = { mpvDur = it }
-            mpv = p
-        }
+        val m = ensureMpv(surface)
         m.setSpeed(speedSteps[speedIdx])
         m.applyScale(scaleIdx)
         mpvPos = startMs
@@ -1435,6 +1516,31 @@ class PlayActivity : Activity() {
     }
 
     /** 给 EXO 的画面表面挂生命周期探针：只在 EXO 模式下挂，mpv 模式不动 */
+    // ---------- 窗口形态实验档（3 / 4）：验证「整窗不透明」是不是黑屏的成因 ----------
+    /**
+     * 原版窗口：主题 windowBackground=@null，根布局没有背景 —— 窗口里除了画面那一格，
+     * 其余区域是「什么都不画」，透明区是干净的。
+     * 我们两处都是不透明黑（主题 @android:color/black + 根 FrameLayout @android:color/black），
+     * 整块窗口 surface 全不透明。SurfaceView 是放在窗口 surface 之下、靠「挖洞」露出来的，
+     * 洞一旦因为任何一次重排被系统算错，露出来的就是这层黑 —— 声音继续、画面消失，
+     * 按返回触发一次彻底重建才恢复。原版没有这层黑，所以同样算错也看不出问题。
+     *
+     * 档位 3：只把窗口背景置空（根布局黑底保留）
+     * 档位 4：窗口背景置空 + 根布局黑底也去掉（最接近原版的窗口形态）
+     * 两个档位都需要**退出播放页再进**才生效（onCreate 才执行到这里）。
+     * 副作用：画面四周的留边会露出窗口壁纸（原版就是这个样子），属于预期。
+     */
+    private fun applyWindowShapeExperiment() {
+        val exp = MpvDebug.experiment
+        if (exp != 3 && exp != 4) return
+        runCatching { window.setBackgroundDrawable(null) }
+        if (exp == 4) {
+            val content = findViewById<View>(android.R.id.content) as? android.view.ViewGroup
+            runCatching { content?.getChildAt(0)?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+        }
+        MpvDebug.log("[exp$exp] 窗口背景已置空" + (if (exp == 4) "，根布局黑底也去掉" else "") + "（原版窗口形态）")
+    }
+
     private fun attachExoSurfaceProbe() {
         val v = runCatching { playerView?.videoSurfaceView }.getOrNull() ?: return
         val sv = v as? android.view.SurfaceView ?: return
@@ -1568,6 +1674,29 @@ class PlayActivity : Activity() {
 
     /** OK 键短按：暂停 / 继续（对齐原版 onKeyCenter），EXO / mpv 双内核同语义 */
     private fun togglePlayPause() {
+        // 起播前（还没时长/文件没加载完）也要真生效：先把意图记下来，并且立刻反映到内核上
+        //   EXO → playWhenReady=false，媒体项加载完成后就是停着的
+        //   mpv → pause 属性是全局的，设了之后加载的文件就是暂停起播
+        // 界面同时给出和正常暂停一样的居中图标，不留「按了没反应」的空白。
+        if (!contentReady()) {
+            val wantPause = pendingPauseIntent?.let { !it } ?: true
+            pendingPauseIntent = wantPause
+            if (isMpvMode()) {
+                mpv?.let { if (wantPause) it.pause() else it.resume() }
+            } else {
+                runCatching { player?.playWhenReady = !wantPause }
+            }
+            if (wantPause) {
+                setKeepScreenOn(false)
+                showPlayCenter()
+            } else {
+                setKeepScreenOn(true)
+                hidePlayCenter()
+            }
+            MpvDebug.log("[key] 起播前暂停意图=$wantPause")
+            return
+        }
+        pendingPauseIntent = null
         if (isMpvMode()) {
             val m = mpv ?: return
             // 用 mpv 自己的 pause 属性判断，不用缓存标记：缓存一旦被「写下去没生效」带偏，
@@ -1632,7 +1761,13 @@ class PlayActivity : Activity() {
         val dur = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
         var target = (base + delta).coerceAtLeast(0L)
         if (dur > 0) target = target.coerceAtMost(dur)
-        if (isMpvMode()) mpv?.seekToMs(target) else player?.seekTo(target)
+        if (!contentReady()) {
+            // 起播前的定位：记下来，就绪后补跳（EXO 走 pendingJumpMs，mpv 走 mpvSeekAfterLoad）
+            pendingJumpMs = target
+        }
+        if (isMpvMode()) {
+            if (!mpvLoaded) mpvSeekAfterLoad = target else mpv?.seekToMs(target)
+        } else player?.seekTo(target)
         mpvPos = target
         // 对齐原版 onSeekTo：跳完立刻收起居中提示并恢复播放（原版在 onSeekTo 里调了 onPlay()，
         // onPlay 里做的是 addFlags(KEEP_SCREEN_ON) + play() + hideCenter()）。
