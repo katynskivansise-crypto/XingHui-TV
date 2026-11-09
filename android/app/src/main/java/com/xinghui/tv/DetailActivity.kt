@@ -884,6 +884,9 @@ class DetailActivity : Activity() {
                     if (idx >= 0 && idx != playingIdx) {
                         Log.i("XingHuiTV", "[detail] 播放页换集过：${playingIdx} → $idx，按该集重建预览")
                         playInline(idx, quiet = true)
+                        // 这条分支直接 return，不经过下面的续播段，焦点要在这里补一次，
+                        // 否则同样会落到"没有任何视图持有焦点"的样子。
+                        findViewById<View>(R.id.detailList)?.requestFocus()
                         return
                     }
                 }

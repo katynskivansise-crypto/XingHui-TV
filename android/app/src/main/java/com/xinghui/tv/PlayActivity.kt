@@ -181,6 +181,7 @@ class PlayActivity : Activity() {
         val marks0 = HistoryStore(this).marks(historyKey)
         openingMs = marks0[0]
         endingMs = marks0[1]
+        startPosMs = marks0[2]
         updateOpeningText()
         updateEndingText()
         // 倍速：点击循环档位，对齐原项目 addSpeed()
@@ -721,6 +722,15 @@ class PlayActivity : Activity() {
     /** 待跳转的续播位置（毫秒）；播放器就绪后消费掉 */
     private var pendingSeek: Long = 0
 
+    /**
+     * 本次起播将要落到的那一点（续播点）。起播前按快进时用它当基准。
+     *
+     * 用例：片子的续播点在 1700s，用户刚进页面就按 →。
+     * 若基准取 currentPosition（未起播恒为 0），目标就成了 10s，
+     * 同时 playUrl 里"用户意图优先"会把续播点清零 —— 一按快进就回片头。
+     */
+    private var startPosMs: Long = 0
+
     /** 上次落盘的位置，避免重复写同一进度把 SharedPreferences 打爆 */
     private var lastSavedPos: Long = 0
 
@@ -758,7 +768,6 @@ class PlayActivity : Activity() {
                 }
                 if (state != Player.STATE_READY) return
                 val p = player ?: return
-                uiHandler.postDelayed({ runCatching { warmUpControlBarOnce(force = true) } }, 100)
                 // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
                 if (pendingJumpMs >= 0) {
                     val at = pendingJumpMs
@@ -839,6 +848,7 @@ class PlayActivity : Activity() {
                       else maxOf(openingMs, marks[2])
         // 用户起播前就按过快进：优先按用户的意图起播，不再压上续播点
         if (pendingJumpMs >= 0) pendingSeek = 0
+        startPosMs = pendingSeek
         resumeOverride = -1
         lastSavedPos = 0
         // mpv 内核：本进程内 libmpv（内嵌），播放页控制条直接控它
@@ -1148,9 +1158,9 @@ class PlayActivity : Activity() {
         val p = MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
                 mpvLoaded = true
-                // 画面真正开始出帧之后再预演一次控制条显隐：第一次按菜单黑屏是「有画面之后第一次
-                // 叠一层覆盖视图」触发的合成层重算，预热必须发生在有画面之后才真的把这次重算提前掉。
-                uiHandler.postDelayed({ runCatching { warmUpControlBarOnce(force = true) } }, 100)
+                // 注意：这里曾经在"出帧后 +100ms"再预演一次控制条显隐，已撤掉。
+                // 那一下正好发生在首帧刚上屏的时刻，会给根布局（含 SurfaceView）再来两次重排，
+                // 而真机回执证明它并没有治住"首次菜单黑"，等于拿播放画面去赌一个未证实的假设。
                 Log.i("XingHuiTV", "[mpv] 已加载 ${activeUrl.take(60)}")
                 // 加载完成前用户按过快进：这时候文件才真正可定位，补跳一次
                 if (mpvSeekAfterLoad >= 0) {
@@ -1273,6 +1283,33 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
         findViewById<View>(R.id.btnDecode).setOnClickListener { toggleDecode() }
+        // 控制条控件清单：真机上按 OK 落在哪个 id 上，×debug 里对不上号就没法判断是谁没接住。
+        runCatching {
+            uiHandler.postDelayed({
+                runCatching {
+                    val row = findViewById<android.view.ViewGroup>(R.id.actionLayout)
+                    if (row != null) {
+                        val sb = StringBuilder("[ui] 控制条控件")
+                        for (i in 0 until row.childCount) {
+                            val c = row.getChildAt(i)
+                            sb.append(" {id=${c.id} t=").append((c as? TextView)?.text?.toString() ?: "-")
+                                .append(" click=").append(c.hasOnClickListeners()).append("}")
+                        }
+                        MpvDebug.log(sb.toString())
+                    }
+                    val top = findViewById<android.view.ViewGroup>(R.id.controlBar)
+                    if (top != null) {
+                        val sb = StringBuilder("[ui] 控制条行")
+                        for (i in 0 until top.childCount) {
+                            val c = top.getChildAt(i)
+                            sb.append(" {id=${c.id} cls=").append(c.javaClass.simpleName)
+                                .append(" click=").append(c.hasOnClickListeners()).append("}")
+                        }
+                        MpvDebug.log(sb.toString())
+                    }
+                }
+            }, 200)
+        }
         // 三个轨道按钮：tag 语义对齐原版 view_control_vod.xml（text=3 / audio=1 / video=2）
         findViewById<View>(R.id.btnTrackText).setOnClickListener {
             openTrack(androidx.media3.common.C.TRACK_TYPE_TEXT)
@@ -1653,7 +1690,10 @@ class PlayActivity : Activity() {
      *   ↑(onKeyUp:1755) → 焦点给片头/片尾，并 showInfo（顶部片名信息）
      *   ↓(onKeyDown:1763) / 菜单(onToggle:1086) → 焦点给"下集"，不带 info
      */
-    private fun showControl(focusId: Int = R.id.btnNext, withTitle: Boolean = false) {
+    /** 控制条上次的焦点落点（原版 mFocus2）；菜单呼出时恢复到它，避免每次都跳回"下一集" */
+    private var lastBarFocusId: Int = 0
+
+    private fun showControl(focusId: Int = 0, withTitle: Boolean = false) {
         // 诊断档位 2：菜单键完全不呼出控制条。用来判断黑屏到底跟控制条有没有关系——
         // 如果这个档位下按菜单仍然黑，那问题就不在控制条上，别再往这里改。
         if (MpvDebug.experiment == 2) {
@@ -1664,8 +1704,16 @@ class PlayActivity : Activity() {
         controlBar?.alpha = 1f
         controlBar?.visibility = View.VISIBLE
         findViewById<View>(R.id.playTitle)?.visibility = if (withTitle) View.VISIBLE else View.GONE
+        // 焦点落点：原版 getFocus2() —— 显式指定就用指定的；否则沿用上次；
+        // 上次停在片头/片尾时按原版规则换成"下一集"。
+        val target = when {
+            focusId != 0 -> focusId
+            lastBarFocusId != 0 &&
+                lastBarFocusId != R.id.btnOpening && lastBarFocusId != R.id.btnEnding -> lastBarFocusId
+            else -> R.id.btnNext
+        }
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
-        if (MpvDebug.experiment != 1) findViewById<View>(focusId)?.requestFocus()
+        if (MpvDebug.experiment != 1) findViewById<View>(target)?.requestFocus()
         setControlNextFocus()
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
@@ -1699,7 +1747,10 @@ class PlayActivity : Activity() {
         // 对齐原版 getFocus1(:1670)：控制条收起后焦点回画面容器。
         // 不回收的话焦点会留在一个已经 GONE 的按钮上，方向键会跳进不可见控件里，
         // 真机表现就是「按键有时完全没反应、按一下菜单键又好了」。
-        rootView?.requestFocus()
+        // 原版靠结构解决：控制条是 @id/video（focusable）的子视图，控制条 GONE 后焦点自动落回父容器，
+        // 一句 requestFocus 都不需要。我们是兄弟视图，只能主动要，而且**必须等这一帧的焦点清理跑完**——
+        // 同帧 requestFocus 会被随后"焦点视图变 GONE"的清理覆盖，真机日志里就是这样变成 focus=-1 的。
+        rootView?.post { focusRoot("hideControl") }
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
     }
 
@@ -1708,6 +1759,32 @@ class PlayActivity : Activity() {
      * 控制条里片头、片尾、字幕、音轨、视轨这些按钮是按能力显隐的，
      * 不重算 nextFocus 时方向键会跳进 GONE 的按钮，看着像"跳不动"。
      */
+    /**
+     * 把焦点交回画面层（原版 getFocus1:1670 的落点）。
+     *
+     * 真机日志里 hideControl 之后 currentFocus 是 -1（无任何视图持有焦点），
+     * 说明 rootView.requestFocus() 一直没成功 —— 首键就成了"把焦点捡回来"，表现为要按两次。
+     * 这里显式置可聚焦再请求，仍失败就退到 decorView，并把结果写进 /debug。
+     */
+    private fun focusRoot(reason: String) {
+        var v: View? = rootView
+        if (v == null) {
+            v = runCatching {
+                (findViewById<View>(android.R.id.content) as? android.view.ViewGroup)?.getChildAt(0)
+            }.getOrNull()
+            rootView = v
+        }
+        if (v == null) {
+            MpvDebug.log("[ui] focusRoot 无视图 reason=$reason")
+            return
+        }
+        if (!v.isFocusable) v.isFocusable = true
+        if (!v.isFocusableInTouchMode) v.isFocusableInTouchMode = true
+        val ok = v.requestFocus()
+        if (!ok) runCatching { window?.decorView?.requestFocus() }
+        MpvDebug.log("[ui] focusRoot reason=$reason ok=$ok id=${v.id} focus=${currentFocus?.id}")
+    }
+
     private fun setControlNextFocus() {
         runCatching {
             val row = findViewById<android.view.ViewGroup>(R.id.actionLayout) ?: return@runCatching
@@ -1770,7 +1847,7 @@ class PlayActivity : Activity() {
                     if (!warmUpping) return@runCatching // 用户已经真按了菜单，别把真控制条收掉
                     if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
                     bar.alpha = 1f
-                    rootView?.requestFocus()
+                    focusRoot("预热收尾")
                     MpvDebug.log("[ui] 控制条预热完成")
                 }
             }, 32)
@@ -1816,8 +1893,11 @@ class PlayActivity : Activity() {
         val ready = runCatching { contentReady() }.getOrDefault(false)
         if (isMpvMode()) {
             val m = mpv
-            // 实例还没建（TextureView 未 attach）：只能记账，startMpv 会用 startPaused 带下去
-            val pausing = if (m != null) !runCatching { m.isPausedActual() }.getOrDefault(false)
+            // 注意：未起播时**不能**读内核的 pause 属性。mpv 启动选项里 pause=yes，
+            // 空实例的 pause 恒为 true → isPausedActual()=true → 会判成"当前在暂停、要恢复"，
+            // 第一下 OK 就变成"开始播放"，看起来就是"按暂停没反应"。
+            // 未就绪时一律按意图走（没意图就默认"要暂停"）。
+            val pausing = if (m != null && ready) !runCatching { m.isPausedActual() }.getOrDefault(false)
             else (pendingPauseIntent?.let { !it } ?: true)
             pendingPauseIntent = if (!ready) pausing else null
             if (m != null) {
@@ -2051,13 +2131,21 @@ class PlayActivity : Activity() {
                 }
                 return true
             }
+            currentFocus?.takeIf { it.id != 0 }?.let { lastBarFocusId = it.id }
             if (isEnterKey(event) && event.action == KeyEvent.ACTION_UP) {
                 val v = currentFocus
+                val hasClick = v?.hasOnClickListeners() == true
                 MpvDebug.log(
                     "[key] OK 落在控制条上 id=${v?.id} cls=${v?.javaClass?.simpleName}" +
                         " text=" + ((v as? TextView)?.text?.toString() ?: "") +
-                        " clickable=${v?.isClickable} hasClick=${v?.hasOnClickListeners()}"
+                        " clickable=${v?.isClickable} hasClick=$hasClick"
                 )
+                // 焦点落在没有点击响应的标签/容器上时，原版什么也不会发生，用户看到的就是
+                // "按 OK 没反应"。这种空档直接当成暂停/继续，控件本身有点击的仍交给它自己处理。
+                if (!hasClick) {
+                    togglePlayPause()
+                    return true
+                }
             }
             return super.dispatchKeyEvent(event)
         }
@@ -2093,7 +2181,10 @@ class PlayActivity : Activity() {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (!seekingByKey) {
                     seekingByKey = true
-                    seekBaseMs = currentPosMs()
+                    // 基准位置：就绪时用真实位置；未就绪时用"将要起播的位置"（续播点），
+                    // 否则 base 恒为 0，按一下 → 跳 10s，看着就像"快进把进度打回片头"。
+                    seekBaseMs = if (contentReady()) currentPosMs()
+                    else maxOf(currentPosMs(), startPosMs)
                     seekAccumMs = 0L
                 }
                 seekAccumMs += dir * SEEK_STEP_MS
