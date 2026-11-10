@@ -1365,7 +1365,15 @@ class PlayActivity : Activity() {
         // 收条时**不做任何焦点动作**（既不 requestFocus 也不 clearFocus）。
         // 5.6 hideControl(:3502) 全文只有 setVisibility(GONE) 一句，没有 requestFocus ——
         // 焦点是被系统在同一次 traversal 里自动交还给父容器的，不额外产生一轮重绘。
-        controlBar?.visibility = View.GONE
+        // ★隐藏态用 INVISIBLE，不用 GONE：
+        // GONE→VISIBLE 会强制父容器走一次 measure/layout，那次 layout 会把兄弟 playView 连同
+        // 它内部的 SurfaceView 一起重新摆放一遍 —— 真机上正好就是"呼出菜单那一瞬间整屏黑"。
+        // INVISIBLE↔VISIBLE 只改绘制、不触发布局（View.setFlags 里只有 GONE 参与可见性位变化
+        // 才 requestLayout），所以这条链路彻底不碰画面层的 frame。
+        // 根布局黑底已经做过洋红对照实验：闪的仍是黑、洋红一次都没露出来，
+        // 说明盖住画面的不是窗口这层底，只能是画面层自己在那一帧没有内容。
+        controlBar?.visibility = View.INVISIBLE
+        controlBar?.alpha = 0f
         findViewById<View>(R.id.btnEpisodes).setOnClickListener { openEpisodes() }
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
@@ -1788,7 +1796,10 @@ class PlayActivity : Activity() {
             return
         }
         controlBar?.visibility = View.VISIBLE
+        controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
+        (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+            android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS
         // 焦点落点：原版 getFocus2() —— 显式指定就用指定的；否则沿用上次；
         // 上次停在片头/片尾时按原版规则换成"下一集"。
         val target = when {
@@ -1835,7 +1846,10 @@ class PlayActivity : Activity() {
         // 父窗口要重画一遍整屏黑底，SurfaceView 的洞晚一帧才合成 = 黑一下。
         // 5.6 没有这一步：条一 GONE，焦点视图从树里消失，系统在**同一次** traversal 里
         // 自动把焦点交给可聚焦的父容器，不额外产生一轮。
-        controlBar?.visibility = View.GONE
+        controlBar?.visibility = View.INVISIBLE
+        controlBar?.alpha = 0f
+        (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+            android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         findViewById<View>(R.id.playTitle)?.alpha = 0f
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         logRenderPulse("hideControl")
@@ -1912,7 +1926,8 @@ class PlayActivity : Activity() {
                 val ok = runCatching { sv?.holder?.surface?.isValid }.getOrNull()
                 MpvDebug.log("[pulse] $tag vo=${m?.voNow()} pos=${m?.positionMs()} sinkValid=$ok " +
                     "sv=${sv?.width}x${sv?.height} draws=$draws layouts=$layouts " +
-                    "bar=${barShown()} focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()}")
+                    "bar=${barShown()} barVis=${controlBar?.visibility} barAlpha=${controlBar?.alpha} " +
+                    "focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()}")
             }
             sample()
             uiHandler.postDelayed(sample, 80)
