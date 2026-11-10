@@ -1341,7 +1341,7 @@ class PlayActivity : Activity() {
      */
     private fun barShown(): Boolean {
         val b = controlBar ?: return false
-        return b.visibility == View.VISIBLE && b.alpha > 0f
+        return b.visibility == View.VISIBLE
     }
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
@@ -1361,11 +1361,11 @@ class PlayActivity : Activity() {
     /** 控制条 14 个按钮全部接上；未实现的能力按原版文字保留、点击给出说明 */
     private fun bindControlBar() {
         controlBar = findViewById(R.id.controlBar)
-        // 常驻 VISIBLE、alpha=0：整场只在 alpha 上做显隐，visibility 一次都不再改，
-        // 这样 SurfaceView 的透明区域（挖洞）永远不需要重算。
-        controlBar?.visibility = View.VISIBLE
-        controlBar?.alpha = 0f
-        (controlBar as? android.view.ViewGroup)?.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        // 与 5.6 showControl/hideControl 完全一致：显隐只用 visibility（VISIBLE / GONE），
+        // 收条时**不做任何焦点动作**（既不 requestFocus 也不 clearFocus）。
+        // 5.6 hideControl(:3502) 全文只有 setVisibility(GONE) 一句，没有 requestFocus ——
+        // 焦点是被系统在同一次 traversal 里自动交还给父容器的，不额外产生一轮重绘。
+        controlBar?.visibility = View.GONE
         findViewById<View>(R.id.btnEpisodes).setOnClickListener { openEpisodes() }
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
@@ -1787,9 +1787,7 @@ class PlayActivity : Activity() {
             MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
             return
         }
-        controlBar?.alpha = 1f
         controlBar?.visibility = View.VISIBLE
-        (controlBar as? android.view.ViewGroup)?.descendantFocusability = android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
         // 焦点落点：原版 getFocus2() —— 显式指定就用指定的；否则沿用上次；
         // 上次停在片头/片尾时按原版规则换成"下一集"。
@@ -1805,6 +1803,7 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null} focus=$focusId")
+        logRenderPulse("showControl")
         // 诊断：菜单按下瞬间 vs 800ms 后，播放器还在不在播。
         runCatching {
             val focusIdNow = currentFocus?.id
@@ -1826,53 +1825,20 @@ class PlayActivity : Activity() {
         // mpv 每次 detach/attach，等于把偶发黑屏换成每次必闪，属于负优化。
     }
 
-    /** 收起控制条（对齐原版 hideControl:1159-1165：控制条与顶部信息一起收，并移走焦点） */
+    /** 收起控制条：对齐 5.6 hideControl(:3502) —— 只置 GONE，不做任何焦点动作 */
     private fun hideControl() {
         uiHandler.removeCallbacks(autoHide)
-        // 收条用 INVISIBLE，不用 GONE：
-        // GONE 会让 FrameLayout 走一次完整的 layout pass，画面层（SurfaceView/TextureView）的
-        // 合成区域要跟着重算 —— 这家 7.1 ROM 上偶尔会晚一帧才算回来，那一帧露出的就是根布局的黑底，
-        // 也就是"按返回收控制条，黑一下"。
-        // INVISIBLE 只触发一次 draw（不触发 measure/layout），画面层几何不变，挖洞区域不用重算。
-        // 视觉与 GONE 完全一致（都不显示、都不可聚焦），唯一区别是它仍占着自己在 FrameLayout 里的位置 ——
-        // 控制条本来就在底部、不参与其它兄弟的排布，所以没有副作用。
-        // ★ 显隐只改 alpha，一次 visibility / layout 都不动。
-        //
-        // 为什么 GONE 和 INVISIBLE 都会黑一下（两版真机都已确认）：
-        // 画面层是 SurfaceView（EXO）时，它是一块独立的 surface，父窗口要在自己身上"挖一个洞"
-        // 才能露出它 —— 这个洞（transparent region）由 ViewRootImpl 按"哪些区域被视图挡住"算出来。
-        // 只要控制条的可见性/布局发生变化，父窗口就判定洞要重算；这家 7.1 ROM 上重算偶尔晚一帧，
-        // 那一帧洞还是旧的、窗口把自己不透明的黑底盖上去 → 黑一下。
-        // mpv 侧虽然是 TextureView（在窗口内合成），但每次 visibility 变化同样会走一遍 draw 状态切换，
-        // 真机回执"两个都黑"，说明这套 ROM 上共同的那一环就是这个"重新算一遍"。
-        //
-        // alpha 0 不改变布局、不改变可见性判定、不改变挖洞区域 —— 视图照常被 draw（只是全透明），
-        // 洞的位置和大小一个像素都没变，窗口没有任何理由重算，因此不存在这一帧。
-        if (barShown()) {
-            controlBar?.alpha = 0f
-            // 全透明时把子控件从焦点链里摘掉，否则方向键还能跳进看不见的按钮里
-            (controlBar as? android.view.ViewGroup)?.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-        }
+        // ★收条只做一件事：置 GONE。与 5.6 hideControl(:3502) 逐字一致。
+        // 之前的 alpha 方案（常驻 VISIBLE + alpha 0 + BLOCK）有个副作用：
+        // 控制条子控件**仍然持有焦点**（BLOCK 只挡"新的焦点进来"，不夺走已有的），
+        // 于是每次收条我们都要 post 一次 requestFocus 把焦点抢回来 —— 那就是**多出来的一轮 traversal**，
+        // 父窗口要重画一遍整屏黑底，SurfaceView 的洞晚一帧才合成 = 黑一下。
+        // 5.6 没有这一步：条一 GONE，焦点视图从树里消失，系统在**同一次** traversal 里
+        // 自动把焦点交给可聚焦的父容器，不额外产生一轮。
+        controlBar?.visibility = View.GONE
         findViewById<View>(R.id.playTitle)?.alpha = 0f
-        // 对齐原版 getFocus1(:1670)：控制条收起后焦点回画面容器。
-        // 不回收的话焦点会留在一个已经 GONE 的按钮上，方向键会跳进不可见控件里，
-        // 真机表现就是「按键有时完全没反应、按一下菜单键又好了」。
-        // 原版靠结构解决：控制条是 @id/video（focusable）的子视图，控制条 GONE 后焦点自动落回父容器，
-        // 一句 requestFocus 都不需要。我们是兄弟视图，只能主动要，而且**必须等这一帧的焦点清理跑完**——
-        // 同帧 requestFocus 会被随后"焦点视图变 GONE"的清理覆盖，真机日志里就是这样变成 focus=-1 的。
-        // 原版 hideControl():1159-1165 里**一句 requestFocus 都没有** —— 控制条是
-        // @id/video（focusable 容器）的子视图，控制条 GONE 后焦点自动落回父容器。
-        // 我们是兄弟视图，所以早先加了一条 post{focusRoot}。但 22:04 的日志已经证明
-        // 焦点本来就回到根布局了（focusRoot 打完 id=-1 focus=-1，那个 -1 就是根 FrameLayout），
-        // 这条 post 属于多余动作：每次收条都多一次 requestFocus → 多一轮 traversal →
-        // 父窗口重绘时先铺一遍根布局的黑底，SurfaceView 的洞晚一帧才合成，
-        // 表现就是「按返回收控制条，画面黑一下」。原版没有这一步，所以不闪。
-        // 现在只在"焦点真的丢了"时才补，已有的焦点不动。
-        rootView?.post {
-            val f = currentFocus
-            if (f == null || f !== rootView) focusRoot("hideControl")
-        }
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
+        logRenderPulse("hideControl")
     }
 
     /**
@@ -1917,6 +1883,48 @@ class PlayActivity : Activity() {
         val ok = target?.requestFocus() == true
         MpvDebug.log("[ui] 控制条可见但焦点不在条上 → 重新落点 id=${target?.id} ok=$ok")
         return ok
+    }
+
+    /**
+     * 收条/呼条前后各采三拍，判断"黑的那一下"到底是渲染层没了还是合成层没跟上。
+     * 判读：三拍都 vo=gpu 且 pos 在推进 → 播放器一直活着，黑在合成；
+     *       出现 vo=空 / surface valid=false → 表面真丢了。
+     */
+    private fun logRenderPulse(tag: String) {
+        runCatching {
+            val m = mpv
+            val sv = mpvSurfaceView()
+            // 数一遍这 300ms 里根布局被"重画/重排"了几次：
+            // 正常的收条/呼条应该是 1 次；≥2 次就说明我们额外多造了一轮 traversal。
+            var draws = 0
+            var layouts = 0
+            val root = rootView
+            val vto = root?.viewTreeObserver
+            val pd = object : android.view.ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean { draws++; return true }
+            }
+            val gl = object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() { layouts++ }
+            }
+            vto?.addOnPreDrawListener(pd)
+            vto?.addOnGlobalLayoutListener(gl)
+            val sample = {
+                val ok = runCatching { sv?.holder?.surface?.isValid }.getOrNull()
+                MpvDebug.log("[pulse] $tag vo=${m?.voNow()} pos=${m?.positionMs()} sinkValid=$ok " +
+                    "sv=${sv?.width}x${sv?.height} draws=$draws layouts=$layouts " +
+                    "bar=${barShown()} focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()}")
+            }
+            sample()
+            uiHandler.postDelayed(sample, 80)
+            uiHandler.postDelayed(sample, 240)
+            uiHandler.postDelayed({
+                sample()
+                runCatching {
+                    vto?.removeOnPreDrawListener(pd)
+                    if (android.os.Build.VERSION.SDK_INT >= 16) vto?.removeOnGlobalLayoutListener(gl)
+                }
+            }, 320)
+        }
     }
 
     private fun focusRoot(reason: String) {
