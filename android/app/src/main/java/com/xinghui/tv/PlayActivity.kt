@@ -1814,6 +1814,7 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null} focus=$focusId")
+        dumpPanelTree("show")
         logRenderPulse("showControl")
         // 诊断：菜单按下瞬间 vs 800ms 后，播放器还在不在播。
         runCatching {
@@ -1904,6 +1905,30 @@ class PlayActivity : Activity() {
      * 判读：三拍都 vo=gpu 且 pos 在推进 → 播放器一直活着，黑在合成；
      *       出现 vo=空 / surface valid=false → 表面真丢了。
      */
+    /** 呼出控制条时把视图树的面板层级打一次：谁盖在画面层上面、谁是不透明的，一眼可查。 */
+    private var treeDumped = 0
+    private fun dumpPanelTree(tag: String) {
+        if (treeDumped >= 3) return
+        treeDumped++
+        runCatching {
+            val root = window.decorView
+            fun walk(v: View, d: Int) {
+                if (d > 3) return
+                val id = runCatching {
+                    if (v.id == View.NO_ID) "-" else resources.getResourceEntryName(v.id)
+                }.getOrDefault("?")
+                val bgCls = if (v.background == null) "-" else v.background.javaClass.simpleName
+                val opaque = runCatching { v.javaClass.getMethod("isOpaque").invoke(v) as Boolean }.getOrNull()
+                MpvDebug.log("[panel] $tag ${"  ".repeat(d)}${v.javaClass.simpleName} id=$id " +
+                    "vis=${v.visibility} alpha=${v.alpha} bg=$bgCls opaque=$opaque size=${v.width}x${v.height}")
+                if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i), d + 1)
+            }
+            walk(root, 0)
+            MpvDebug.log("[panel] $tag 窗口 hasFocus=${root.hasWindowFocus()} winVis=${root.windowVisibility} " +
+                "svShown=${mpvSurfaceView()?.isShown} svAlpha=${mpvSurfaceView()?.alpha}")
+        }
+    }
+
     private fun logRenderPulse(tag: String) {
         runCatching {
             val m = mpv
@@ -2214,8 +2239,12 @@ class PlayActivity : Activity() {
             }
         }
         // OK 的按下也记一行（上面只记了抬起）：用来分辨「键根本没到 Activity」与「到了但没效果」
-        if (event.action == KeyEvent.ACTION_DOWN && isEnterKey(event)) {
-            MpvDebug.log("[key] OK 按下 kc=${event.keyCode} ready=${contentReady()} bar=${barShown()}")
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            MpvDebug.log(
+                "[key] 按下 kc=${event.keyCode} ready=${contentReady()} bar=${barShown()} " +
+                    "focus=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName ?: "null"}) " +
+                    "mpv=${mpv != null} exo=${player != null}"
+            )
         }
         // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
         // 那一瞬间开始方向键与 OK 就全落在根上，看起来就是"没反应"。
@@ -2255,6 +2284,24 @@ class PlayActivity : Activity() {
             // 有的会先给 Activity 一次 onKeyDown/onKeyUp 往返（部分机型伴随窗口重建、画面回到首帧），
             // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
             runCatching { savePosition() }
+            // 现场对照：不呼出控制条直接返回 → 干净；呼出过控制条再返回 → 黑一下。
+            // 差别只有一处：条显示时焦点落在条上的按钮里，条隐藏时焦点在根布局。
+            // 退场时若还握着"条内焦点"，窗口要再做一次焦点遍历/重绘，这一帧就会露黑。
+            // 所以退场前先把焦点收回根布局、把控制条收掉，动作全在同一个输入帧里完成，
+            // 不产生第二帧合成。
+            val cf = currentFocus
+            val cfId = cf?.id
+            runCatching { cf?.clearFocus() }
+            runCatching {
+                val ok = rootView?.requestFocus()
+                MpvDebug.log("[key] back 退场前收回焦点 from=$cfId to=root ok=$ok")
+            }
+            runCatching {
+                controlBar?.visibility = View.INVISIBLE
+                controlBar?.alpha = 0f
+                (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+                    android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
             MpvDebug.log("[key] back 退出播放页 pos=" + currentPosMs() + " shown=" + shown)
             finish()
             // 关掉 Activity 转场动画：老 ROM 上退场动画那 200~300ms 里窗口先被清成背景色，
@@ -2309,7 +2356,12 @@ class PlayActivity : Activity() {
             // 现在 DOWN(repeat=0) 立刻切换，UP 只吞掉不再动作，也不会重复触发。
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
-                    if (loading) MpvDebug.log("[key] 起播前 OK → 当暂停处理 bar=${barShown()}")
+                    if (loading) {
+                        MpvDebug.log("[key] 起播前 OK → 当暂停处理 bar=${barShown()}")
+                        // 起播前也必须有可见反馈：否则"进页面按 OK 没反应"会被当成功能全废。
+                        // 复用原版的居中提示（widget.center），不新增任何 UI。
+                        showPlayCenter()
+                    }
                     togglePlayPause()
                 }
                 return true
@@ -2527,6 +2579,17 @@ class PlayActivity : Activity() {
      */
     override fun onResume() {
         super.onResume()
+        // 回到播放页时把焦点兜回来：没有焦点视图的窗口在部分老 ROM 上收不到遥控键，
+        // 表现就是"进页面什么都不响应，先按一下菜单键才好"。
+        rootView?.post {
+            runCatching {
+                val f = currentFocus
+                if (f == null) {
+                    val ok = rootView?.requestFocus() ?: false
+                    MpvDebug.log("[life] onResume 无焦点 → 兜回根布局 ok=$ok")
+                }
+            }
+        }
         runCatching {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
