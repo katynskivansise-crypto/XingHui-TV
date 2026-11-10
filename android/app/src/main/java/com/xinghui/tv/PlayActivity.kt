@@ -2807,10 +2807,15 @@ class PlayActivity : Activity() {
      */
     override fun onResume() {
         super.onResume()
-        // 面板转储里 DecorView 的背景是不透明 BitmapDrawable（框架自带的深色位图），
-        // 说明主题里 windowBackground=@android:color/black 这条没落生效。
-        // 这里直接在代码里定死，顺便把实际生效的类名打出来，免得再猜。
-        runCatching { window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0xFF000000.toInt())) }
+        // ★这一行是「按菜单键整屏黑」的直接原因，别再改回黑：
+        //   它把窗口背景设成不透明 ColorDrawable，于是整个窗口 surface 是"整窗不透明"的。
+        //   SurfaceView 的画面是靠窗口在它的矩形上"挖洞"露出来的；窗口一旦不透明，
+        //   任何一次重排/重画（呼出控制条 → controlBar GONE→VISIBLE → 全树 traversal）
+        //   如果这一拍的挖洞没算对，露出来的就是这层黑 —— 而音频照走、播放状态 READY、
+        //   surface 也 valid（日志里全是正常的，这正是合成层问题的特征）。
+        //   参考实现（5.6 / 原版）的主题是 windowBackground=@null，窗口本身不铺底色，
+        //   黑由根布局自己画，所以它永远不黑。这里改成置空，与主题对齐。
+        runCatching { window.setBackgroundDrawable(null) }
         // 回到播放页时把焦点兜回来：没有焦点视图的窗口在部分老 ROM 上收不到遥控键，
         // 表现就是"进页面什么都不响应，先按一下菜单键才好"。
         rootView?.post {
