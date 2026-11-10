@@ -618,7 +618,11 @@ class PlayActivity : Activity() {
      * 另外起播前（checkCast 里非投屏时）也先盖一层 progressLayout。
      * 我们照同一套时机：解析开始、首次缓冲、seek 后都显示，就绪/播完/失败时收起。
      */
+    /** 加载层（转圈）是否还亮着 —— 也就是"画面还没出来" */
+    private var progressShown = false
+
     private fun showPlayProgress() {
+        progressShown = true
         runOnUiThread {
             val v = findViewById<View>(R.id.playProgress)
             v?.alpha = 1f
@@ -627,8 +631,18 @@ class PlayActivity : Activity() {
     }
 
     private fun hidePlayProgress() {
+        progressShown = false
         runOnUiThread { findViewById<View>(R.id.playProgress)?.visibility = View.GONE }
     }
+
+    /**
+     * 是否还在"起播前"（画面没出来）。
+     *
+     * 只判 contentReady() 不够：EXO 一 prepare 就有 duration，`ready` 立刻变 true，
+     * 但那一刻还在 BUFFERING、屏幕上只有转圈 —— 而用户恰恰是在这段里按 OK 的。
+     * 所以再加一条"转圈还亮着"。
+     */
+    private fun preStart(): Boolean = progressShown || !contentReady()
 
     /** 播放/解析失败 → 先切下一条线路，再自动换站点；都失败才停止（对齐原项目 startFlow→checkFlag→checkSearch） */
     private fun onPlayFail(msg: String) {
@@ -1759,7 +1773,18 @@ class PlayActivity : Activity() {
         // 原版靠结构解决：控制条是 @id/video（focusable）的子视图，控制条 GONE 后焦点自动落回父容器，
         // 一句 requestFocus 都不需要。我们是兄弟视图，只能主动要，而且**必须等这一帧的焦点清理跑完**——
         // 同帧 requestFocus 会被随后"焦点视图变 GONE"的清理覆盖，真机日志里就是这样变成 focus=-1 的。
-        rootView?.post { focusRoot("hideControl") }
+        // 原版 hideControl():1159-1165 里**一句 requestFocus 都没有** —— 控制条是
+        // @id/video（focusable 容器）的子视图，控制条 GONE 后焦点自动落回父容器。
+        // 我们是兄弟视图，所以早先加了一条 post{focusRoot}。但 22:04 的日志已经证明
+        // 焦点本来就回到根布局了（focusRoot 打完 id=-1 focus=-1，那个 -1 就是根 FrameLayout），
+        // 这条 post 属于多余动作：每次收条都多一次 requestFocus → 多一轮 traversal →
+        // 父窗口重绘时先铺一遍根布局的黑底，SurfaceView 的洞晚一帧才合成，
+        // 表现就是「按返回收控制条，画面黑一下」。原版没有这一步，所以不闪。
+        // 现在只在"焦点真的丢了"时才补，已有的焦点不动。
+        rootView?.post {
+            val f = currentFocus
+            if (f == null || f !== rootView) focusRoot("hideControl")
+        }
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
     }
 
@@ -2100,12 +2125,17 @@ class PlayActivity : Activity() {
         }
 
         val shown = controlBar?.visibility == View.VISIBLE
+        // 起播前（画面还没出来）控制条上的按钮全都没有意义：切内核会重建播放器、刷新会重解析、
+        // 上下集还没开始播、片头片尾还没时间轴。这段时间里 OK / ←→ 一律按"暂停""快进"的意图处理，
+        // 不再交给焦点控件 —— 现场日志里就是按到了 text=mpv/EXO 的内核按钮，看着像没反应。
+        val loading = preStart()
 
         // 返回键：对齐原版 onBackPressed:1834 的优先级 —— 控制条 → 居中提示 → 退出页面。
         // 之前 BACK 只在"控制条隐藏"的分支里处理，控制条正显示着按返回会直接把播放页关掉。
         if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
             if (shown) {
                 hideControl()
+                MpvDebug.log("[key] back 收控制条（不退出页面，对齐原版 onBackPressed 三层）")
                 return true
             }
             if (findViewById<View>(R.id.playCenter)?.visibility == View.VISIBLE) {
@@ -2121,7 +2151,7 @@ class PlayActivity : Activity() {
             return true
         }
 
-        if (shown) {
+        if (shown && !loading) {
             uiHandler.removeCallbacks(autoHide)
             uiHandler.postDelayed(autoHide, 5000)
             // 原版 CustomUpDownView：片头/片尾聚焦时 ↑+1s、↓-1s
@@ -2166,7 +2196,10 @@ class PlayActivity : Activity() {
             // 丢掉抬起，旧实现就等于没收到这一下，表现就是"进去按 OK 没反应"。
             // 现在 DOWN(repeat=0) 立刻切换，UP 只吞掉不再动作，也不会重复触发。
             if (event.action == KeyEvent.ACTION_DOWN) {
-                if (event.repeatCount == 0) togglePlayPause()
+                if (event.repeatCount == 0) {
+                    if (loading) MpvDebug.log("[key] 起播前 OK → 当暂停处理 bar=${controlBar?.visibility == View.VISIBLE}")
+                    togglePlayPause()
+                }
                 return true
             }
             return true
