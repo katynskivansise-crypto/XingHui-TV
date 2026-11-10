@@ -186,6 +186,21 @@ class PlayActivity : Activity() {
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
         playerView?.post { lockSurfaceBuffer() }
+        // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
+        // 用 EXO 时完全看不见 surface 有没有被重建。画面黑一下如果是 surface 重建，
+        // 这一行必然出现；如果不出现，黑就与 surface 无关，方向直接分叉。
+        (playerView?.videoSurfaceView as? android.view.SurfaceView)?.holder?.addCallback(object :
+            android.view.SurfaceHolder.Callback {
+            override fun surfaceCreated(h: android.view.SurfaceHolder) {
+                MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} kernel=${if (isMpvMode()) "mpv" else "exo"}")
+            }
+            override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
+                MpvDebug.log("[sv2] changed ${w}x$hh fmt=$f kernel=${if (isMpvMode()) "mpv" else "exo"}")
+            }
+            override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
+                MpvDebug.log("[sv2] destroyed kernel=${if (isMpvMode()) "mpv" else "exo"}")
+            }
+        })
         // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
         // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
         // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
@@ -1178,11 +1193,33 @@ class PlayActivity : Activity() {
     private fun shutterView(): View? {
         exoShutterRef?.let { return it }
         val pv = playerView ?: return null
-        val id = pv.resources.getIdentifier("exo_shutter", "id", "androidx.media3.ui")
-        if (id == 0) return null
-        val v = pv.findViewById<View>(id)
-        exoShutterRef = v
-        return v
+        // ★真机日志里 [flick] 一直是 sh=null，[panel] 的 ★快门 行也从来没有打出来过，
+        //   可树遍历却能把这块板子叫出名字（View id=exo_shutter）。
+        //   根因：AGP 8 把 AAR 资源合并进 App 自己的资源表，按库包名 "androidx.media3.ui"
+        //   查 id 永远返回 0 —— 于是 setPlayerViewShutter / forceReleaseShutter / detachShutter
+        //   全部空转，那块不透明全屏黑一直原样挂着。这就是"快门怎么修都不生效"的真正原因。
+        //   改成：先按 App 包名查，再按库包名兜底，最后按资源条目名遍历视图树（与包名无关，必中）。
+        for (pkg in arrayOf(packageName, "androidx.media3.ui", "androidx.media3.ui.common")) {
+            val id = runCatching { pv.resources.getIdentifier("exo_shutter", "id", pkg) }.getOrDefault(0)
+            if (id == 0) continue
+            val v = runCatching { pv.findViewById<View>(id) }.getOrNull()
+            if (v != null) {
+                exoShutterRef = v
+                return v
+            }
+        }
+        var found: View? = null
+        fun walk(v: View) {
+            if (found != null) return
+            if (runCatching { pv.resources.getResourceEntryName(v.id) }.getOrNull() == "exo_shutter") {
+                found = v
+                return
+            }
+            if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        walk(pv)
+        exoShutterRef = found
+        return found
     }
 
     /**
@@ -1280,12 +1317,8 @@ class PlayActivity : Activity() {
             pv.setShutterBackgroundColor(
                 if (transparent) android.graphics.Color.TRANSPARENT else android.graphics.Color.BLACK
             )
-            // exo_shutter 是 media3-ui 的 id：用名字查，避免把资源 id 写死
-            // （不同 media3 版本 R 的包名/位置不同，沙盒里也没有它的 R 类）
-            val id = pv.resources.getIdentifier("exo_shutter", "id", "androidx.media3.ui")
-            if (id != 0) {
-                pv.findViewById<View>(id)?.visibility = if (transparent) View.GONE else View.VISIBLE
-            }
+            // 走统一的 shutterView()：包名无关，AGP 8 合并资源后才查得到
+            shutterView()?.visibility = if (transparent) View.GONE else View.VISIBLE
         }
     }
 
@@ -1978,6 +2011,13 @@ class PlayActivity : Activity() {
     /** 收起控制条：对齐 5.6 hideControl(:3502) —— 只置 GONE，不做任何焦点动作 */
     private fun hideControl() {
         uiHandler.removeCallbacks(autoHide)
+        // 幂等：真机日志里同一毫秒能连进来 4 次（autoHide + 起播收条 + 按键兜底各调一次），
+        // 每次 GONE 都给 root 记一次 requestLayout，= 多出 3 轮全树 traversal，
+        // 每一轮父窗口重画黑底、SurfaceView 的洞晚一帧合成 = 白闪一格。
+        // 5.6 的 hideControl 任意时刻只被调用一次，所以它从来不会连闪。
+        if (controlBar?.visibility == View.GONE && findViewById<View>(R.id.playTitle)?.visibility == View.GONE) {
+            return
+        }
         // ★收条只做一件事：置 GONE。与 5.6 hideControl(:3502) 逐字一致。
         // 之前的 alpha 方案（常驻 VISIBLE + alpha 0 + BLOCK）有个副作用：
         // 控制条子控件**仍然持有焦点**（BLOCK 只挡"新的焦点进来"，不夺走已有的），
@@ -2098,7 +2138,7 @@ class PlayActivity : Activity() {
             }
             walk(root, 0)
             runCatching {
-                val id = resources.getIdentifier("exo_shutter", "id", "androidx.media3.ui")
+                val id = runCatching { resources.getIdentifier("exo_shutter", "id", packageName) }.getOrDefault(0)
                 if (id != 0) {
                     val sh = findViewById<View>(id)
                     MpvDebug.log("[panel] $tag ★快门 exo_shutter vis=${sh?.visibility} alpha=${sh?.alpha} " +
