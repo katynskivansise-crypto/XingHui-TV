@@ -357,12 +357,10 @@ class MpvPlayer(
         surfaceReady = false
         attachedSurface = null
         if (inited) {
-            // 关掉视频输出：vo 留着旧 surface 的话，回来时黑屏有声
-            runCatching {
-                core.setPropertyString("vo", "null")
-                core.setOptionString("force-window", "no")
-                core.detachSurface()
-            }
+            // render API 下"停止输出"= 解绑 EGLSurface，vo 保持 libmpv。
+            // 以前这里写 vo=null + force-window=no，等于把 render 输出整个拆掉，
+            // 回来时再设 vo=gpu（见 attachSurface 注释），render context 就再也拿不到帧。
+            runCatching { core.detachSurface() }
         }
     }
 
@@ -386,10 +384,12 @@ class MpvPlayer(
         lastSurfaceH = height
         runCatching {
             core.attachSurface(surface, host.width.coerceAtLeast(1), host.height.coerceAtLeast(1))
-            // 照官方 BaseMPVView 的三步：attach → force-window=yes → 重开 vo。
-            // surfaceDestroyed 里把 vo 置 null 了，这里必须重开，否则 vo 指向已销毁的 surface。
-            core.setOptionString("force-window", "yes")
-            core.setPropertyString("vo", "gpu")
+            // ★这三行是照 mpv-android 官方 BaseMPVView 抄的，但那是"mpv 自己往 surface 推帧"的形态。
+            //   我们走的是 render API：vo 恒为 libmpv，帧由 mpv 交给我们的 EGL，我们自己 eglSwapBuffers。
+            //   在 render context 已经建好之后再 setProperty("vo","gpu")，等于让 mpv 丢掉 render 输出、
+            //   去建一个自己的窗口 vo —— 结果就是 render 回调不再出帧，画面停在黑，
+            //   而音频还在走（用户看到的"黑屏有声"）。surfaceDestroyed 里那句 vo=null 同理。
+            //   render API 下 re-attach 只需要把 EGLSurface 绑到新窗口，vo / force-window 一律不许动。
             if (width > 0 && height > 0) {
                 core.setPropertyString("android-surface-size", "${width}x$height")
             }
@@ -397,11 +397,12 @@ class MpvPlayer(
         // 10bit 输出：整条链的最后一环是 Surface 的缓冲格式。
         // 只有系统 >= API26 才有 RGBA_1010102，且必须在这一帧分配之前设好，
         // 所以放在 attach 之前。拿不到就保持默认 8888，不影响 8bit 路径。
-        if (android.os.Build.VERSION.SDK_INT >= 26 && XhMpv.available) {
-            runCatching {
-                (host as? SurfaceView)?.holder?.setFormat(
-                    android.graphics.PixelFormat.RGBA_1010102
-                )
+        runCatching {
+            val h = (host as? SurfaceView)?.holder
+            if (h != null) {
+                val fmt = if (android.os.Build.VERSION.SDK_INT >= 26 && XhMpv.available)
+                    android.graphics.PixelFormat.RGBA_1010102 else android.graphics.PixelFormat.RGBA_8888
+                h.setFormat(fmt)
             }
         }
         surfaceReady = true

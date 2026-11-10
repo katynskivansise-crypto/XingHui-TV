@@ -185,7 +185,7 @@ class PlayActivity : Activity() {
         // 原版播放页没有返回按钮（VideoActivity 靠系统返回键），这里同样不摆
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
-        playerView?.post { lockSurfaceBuffer() }
+        playerView?.post { setupSharedSurface() }
         // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
         // 用 EXO 时完全看不见 surface 有没有被重建。画面黑一下如果是 surface 重建，
         // 这一行必然出现；如果不出现，黑就与 surface 无关，方向直接分叉。
@@ -2094,28 +2094,22 @@ class PlayActivity : Activity() {
      * 重开那一帧生产者还没写入 → 画面层空白 → 整屏黑一下。
      * 锁死缓冲区后，布局再多也不会换缓冲区，这一帧就不存在。
      */
-    private var surfaceBufferLocked = false
-    private fun lockSurfaceBuffer() {
+    private fun setupSharedSurface() {
         val sv = playerView?.videoSurfaceView as? android.view.SurfaceView ?: return
-        if (correctSizeLock(sv)) return
-        sv.addOnLayoutChangeListener { v, l, t, rr, b, ol, ot, orr, ob ->
-            if (l == ol && t == ot && rr == orr && b == ob) return@addOnLayoutChangeListener
-            correctSizeLock(v as android.view.SurfaceView)
+        // ★setFixedSize 这条是从 5.6 抄的，但 5.6 只在它自己那套自定义 render surface 上锁尺寸。
+        //   我们把它挂在了 PlayerView 的 SurfaceView 上，结果真机日志里：
+        //     [sv] setFixedSize 1920x1080 → surface=1920x1080   （此时视图还是满屏 1080）
+        //     [exo] view=1920x799                              （视频比例算出 799 之后视图缩了）
+        //   buffer 被钉死 1080、视图却是 799 → 合成时把画面纵向压扁（1080/799 ≈ 1.35 倍），
+        //   并且每次布局都触发一次 [sv2] changed 重新分配 buffer。
+        //   官方 PlayerView 自己会按 resize_mode=fit 算 AspectRatioFrameLayout 的尺寸，
+        //   根本不需要我们锁死缓冲区。
+        //   这里只做一件必要的事：把 Surface 的像素格式从默认 RGB_565（API25 默认）改成 8888，
+        //   否则整条链路只有 16bit，色带明显，mpv 的 RGBA 帧也要被降位再上屏。
+        runCatching {
+            sv.holder.setFormat(android.graphics.PixelFormat.RGBA_8888)
+            MpvDebug.log("[sv] surface 格式 = RGBA_8888（原默认 565）")
         }
-        MpvDebug.log("[sv] 缓冲区尺寸锁定监听已挂上")
-    }
-
-    private fun correctSizeLock(sv: android.view.SurfaceView): Boolean {
-        val w = sv.width
-        val h = sv.height
-        if (w <= 0 || h <= 0) return false
-        return runCatching {
-            sv.holder.setFixedSize(w, h)
-            val frame = sv.holder.surfaceFrame
-            MpvDebug.log("[sv] setFixedSize ${w}x$h → surface=${frame.width()}x${frame.height()}")
-            surfaceBufferLocked = true
-            true
-        }.getOrDefault(false)
     }
 
     /** 呼出控制条时把视图树的面板层级打一次：谁盖在画面层上面、谁是不透明的，一眼可查。 */
