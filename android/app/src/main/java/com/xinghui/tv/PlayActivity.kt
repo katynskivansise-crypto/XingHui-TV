@@ -120,6 +120,7 @@ class PlayActivity : Activity() {
 
         playerView = findViewById<PlayerView>(R.id.playView)
         enableKeepContent()
+        installBlackProbe()
         /**
          * keep_content_on_player_reset 不在这里设，保持 media3 默认（false），与点播场景一致。
          *
@@ -1132,6 +1133,25 @@ class PlayActivity : Activity() {
 
     private var mpv: MpvPlayer? = null
     private var mpvPos = 0L
+    /**
+     * 全片时长唯一入口（毫秒，未知返回 0）。
+     *
+     * 之前各地各写一遍：mpv 侧读 mpvDur（由 mpv 桥 onDuration 赋值），EXO 侧读 player.duration。
+     * 问题在于 mpvDur 只会被 mpv 桥写，EXO 模式下它**恒为 0** —— 诊断行 `dur=0ms` 就是这么来的，
+     * 一旦某处漏了 isMpvMode() 分支就会拿 0 去算（片头/片尾判定直接误报"请播到片头附近"）。
+     * 现在所有取值都走这里：
+     *   - mpv：mpvDur 没拿到时回落到实时读内核 duration 属性（同名 durationMs()）
+     *   - EXO：player.duration，TIME_UNSET（Long.MIN_VALUE）与负数一律折算成 0
+     */
+    private fun durNow(): Long {
+        if (isMpvMode()) {
+            val cached = mpvDur
+            if (cached > 0) return cached
+            return runCatching { mpv?.durationMs() ?: 0L }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
+        }
+        return runCatching { player?.duration ?: 0L }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
+    }
+
     private var mpvDur = 0L
     private var mpvLoaded = false
     /** mpv 在本页起不来时临时退回 EXO，不改用户设置 */
@@ -1304,6 +1324,30 @@ class PlayActivity : Activity() {
      * 我们切内核时 `playerView.player = null` 正好命中“tracks 为空”，于是必然盖一块黑上去，
      * 直到 EXO 下一次 onRenderedFirstFrame 才打开。打开这个开关后，清空/替换播放器不关快门。
      */
+    /**
+     * 【临时诊断，测完必须删】左上角 60×60 洋红方块。
+     *
+     * 它画在**应用窗口**里（视频层之外，纵向落在上下留边的黑条区域），和 SurfaceView 没有任何关系。
+     * 于是按菜单键黑屏那一刻：
+     *   方块还在 → 应用窗口这一层正常合成，黑的是**视频层**（SurfaceView 拿到的是空/黑缓冲）
+     *   方块也没了 → 整个应用窗口这一层被清掉/被盖住，跟视频层无关
+     * 这一条能一次性判掉一半的候选，不用再靠猜。
+     */
+    private fun installBlackProbe() {
+        runCatching {
+            val content = findViewById<android.view.ViewGroup>(android.R.id.content) ?: return@runCatching
+            val root = content.getChildAt(0) as? android.view.ViewGroup ?: return@runCatching
+            val v = View(this)
+            v.setBackgroundColor(0xFFFF00FF.toInt())
+            val lp = android.widget.FrameLayout.LayoutParams(60, 60)
+            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
+            lp.leftMargin = 6
+            lp.topMargin = 6
+            root.addView(v, lp)
+            MpvDebug.log("[probe] 洋红方块已加入（左上角 60x60，判黑屏时窗口层是否还在合成）")
+        }
+    }
+
     private fun enableKeepContent() {
         runCatching {
             playerView?.setKeepContentOnPlayerReset(true)
@@ -1730,7 +1774,9 @@ class PlayActivity : Activity() {
         } else {
             val p = player ?: return
             cur = p.currentPosition
-            dur = p.duration
+            // TIME_UNSET 时 p.duration 是 Long.MIN_VALUE：不折算成 0 的话，下面 dur<=0 的守卫
+            // 会把"未知时长"误判成"还没播到片头附近"，弹出错误的提示。
+            dur = runCatching { p.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
         }
         if (cur <= 0 || dur <= 0 || cur > dur / 2) {
             Toast.makeText(this, "请播到片头附近再按（需在前半段）", Toast.LENGTH_SHORT).show()
@@ -1750,7 +1796,9 @@ class PlayActivity : Activity() {
         } else {
             val p = player ?: return
             cur = p.currentPosition
-            dur = p.duration
+            // TIME_UNSET 时 p.duration 是 Long.MIN_VALUE：不折算成 0 的话，下面 dur<=0 的守卫
+            // 会把"未知时长"误判成"还没播到片头附近"，弹出错误的提示。
+            dur = runCatching { p.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
         }
         if (cur <= 0 || dur <= 0 || cur < dur / 2) {
             Toast.makeText(this, "请播到片尾附近再按（需在后半段）", Toast.LENGTH_SHORT).show()
@@ -1825,7 +1873,7 @@ class PlayActivity : Activity() {
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
             "mpvSink=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
-            "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${mpvDur}ms " +
+            "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${durNow()}ms " +
             "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }} " +
             "winFlags=${runCatching { Integer.toHexString(window.attributes.flags) }.getOrElse { "?" }} " +
             "winFmt=${runCatching { Integer.toHexString(window.attributes.format) }.getOrElse { "?" }} " +
@@ -1963,10 +2011,27 @@ class PlayActivity : Activity() {
             MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
             return
         }
+        // 幂等 + 只补差集：真机日志里一次菜单键 / 一次起播能连进来 3 次 showControl
+        // （菜单键一次、起播一次带标题、焦点兜底一次），打出 draws=4~5 layouts=3 —— 
+        // 一次呼条造了三轮全树 traversal。条已经显示时，剩下要补的只有两件事：
+        //   a) withTitle=true 时把标题透明度抬起来（只重绘，不重排）
+        //   b) 指定了 focusId 时把焦点挪过去（焦点变化不触发布局）
+        // 其余一律跳过，绝不重复 measure/layout。
+        if (controlBar?.visibility == View.VISIBLE) {
+            if (withTitle) findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = 1f }
+            if (focusId != 0) runCatching { findViewById<View>(focusId)?.requestFocus() }
+            uiHandler.removeCallbacks(autoHide)
+            uiHandler.postDelayed(autoHide, 5000)
+            return
+        }
         // ★ 呼出前先让画面层把上一帧重绘一次：
         //   接下来这一帧要同时合成「视频层 + 控制条」，如果视频层这次没提交新帧，
         //   合成器就会拿到空队列 → 整屏黑一下。先把同一帧重新贴上去，黑的那一下就不存在。
-        if (isMpvMode()) runCatching { mpv?.redrawFor(1200) }
+        // ★只重贴一次。原来这里是 redrawFor(1200)：1.2 秒内每 33ms 调一次 core.redrawNow()
+        //   （36 次 mpv_render_context_render + eglSwapBuffers），正好和窗口 re-layout 撞在一起。
+        //   mpv 内核按菜单键闪退就落在这一段：EGLSurface 在窗口重排期间被系统换掉，
+        //   我们还在它上面 swap → 原生 SIGSEGV。菜单这一刻只需要"把上一帧再贴一次"。
+        if (isMpvMode()) runCatching { mpv?.redrawNow() }
         detachShutter("showControl")
         controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
@@ -2029,7 +2094,7 @@ class PlayActivity : Activity() {
         controlBar?.visibility = View.GONE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
-        if (isMpvMode()) runCatching { mpv?.redrawFor(1200) }
+        if (isMpvMode()) runCatching { mpv?.redrawNow() }
         detachShutter("hideControl")
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         logRenderPulse("hideControl")
@@ -2336,7 +2401,7 @@ class PlayActivity : Activity() {
      * （原版用的是 time > 0，对跳到 0 附近会判错方向，这里更准）。
      */
     private fun showSeekCenter(accum: Long) {
-        val durMs = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+        val durMs = durNow()
         var target = (seekBaseMs + accum).coerceAtLeast(0L)
         if (durMs > 0L) target = target.coerceAtMost(durMs)
         findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(
@@ -2352,7 +2417,7 @@ class PlayActivity : Activity() {
         val delta = seekAccumMs
         seekAccumMs = 0L
         if (delta == 0L) { hidePlayCenter(); return@Runnable }
-        val dur = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+        val dur = durNow()
         var target = (base + delta).coerceAtLeast(0L)
         if (dur > 0) target = target.coerceAtMost(dur)
         if (!contentReady()) {
@@ -2360,6 +2425,9 @@ class PlayActivity : Activity() {
             pendingJumpMs = target
             MpvDebug.log("[key] 起播前快进意图 → ${target}ms（就绪后补跳）")
         }
+        val fromPos = currentPosMs()
+        MpvDebug.log("[key] seek 提交 base=${base}ms delta=${delta}ms → target=${target}ms " +
+            "dur=${dur}ms from=${fromPos}ms ready=${contentReady()} mpv=${isMpvMode()}")
         if (isMpvMode()) {
             if (!mpvLoaded) mpvSeekAfterLoad = target else mpv?.seekToMs(target)
         } else player?.seekTo(target)
@@ -2393,7 +2461,7 @@ class PlayActivity : Activity() {
                 val dur: Long
                 if (isMpvMode()) {
                     pos = mpvPos.coerceAtLeast(0L)
-                    dur = mpvDur.coerceAtLeast(0L)
+                    dur = durNow()
                 } else {
                     val p = player
                     if (p == null) {
@@ -2601,7 +2669,7 @@ class PlayActivity : Activity() {
                 // 原版 onKeyUp:1755 / onKeyDown:1763：
                 //   ↑ → showInfo + 控制条，焦点给片头（进度没过半）或片尾（过半）
                 //   ↓ → showInfo + 控制条，焦点给"下集"（getFocus2 默认值）
-                val dur = if (isMpvMode()) mpvDur else runCatching { player?.duration ?: 0L }.getOrDefault(0L)
+                val dur = durNow()
                 val half = if (dur > 0L) dur / 2 else Long.MAX_VALUE
                 val atOpeningHalf = currentPosMs() < half
                 val focusId = if (isUpKey(event)) {
