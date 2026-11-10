@@ -153,22 +153,29 @@ class PlayActivity : Activity() {
         } else {
             // mpv 内核：先把原生实例建好，按键（暂停/快进）从第一秒起就有效。
             // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
-            val mpvTexture = findViewById<android.view.TextureView>(R.id.mpvView)
-            mpvTexture?.visibility = View.VISIBLE
-            playerView?.visibility = View.GONE
+            // ★路线 A（对齐 WebHomeTV 5.6）：mpv 与 EXO 共用 PlayerView 那一块 SurfaceView。
+            // 播放页从此只有一套画面层，切内核 = 换内核、不换视图、不换 window layer。
+            playerView?.visibility = View.VISIBLE
+            setPlayerViewShutter(transparent = true)
             // 原生内核初始化要几十到几百毫秒（mpv_create + 四十多条选项 + observeProperty + attachSurface）。
             // 放在 onCreate 里同步执行会把"首帧"和"窗口拿到输入焦点"一起往后推 ——
             // 从详情页进来那一两秒的按键会被系统直接丢掉，表现就是"进去按 OK 没反应"。
             // 原版 onCreate 里只有 ExoPlayer 的构造（轻得多），不存在这个空档。
             // 挪到首帧之后：窗口先挂上、先拿到输入焦点，内核随后建好（地址解析本来也要时间）。
-            mpvTexture?.post {
-                if (isFinishing || isDestroyed) return@post
-                mpvTexture.let { ensureMpv(it) }
-                MpvDebug.log("[mpv] 首帧后建实例（未加载文件，按键已可用）")
+            val sv = mpvSurfaceView()
+            if (sv == null) {
+                MpvDebug.log("[mpv] 拿不到共用 SurfaceView，起播时会退回 EXO")
+            } else {
+                sv.post {
+                    if (isFinishing || isDestroyed) return@post
+                    ensureMpv(sv)
+                    MpvDebug.log("[mpv] 首帧后建实例（绑定 PlayerView 的 SurfaceView，按键已可用）")
+                }
             }
         }
         findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
-        findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        // 顶部标题条也用 alpha 表显隐：它的 GONE↔VISIBLE 会带来一次 layout pass
+        findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = 0f }
 
         applyImmersive()
         // 窗口形态实验档（3/4），非 3/4 时什么都不做
@@ -788,7 +795,7 @@ class PlayActivity : Activity() {
                 }
                 if (state != Player.STATE_READY) return
                 val p = player ?: return
-                uiHandler.post { if (controlBar?.visibility == View.VISIBLE) ensureBarFocus() }
+                uiHandler.post { if (barShown()) ensureBarFocus() }
                 // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
                 if (pendingJumpMs >= 0) {
                     val at = pendingJumpMs
@@ -1139,6 +1146,33 @@ class PlayActivity : Activity() {
         sv.setApplyEmbeddedFontSizes(false)
     }
 
+    /** 画面层唯一的那块 surface：EXO 与 mpv 共用（路线 A） */
+    private fun mpvSurfaceView(): android.view.SurfaceView? =
+        runCatching { playerView?.videoSurfaceView as? android.view.SurfaceView }.getOrNull()
+
+    /**
+     * PlayerView 的 shutter 开关。
+     *
+     * media3 的 PlayerView 里有一个 exo_shutter（默认不透明黑），首帧渲染前挡着画面。
+     * 但 mpv 不归 media3 管，它不会触发 onRenderedFirstFrame，shutter 会永远挡在前面 ——
+     * 所以 mpv 模式下必须把它让开：背景透明 + 直接 GONE。
+     * 切回 EXO 时恢复不透明黑，仍然让 media3 自己在首帧后隐藏它。
+     */
+    private fun setPlayerViewShutter(transparent: Boolean) {
+        runCatching {
+            val pv = playerView ?: return@runCatching
+            pv.setShutterBackgroundColor(
+                if (transparent) android.graphics.Color.TRANSPARENT else android.graphics.Color.BLACK
+            )
+            // exo_shutter 是 media3-ui 的 id：用名字查，避免把资源 id 写死
+            // （不同 media3 版本 R 的包名/位置不同，沙盒里也没有它的 R 类）
+            val id = pv.resources.getIdentifier("exo_shutter", "id", "androidx.media3.ui")
+            if (id != 0) {
+                pv.findViewById<View>(id)?.visibility = if (transparent) View.GONE else View.VISIBLE
+            }
+        }
+    }
+
     private fun isMpvMode(): Boolean =
         !mpvFallbackExo && PlayerManager.shouldUseMpv(this) &&
             android.os.Build.VERSION.SDK_INT >= 23   // 官方 libmpv 构建要求 API 23+
@@ -1176,7 +1210,7 @@ class PlayActivity : Activity() {
      * 现在进页面就先建好实例（还没文件，pause 属性照样能设、能保持），
      * startMpv 只负责 play(url)，按键从第一秒起就有效。
      */
-    private fun ensureMpv(surface: android.view.TextureView): MpvPlayer {
+    private fun ensureMpv(surface: android.view.SurfaceView): MpvPlayer {
         mpv?.let { return it }
         val p = MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
@@ -1195,7 +1229,7 @@ class PlayActivity : Activity() {
                 recordHistory()
                 // 起播这一刻焦点最容易掉回根布局：控制条若还开着，立刻把落点拉回条内，
                 // 否则用户下一按方向键就是"空打一发"。
-                uiHandler.post { if (controlBar?.visibility == View.VISIBLE) ensureBarFocus() }
+                uiHandler.post { if (barShown()) ensureBarFocus() }
             }
             p.onEndFile = { handleEnded() }
             p.onPauseChanged = { paused -> setKeepScreenOn(!paused) }
@@ -1216,11 +1250,25 @@ class PlayActivity : Activity() {
         // 紧接着把 PlayerView 置 GONE 会让它的 Surface 被销毁，而播放器仍然持有那个句柄 ——
         // 这是从 EXO 热切 mpv 时黑屏、甚至进程直接挂掉的来源。
         // 彻底释放并置空，切回 EXO 时走 rebuildPlayer 重建，虽然慢一点但状态是干净的。
+        // 顺序很重要：先把 PlayerView 与 EXO 解绑（media3 会把这块 surface 从旧播放器上 clear），
+        // 再释放 EXO。反过来的话，release 期间 media3 还会去摸一块马上要被 mpv 接管的 surface。
+        runCatching { playerView?.player = null }
         runCatching { player?.release() }
         player = null
-        playerView?.visibility = View.GONE
-        val surface = findViewById<android.view.TextureView>(R.id.mpvView)
-        surface.visibility = View.VISIBLE
+        playerView?.visibility = View.VISIBLE
+        // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
+        setPlayerViewShutter(transparent = true)
+        val surface = mpvSurfaceView()
+        // 共用 surface 是路线 A 的唯一前提，拿不到就本页退回 EXO（不能静默不播）
+        if (surface == null) {
+            MpvDebug.log("[mpv] 拿不到共用 SurfaceView（PlayerView 可能不是 surface_view），本页退回 EXO")
+            mpvFallbackExo = true
+            setPlayerViewShutter(transparent = false)
+            if (player == null) rebuildPlayer(headers)
+            resumeOverride = startMs
+            playUrl(url, headers)
+            return
+        }
         mpvLoaded = false
         // mpv 没有 ExoPlayer 的 STATE_BUFFERING/READY 回调，等价时机是 onLoaded（FILE_LOADED）。
         // 这里先盖上转圈，onLoaded 里再收起，行为与原版 progress 一致。
@@ -1252,7 +1300,7 @@ class PlayActivity : Activity() {
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
-        findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
+        setPlayerViewShutter(transparent = false)
         playerView?.visibility = View.VISIBLE
         updatePlayerText()
         resumeOverride = mpvPos
@@ -1287,6 +1335,14 @@ class PlayActivity : Activity() {
     // ===================== 底部控制条（对齐原版 view_control_vod + CustomKeyDownVod） =====================
 
     private var controlBar: View? = null
+    /**
+     * 控制条"显示中"的唯一判定。
+     * 控制条从进页面起就一直 VISIBLE，显隐只靠 alpha —— 见 hideControl() 里的长注释。
+     */
+    private fun barShown(): Boolean {
+        val b = controlBar ?: return false
+        return b.visibility == View.VISIBLE && b.alpha > 0f
+    }
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -1305,6 +1361,11 @@ class PlayActivity : Activity() {
     /** 控制条 14 个按钮全部接上；未实现的能力按原版文字保留、点击给出说明 */
     private fun bindControlBar() {
         controlBar = findViewById(R.id.controlBar)
+        // 常驻 VISIBLE、alpha=0：整场只在 alpha 上做显隐，visibility 一次都不再改，
+        // 这样 SurfaceView 的透明区域（挖洞）永远不需要重算。
+        controlBar?.visibility = View.VISIBLE
+        controlBar?.alpha = 0f
+        (controlBar as? android.view.ViewGroup)?.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         findViewById<View>(R.id.btnEpisodes).setOnClickListener { openEpisodes() }
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
@@ -1430,7 +1491,8 @@ class PlayActivity : Activity() {
             Toast.makeText(this, "已切换到 EXO", Toast.LENGTH_SHORT).show()
             mpv?.release()
             mpv = null
-            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility = View.GONE
+            // mpv 走了：把 shutter 恢复成原版的黑色，EXO 出首帧前由它挡着
+            setPlayerViewShutter(transparent = false)
             playerView?.visibility = View.VISIBLE
             if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
@@ -1581,11 +1643,12 @@ class PlayActivity : Activity() {
     private fun mpvDebugLine(): String {
         val m = mpv
         val surfaceVis = runCatching {
-            findViewById<android.view.TextureView>(R.id.mpvView)?.visibility
+            val sv = mpvSurfaceView()
+            "${sv?.width}x${sv?.height} vis=${sv?.visibility} valid=${sv?.holder?.surface?.isValid}"
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
-            "mpvView=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
+            "mpvSink=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
             "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${mpvDur}ms " +
             "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }} " +
             "winFlags=${runCatching { Integer.toHexString(window.attributes.flags) }.getOrElse { "?" }} " +
@@ -1726,7 +1789,8 @@ class PlayActivity : Activity() {
         }
         controlBar?.alpha = 1f
         controlBar?.visibility = View.VISIBLE
-        findViewById<View>(R.id.playTitle)?.visibility = if (withTitle) View.VISIBLE else View.GONE
+        (controlBar as? android.view.ViewGroup)?.descendantFocusability = android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS
+        findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
         // 焦点落点：原版 getFocus2() —— 显式指定就用指定的；否则沿用上次；
         // 上次停在片头/片尾时按原版规则换成"下一集"。
         val target = when {
@@ -1772,8 +1836,24 @@ class PlayActivity : Activity() {
         // INVISIBLE 只触发一次 draw（不触发 measure/layout），画面层几何不变，挖洞区域不用重算。
         // 视觉与 GONE 完全一致（都不显示、都不可聚焦），唯一区别是它仍占着自己在 FrameLayout 里的位置 ——
         // 控制条本来就在底部、不参与其它兄弟的排布，所以没有副作用。
-        if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.INVISIBLE
-        findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        // ★ 显隐只改 alpha，一次 visibility / layout 都不动。
+        //
+        // 为什么 GONE 和 INVISIBLE 都会黑一下（两版真机都已确认）：
+        // 画面层是 SurfaceView（EXO）时，它是一块独立的 surface，父窗口要在自己身上"挖一个洞"
+        // 才能露出它 —— 这个洞（transparent region）由 ViewRootImpl 按"哪些区域被视图挡住"算出来。
+        // 只要控制条的可见性/布局发生变化，父窗口就判定洞要重算；这家 7.1 ROM 上重算偶尔晚一帧，
+        // 那一帧洞还是旧的、窗口把自己不透明的黑底盖上去 → 黑一下。
+        // mpv 侧虽然是 TextureView（在窗口内合成），但每次 visibility 变化同样会走一遍 draw 状态切换，
+        // 真机回执"两个都黑"，说明这套 ROM 上共同的那一环就是这个"重新算一遍"。
+        //
+        // alpha 0 不改变布局、不改变可见性判定、不改变挖洞区域 —— 视图照常被 draw（只是全透明），
+        // 洞的位置和大小一个像素都没变，窗口没有任何理由重算，因此不存在这一帧。
+        if (barShown()) {
+            controlBar?.alpha = 0f
+            // 全透明时把子控件从焦点链里摘掉，否则方向键还能跳进看不见的按钮里
+            (controlBar as? android.view.ViewGroup)?.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
+        findViewById<View>(R.id.playTitle)?.alpha = 0f
         // 对齐原版 getFocus1(:1670)：控制条收起后焦点回画面容器。
         // 不回收的话焦点会留在一个已经 GONE 的按钮上，方向键会跳进不可见控件里，
         // 真机表现就是「按键有时完全没反应、按一下菜单键又好了」。
@@ -1827,7 +1907,7 @@ class PlayActivity : Activity() {
      */
     private fun ensureBarFocus(): Boolean {
         val bar = controlBar ?: return false
-        if (bar.visibility != View.VISIBLE) return false
+        if (!barShown()) return false
         currentFocus?.let { if (isInside(bar, it)) return true }
         var target = runCatching { bar.findFocus() }.getOrNull()
         if (target == null || target.visibility != View.VISIBLE) {
@@ -1876,7 +1956,7 @@ class PlayActivity : Activity() {
 
     /** 菜单键：原版默认 fullscreen_menu_key=0 → onToggle（控制条开/关），不是直接弹选集 */
     private fun toggleControl() {
-        if (controlBar?.visibility == View.VISIBLE) hideControl() else showControl()
+        if (barShown()) hideControl() else showControl()
     }
 
     /**
@@ -2105,18 +2185,18 @@ class PlayActivity : Activity() {
                 MpvDebug.log(
                     "[key] kc=${event.keyCode} focus=${currentFocus?.id}" +
                         "(${currentFocus?.javaClass?.simpleName ?: "null"})" +
-                        " bar=${controlBar?.visibility == View.VISIBLE}" +
+                        " bar=${barShown()}" +
                         " ready=${contentReady()} mpv=${mpv != null} exo=${player != null}"
                 )
             }
         }
         // OK 的按下也记一行（上面只记了抬起）：用来分辨「键根本没到 Activity」与「到了但没效果」
         if (event.action == KeyEvent.ACTION_DOWN && isEnterKey(event)) {
-            MpvDebug.log("[key] OK 按下 kc=${event.keyCode} ready=${contentReady()} bar=${controlBar?.visibility == View.VISIBLE}")
+            MpvDebug.log("[key] OK 按下 kc=${event.keyCode} ready=${contentReady()} bar=${barShown()}")
         }
         // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
         // 那一瞬间开始方向键与 OK 就全落在根上，看起来就是"没反应"。
-        if (controlBar?.visibility == View.VISIBLE) ensureBarFocus()
+        if (barShown()) ensureBarFocus()
         // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
         //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
         //   == 1 → onEpisodes()：弹选集并收起控制栏
@@ -2131,7 +2211,7 @@ class PlayActivity : Activity() {
             return true
         }
 
-        val shown = controlBar?.visibility == View.VISIBLE
+        val shown = barShown()
         // 起播前（画面还没出来）控制条上的按钮全都没有意义：切内核会重建播放器、刷新会重解析、
         // 上下集还没开始播、片头片尾还没时间轴。这段时间里 OK / ←→ 一律按"暂停""快进"的意图处理，
         // 不再交给焦点控件 —— 现场日志里就是按到了 text=mpv/EXO 的内核按钮，看着像没反应。
@@ -2145,7 +2225,9 @@ class PlayActivity : Activity() {
             // 而且第一次按返回看起来"什么都没发生"，还得再按一次才退出。
             // 控制条的显隐留给菜单键（isMenuKeyCode 分支里就是"可见就收、不可见就出"），
             // 返回键只做一件事：退出播放页。
-            if (shown) hideControl()
+            // ★不再收条：既然这一下就要 finish，先收条只是多一次窗口合成
+            //（这家 ROM 上正是那一次合成会露出黑底）。与 5.6 的差别：5.6 分三层，
+            // 我们按你的要求合成一跳。
             // 第三层：真的退出。不走 super —— 各 ROM 对 KEYCODE_BACK 的默认处理不一致，
             // 有的会先给 Activity 一次 onKeyDown/onKeyUp 往返（部分机型伴随窗口重建、画面回到首帧），
             // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
@@ -2204,7 +2286,7 @@ class PlayActivity : Activity() {
             // 现在 DOWN(repeat=0) 立刻切换，UP 只吞掉不再动作，也不会重复触发。
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
-                    if (loading) MpvDebug.log("[key] 起播前 OK → 当暂停处理 bar=${controlBar?.visibility == View.VISIBLE}")
+                    if (loading) MpvDebug.log("[key] 起播前 OK → 当暂停处理 bar=${barShown()}")
                     togglePlayPause()
                 }
                 return true

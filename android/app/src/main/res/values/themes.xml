@@ -10,7 +10,11 @@
          会保留一条 insets，播放页画面四周就露出一圈窗口背景（浅色时看着就是"白条"）。 -->
     <style name="Theme.TVBox" parent="android:Theme.Black.NoTitleBar.Fullscreen">
         <item name="android:windowFullscreen">true</item>
-        <item name="android:windowBackground">@android:color/black</item>
+        <!-- 原版 BaseTheme 是 android:windowBackground=@null（什么都不画），不是铺一层不透明黑。
+             窗口背景这一层会被系统当成「整窗不透明」，SurfaceView 的挖洞一旦被算错，
+             露出来的就是这层黑 —— 真机上表现就是按菜单键画面全黑、声音照走。
+             黑改由根布局自己画（视觉完全一样），窗口背景留空。 -->
+        <item name="android:windowBackground">@null</item>
         <item name="android:colorBackground">@android:color/black</item>
         <item name="android:windowTranslucentStatus">true</item>
         <item name="android:windowTranslucentNavigation">true</item>

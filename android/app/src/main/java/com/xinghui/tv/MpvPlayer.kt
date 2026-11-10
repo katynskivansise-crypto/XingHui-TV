@@ -2,14 +2,15 @@ package com.xinghui.tv
 
 import android.app.Activity
 import android.util.Log
-import android.graphics.SurfaceTexture
-import android.view.TextureView
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import java.util.Locale
 
 /**
  * 内嵌 mpv 播放器封装。
  *
- * 目的：把 mpv 从「Intent 拉起外部 mpv-android」改成「本进程内 libmpv + TextureView」，
+ * 目的：把 mpv 从「Intent 拉起外部 mpv-android」改成「本进程内 libmpv + 与 EXO 共用的 SurfaceView」，
  * 这样播放页的控制条（暂停/继续、进度、倍速、缩放、上下集）可以直接控它，和 EXO 一致。
  *
  * 用的就是 mpv-android 官方 arm64 构建（libmpv / libplayer / ffmpeg 全套 so），
@@ -17,8 +18,9 @@ import java.util.Locale
  */
 class MpvPlayer(
     private val activity: Activity,
-    private val textureView: TextureView
-) : TextureView.SurfaceTextureListener, `is`.xyz.mpv.MPVLib.EventObserver {
+    /** 路线 A 的宿主：与 EXO 共用的那块 SurfaceView */
+    private val surfaceView: SurfaceView
+) : SurfaceHolder.Callback, `is`.xyz.mpv.MPVLib.EventObserver {
 
     companion object {
         private const val TAG = "XingHuiTV"
@@ -107,13 +109,11 @@ class MpvPlayer(
             }
         }
         current = this
-        textureView.surfaceTextureListener = this
         liveCount++
-        // 设 listener 时 texture 若已经可用，系统不会再补发 available，这里手动走一遍
-        val st = textureView.surfaceTexture
-        if (st != null && textureView.isAvailable) {
-            onSurfaceTextureAvailable(st, textureView.width, textureView.height)
-        }
+        surfaceView.holder.addCallback(this)
+        // 加回调时 surface 若已经可用，系统不会再补发 created，这里手动走一遍
+        val holder = surfaceView.holder
+        if (holder.surface?.isValid == true) surfaceCreated(holder)
     }
 
     // ---------------------------------------------------------------- 生命周期
@@ -262,37 +262,40 @@ class MpvPlayer(
         }
     }
 
-    // ---------------------------------------------------------------- SurfaceTextureListener
+    // ---------------------------------------------------------------- SurfaceHolder.Callback
     //
-    // 为什么是 TextureView 而不是 SurfaceView：
-    // SurfaceView 靠「向合成器挖洞」把画面露出来。这家 ROM（T1 / Amlogic 7.1）上，
-    // 只要窗口里再有任何一层视图显隐（呼出控制条就是），洞就被盖回去，
-    // 而 surface 本身还在正常渲染 —— 表现就是「全黑、声音照走」，按返回才恢复。
-    // TextureView 是普通视图，画面直接画在窗口里，不参与挖洞，没有这个问题。
-    // 代价是多一次纹理拷贝（1080p 可接受）。
+    // ★路线 A：画面层只有一套。
+    // 这里绑的不再是独立的 TextureView，而是 **PlayerView 自己那块 SurfaceView**（EXO 用的同一块）。
+    // 对齐 WebHomeTV 5.6：`PlayerView surface_type="none"` + 内核往同一块 surface 输出，
+    // 切内核不再换视图、不再换 window layer，收控制条也不会让父窗口重算挖洞。
+    //
+    // 与 TextureView 版的差别：
+    //   1. 没有 setDefaultBufferSize（那是 SurfaceTexture 才有的），尺寸走 android-surface-size 属性；
+    //   2. holder.surface 由 SurfaceView 自己持有，**不能**由我们 release，所以不再 track ownsSurface；
+    //   3. surface 的生命周期跟着 SurfaceView，Activity 不可见时系统照样会 destroyed，逻辑与原来一致。
 
-    override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-        MpvDebug.log("[mpv] textureAvailable inited=$inited playPending=$playPending ${width}x$height")
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        val w = holder.surfaceFrame.width()
+        val h = holder.surfaceFrame.height()
+        MpvDebug.log("[mpv] surfaceCreated(SurfaceView) inited=$inited playPending=$playPending ${w}x$h")
         if (!inited) initWithOptions()
         if (!inited) return
-        attachTexture(st, width, height, first = true)
+        attachSurface(holder.surface, w, h, first = true)
     }
 
-    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         lastSurfaceW = width
         lastSurfaceH = height
-        MpvDebug.log("[mpv] textureSizeChanged ${width}x$height")
+        MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format")
         if (!inited) return
         runCatching {
-            st.setDefaultBufferSize(width, height)
             `is`.xyz.mpv.MPVLib.setPropertyString("android-surface-size", "${width}x$height")
         }
     }
 
-    override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-        MpvDebug.log("[mpv] textureDestroyed inited=$inited")
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        MpvDebug.log("[mpv] surfaceDestroyed(SurfaceView) inited=$inited")
         surfaceReady = false
-        val old = attachedSurface
         attachedSurface = null
         if (inited) {
             // 关掉视频输出：vo 留着旧 surface 的话，回来时黑屏有声
@@ -302,44 +305,33 @@ class MpvPlayer(
                 `is`.xyz.mpv.MPVLib.detachSurface()
             }
         }
-        runCatching { old?.release() }
-        // 返回 true：SurfaceTexture 由我们释放（我们自己建了 Surface 包着它）
-        return true
     }
 
-    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
-        // 每帧都会回调，这里不需要做事
-    }
-
-    private fun attachTexture(st: SurfaceTexture, width: Int, height: Int, first: Boolean) {
-        runCatching { st.setDefaultBufferSize(width, height) }
-        val old = attachedSurface
-        val surface = android.view.Surface(st)
+    private fun attachSurface(surface: Surface, width: Int, height: Int, first: Boolean) {
         attachedSurface = surface
         lastSurfaceW = width
         lastSurfaceH = height
         runCatching {
             `is`.xyz.mpv.MPVLib.attachSurface(surface)
             // 照官方 BaseMPVView 的三步：attach → force-window=yes → 重开 vo。
-            // textureDestroyed 里把 vo 置 null 了，这里必须重开，否则 vo 指向已销毁的 surface。
+            // surfaceDestroyed 里把 vo 置 null 了，这里必须重开，否则 vo 指向已销毁的 surface。
             `is`.xyz.mpv.MPVLib.setOptionString("force-window", "yes")
             `is`.xyz.mpv.MPVLib.setPropertyString("vo", "gpu")
             if (width > 0 && height > 0) {
                 `is`.xyz.mpv.MPVLib.setPropertyString("android-surface-size", "${width}x$height")
             }
         }
-        runCatching { old?.release() }
         surfaceReady = true
         if (playPending && pendingUrl.isNotBlank()) {
             playPending = false
             doPlay(pendingUrl)
         } else if (pendingResume && pendingUrl.isNotBlank()) {
-            // 回前台时 onResume 早于 texture 可用：resume() 当时只记账，这里才真正下发 pause=false
+            // 回前台时 onResume 早于 surface 可用：resume() 当时只记账，这里才真正下发 pause=false
             pendingResume = false
             paused = false
             runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", false) }
         } else if (first && pendingUrl.isNotBlank() && !backgrounded) {
-            // 换了一块新 texture，但 mpv 因为 vo 曾被置 null 已经掉到 idle（文件没在播），
+            // 换了一块新 surface，但 mpv 因为 vo 曾被置 null 已经掉到 idle（文件没在播），
             // 只重开 vo 是黑屏，按最后一次地址重新 loadfile，位置沿用记下来的进度。
             val wasIdle = runCatching {
                 `is`.xyz.mpv.MPVLib.getPropertyBoolean("idle-active")
@@ -364,7 +356,7 @@ class MpvPlayer(
         pendingUrl = ""
         // 照官方 BaseMPVView.destroy：先摘掉 surface 回调再 destroy，
         // 否则释放后视图的可见性变化还会回调进来，把已经 destroy 的 libmpv 再 init 一遍
-        runCatching { textureView.surfaceTextureListener = null }
+        runCatching { surfaceView.holder.removeCallback(this) }
         attachedSurface = null
         runCatching { `is`.xyz.mpv.MPVLib.removeObserver(this) }
         runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("stop")) }

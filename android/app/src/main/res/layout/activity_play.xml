@@ -29,20 +29,9 @@
         app:resize_mode="fit"
         app:use_controller="false" />
 
-    <!-- 内嵌 mpv 的画面层：与 playView 二选一显示。
-         不设 setZOrderMediaOverlay：原版零命中，且它会让弹窗开关后 media 层的 z-order
-         在老 ROM 上不恢复（表现为 mpv 永久黑屏）。默认 punch-through 下控制条照样盖住。 -->
-    <!-- 内嵌 mpv 的画面层：TextureView（**不能**加 android:background）。
-         TextureView 不支持背景 drawable，设了就直接在 inflate 阶段抛
-         UnsupportedOperationException —— 上一次「TextureView 崩溃」的 Caused by 就是这一句，
-         不是 ROM 不支持 TextureView。
-         不设 setZOrderMediaOverlay：原版零命中，且它会让弹窗开关后 media 层的 z-order
-         在老 ROM 上不恢复（表现为 mpv 永久黑屏）。默认 punch-through 下控制条照样盖住。 -->
-    <TextureView
-        android:id="@+id/mpvView"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone" />
+    <!-- 内嵌 mpv 的画面层已删除（路线 A）：mpv 与 EXO 共用上面 playView 的那一块 SurfaceView。
+         播放页现在只有一套画面层，任何地方都不再需要第二块 surface 或第二块视图。 -->
+
 
     <!-- 起播/缓冲指示：对齐原版 view_widget_vod.xml 的 @id/progress
          （LinearLayout 居中，内含 view_progress 的 ProgressBar + traffic 网速文本）。
