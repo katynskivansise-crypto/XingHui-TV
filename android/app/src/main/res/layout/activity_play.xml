@@ -3,11 +3,15 @@
      - 控制条默认隐藏，遥控器 ↓/↑ 或菜单键呼出，5 秒无操作自动收起（原版 Constant.INTERVAL_HIDE）
      - 控制条隐藏时：OK = 暂停/继续，←/→ = 快退/快进 10 秒（对齐原版 CustomKeyDownVod）
      - 按钮顺序与文案也是原版顺序：下集 上集 选集 刷新 EXO 硬解 1.00 原始 字幕 音轨 视轨 片头 片尾 弹幕搜索 -->
+<!-- ★诊断版：根布局黑底暂时换成洋红，只为判定"呼出菜单那一瞬间盖住画面的到底是哪一层"。
+     闪洋红 = 盖住画面的是这层根背景（窗口自己画的）；
+     仍然闪黑 = 黑来自画面层（SurfaceView/mpv）本身，与这层无关。
+     验证完立刻改回 @android:color/black。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/black"
+    android:background="#FFFF00FF"
     android:focusable="true"
     android:focusableInTouchMode="true">
 
