@@ -65,6 +65,9 @@ class MpvCore(private val appContext: Context) {
     @Volatile var colorBits = 8
         private set
 
+    /** 已销毁：此后任何入口都不许再碰 native 句柄 */
+    @Volatile private var dead = false
+
     /** 是否尝试 10bit：系统 >= API26（才有 RGBA_1010102 窗口格式）且拿到 GLES3 */
     fun applyColorDepth(wantTenBit: Boolean): Int {
         val bits = if (wantTenBit && Build.VERSION.SDK_INT >= 26 && native.esVersion() >= 3) 10 else 8
@@ -90,31 +93,32 @@ class MpvCore(private val appContext: Context) {
     fun init(): Boolean = native.setProperty("pause", "yes")
 
     fun setOptionString(name: String, value: String) {
+        if (dead) return
         if (!native.setOption(name, value)) MpvDebug.log("[mpv] 选项未生效 $name=$value")
     }
 
     fun setPropertyString(name: String, value: String) {
-        native.setProperty(name, value)
+        if (!dead) native.setProperty(name, value)
     }
 
     fun setPropertyBoolean(name: String, value: Boolean) {
-        native.setProperty(name, if (value) "yes" else "no")
+        if (!dead) native.setProperty(name, if (value) "yes" else "no")
     }
 
     fun setPropertyDouble(name: String, value: Double) {
-        native.setProperty(name, value.toString())
+        if (!dead) native.setProperty(name, value.toString())
     }
 
-    fun getPropertyString(name: String): String? = native.getProperty(name)
+    fun getPropertyString(name: String): String? = if (dead) null else native.getProperty(name)
 
-    fun getPropertyBoolean(name: String): Boolean? = native.getBool(name)
+    fun getPropertyBoolean(name: String): Boolean? = if (dead) null else native.getBool(name)
 
-    fun getPropertyInt(name: String): Int? = native.getProperty(name)?.toIntOrNull()
+    fun getPropertyInt(name: String): Int? = if (dead) null else native.getProperty(name)?.toIntOrNull()
 
-    fun getPropertyDouble(name: String): Double? = native.getDouble(name)
+    fun getPropertyDouble(name: String): Double? = if (dead) null else native.getDouble(name)
 
     fun command(args: Array<String>) {
-        native.command(*args)
+        if (!dead) native.command(*args)
     }
 
     fun observeProperty(name: String, format: Int) = Unit
@@ -134,6 +138,7 @@ class MpvCore(private val appContext: Context) {
     // ---------------------------------------------------------------- 画面
 
     fun attachSurface(s: Surface, width: Int, height: Int) {
+        if (dead) return
         surface = s
         surfaceW = width
         surfaceH = height
@@ -171,6 +176,8 @@ class MpvCore(private val appContext: Context) {
     }
 
     fun destroy() {
+        if (dead) return
+        dead = true
         observer = null
         pollHandler.removeCallbacksAndMessages(null)
         gl.post { native.detach(); native.destroy() }

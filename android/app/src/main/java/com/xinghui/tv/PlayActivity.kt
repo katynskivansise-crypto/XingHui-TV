@@ -158,6 +158,7 @@ class PlayActivity : Activity() {
             // 播放页从此只有一套画面层，切内核 = 换内核、不换视图、不换 window layer。
             playerView?.visibility = View.VISIBLE
             setPlayerViewShutter(transparent = true)
+            playerView?.post { detachShutter("onCreate") }
             // 原生内核初始化要几十到几百毫秒（mpv_create + 四十多条选项 + observeProperty + attachSurface）。
             // 放在 onCreate 里同步执行会把"首帧"和"窗口拿到输入焦点"一起往后推 ——
             // 从详情页进来那一两秒的按键会被系统直接丢掉，表现就是"进去按 OK 没反应"。
@@ -798,6 +799,12 @@ class PlayActivity : Activity() {
                 if (state != Player.STATE_READY) return
                 val p = player ?: return
                 uiHandler.post { if (barShown()) ensureBarFocus() }
+                uiHandler.post {
+                    if (barShown()) {
+                        uiHandler.removeCallbacks(autoHide)
+                        uiHandler.postDelayed(autoHide, 3000)
+                    }
+                }
                 // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
                 if (pendingJumpMs >= 0) {
                     val at = pendingJumpMs
@@ -1188,6 +1195,30 @@ class PlayActivity : Activity() {
      * 所以播放真正开始后，直接把它置透明 + GONE 并保持，起播前的遮挡交给自己的 playProgress。
      */
     private var shutterReleased = false
+
+    /**
+     * 永久把 exo_shutter 从视图树里摘掉。
+     *
+     * 只设透明+GONE 是不够的：media3 内部 updateShutter / closeShutter 会再次把它翻成 VISIBLE，
+     * 而我们没有任何回调能拦（那是它自己那张表驱动的）。它一旦被翻出来，
+     * 就是一块盖在 SurfaceView 上的不透明黑 —— **两个内核同时全黑**，
+     * 直到下一次 onRenderedFirstFrame 或我们 1000ms 的进度时钟兜底才消失，
+     * 表现就是"唤起菜单键黑一下，大概 1 秒"。
+     * 摘出视图树后，它再 visibility=VISIBLE 也没有绘制效果。
+     * 起播前的遮挡由我们自己的 playProgress 负责，本来就不依赖它。
+     */
+    private fun detachShutter(reason: String) {
+        val sh = shutterView() ?: return
+        if (sh.parent == null) return
+        runCatching {
+            playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+            sh.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            sh.visibility = View.GONE
+            (sh.parent as? android.view.ViewGroup)?.removeView(sh)
+            shutterReleased = true
+            MpvDebug.log("[shutter] 已从视图树移除（$reason）")
+        }
+    }
     private fun forceReleaseShutter(reason: String) {
         val sh = shutterView() ?: return
         if (shutterReleased && sh.visibility == View.GONE) return
@@ -1300,6 +1331,15 @@ class PlayActivity : Activity() {
         val p = MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
                 mpvLoaded = true
+                // 起播完成：若控制条还开着，3 秒后自动收起。
+                // 条显示时 OK 交给焦点按钮、左右移动焦点 —— 用户按"直接按 OK/快进"时
+                // 全被条吃掉，现场日志里就是 kc=23 落在 text=EXO 的按钮上（还顺手切了内核）。
+                uiHandler.post {
+                    if (barShown()) {
+                        uiHandler.removeCallbacks(autoHide)
+                        uiHandler.postDelayed(autoHide, 3000)
+                    }
+                }
                 // 注意：这里曾经在"出帧后 +100ms"再预演一次控制条显隐，已撤掉。
                 // 那一下正好发生在首帧刚上屏的时刻，会给根布局（含 SurfaceView）再来两次重排，
                 // 而真机回执证明它并没有治住"首次菜单黑"，等于拿播放画面去赌一个未证实的假设。
@@ -1890,6 +1930,11 @@ class PlayActivity : Activity() {
             MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
             return
         }
+        // ★ 呼出前先让画面层把上一帧重绘一次：
+        //   接下来这一帧要同时合成「视频层 + 控制条」，如果视频层这次没提交新帧，
+        //   合成器就会拿到空队列 → 整屏黑一下。先把同一帧重新贴上去，黑的那一下就不存在。
+        if (isMpvMode()) runCatching { mpv?.redrawFor(1200) }
+        detachShutter("showControl")
         controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
@@ -1944,6 +1989,8 @@ class PlayActivity : Activity() {
         controlBar?.visibility = View.GONE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        if (isMpvMode()) runCatching { mpv?.redrawFor(1200) }
+        detachShutter("hideControl")
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         logRenderPulse("hideControl")
     }
@@ -2185,19 +2232,22 @@ class PlayActivity : Activity() {
             // 第一下 OK 就变成"开始播放"，看起来就是"按暂停没反应"。
             // 未就绪时一律按意图走（没意图就默认"要暂停"）。
             val pendingPauseIntentBefore = pendingPauseIntent
-            val pausing = if (m != null && ready) !runCatching { m.isPausedActual() }.getOrDefault(false)
+            // 有实例就以内核真实状态为准，不看 contentReady：
+            // 文件还没 loadfile 时 mpv 的 pause 属性照样能设、能保持，
+            // 之前在这里加 ready 闸，起播前那几秒按 OK 就变成了"只改意图不下发"。
+            val pausing = if (m != null) !runCatching { m.isPausedActual() }.getOrDefault(false)
             else (pendingPauseIntent?.let { !it } ?: true)
             pendingPauseIntent = if (!ready) pausing else null
             // 未起播时**不碰内核**：这时候 resume() 会因为 surface 没回来而记 pendingResume，
             // pause() 也会被后面 doPlay 的 startPaused 覆盖，都是无用账、还可能互相打架。
             // 起播路径只认 pendingPauseIntent（startMpv → startPaused），这里只更新意图与界面。
-            if (m != null && ready) {
+            if (m != null) {
                 if (pausing) m.pause() else m.resume()
             }
             applyPauseUi(pausing)
             MpvDebug.log(
                 "[key] toggle mpv ready=$ready 有实例=${m != null} 意图暂停=$pausing" +
-                    " 已下发=${m != null && ready} 前值=${pendingPauseIntentBefore.let { it?.toString() ?: "null" }}"
+                    " 已下发=${m != null} 前值='' ${pendingPauseIntentBefore.let { it?.toString() ?: "null" }}"
             )
             return
         }

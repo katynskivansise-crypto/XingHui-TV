@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <mutex>
+#include <atomic>
 
 #define LOG_TAG "XhMpvNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -130,6 +131,8 @@ struct Context {
     int esVersion = 2;      // 实际拿到的 GLES 版本：2 或 3
     int colorBits = 8;      // 期望的离屏目标位深：8 或 10（10 需要 ES3）
 
+    std::atomic<bool> alive{true};
+
     JavaVM *vm = nullptr;
     jobject listener = nullptr;          // 全局引用，update 回调时调它的 onFrame()
     jmethodID onFrame = nullptr;
@@ -141,14 +144,17 @@ static void *egl_proc(void * /*ctx*/, const char *name) {
 
 static void on_mpv_update(void *cb_ctx) {
     Context *c = (Context *) cb_ctx;
-    if (!c || !c->vm || !c->listener || !c->onFrame) return;
+    // 销毁期间 mpv 线程仍可能回调（terminate 是异步的）。
+    // 先查 alive，再取 listener —— 否则会调到一个已经 DeleteGlobalRef 的 jobject，
+    // JNI 直接 abort（真机表现就是「按菜单键瞬间闪退」）。
+    if (!c || !c->alive.load() || !c->vm || !c->listener || !c->onFrame) return;
     JNIEnv *env = nullptr;
     bool attached = false;
     if (c->vm->GetEnv((void **) &env, JNI_VERSION_1_6) != JNI_OK) {
         if (c->vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
         attached = true;
     }
-    env->CallVoidMethod(c->listener, c->onFrame);
+    if (c->alive.load()) env->CallVoidMethod(c->listener, c->onFrame);
     if (env->ExceptionCheck()) env->ExceptionClear();
     if (attached) c->vm->DetachCurrentThread();
 }
@@ -397,6 +403,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_xinghui_tv_mpv_XhMpv_nativeDestroy(JNIEnv *env, jclass, jlong th) {
     Context *c = (Context *) th;
     if (!c) return;
+    c->alive.store(false);            // 先关掉回调闸门，再拆
     Java_com_xinghui_tv_mpv_XhMpv_nativeDetach(env, nullptr, th);
     if (c->glctx != EGL_NO_CONTEXT && c->display != EGL_NO_DISPLAY) {
         eglDestroyContext(c->display, c->glctx);
