@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import com.xinghui.tv.mpv.MpvCore
 import java.util.Locale
 
 /**
@@ -18,9 +19,22 @@ import java.util.Locale
  */
 class MpvPlayer(
     private val activity: Activity,
-    /** 路线 A 的宿主：与 EXO 共用的那块 SurfaceView */
-    private val surfaceView: SurfaceView
-) : SurfaceHolder.Callback, `is`.xyz.mpv.MPVLib.EventObserver {
+    /**
+     * 画面层宿主：与 EXO 共用的那一块。
+     *
+     * 两种形态都支持，由布局里的 app:surface_type 决定：
+     *   - SurfaceView（surface_type=surface_view）：走 SurfaceHolder，画面是 window 上挖的一个洞，
+     *     合成层单独一块，窗口重绘就可能牵动它；
+     *   - TextureView（surface_type=texture_view）：走 SurfaceTexture，画面就是普通视图内容，
+     *     跟控制条在同一个图层里合成，窗口怎么重绘都不会出现"画面层空白一帧"。
+     * 后者是纯官方能力（media3 自带该属性、mpv 官方 JNI 也接受 SurfaceTexture 转出来的 Surface），
+     * 不需要任何分叉库。切换只改布局里的一个属性，代码两条路径都保留。
+     */
+    private val host: android.view.View
+) : MpvCore.EventObserver {
+
+    /** 官方 libmpv + 我们自己的 render API 上屏（handle 与 EGL 都在这一层） */
+    private val core = MpvCore(activity)
 
     companion object {
         private const val TAG = "XingHuiTV"
@@ -94,6 +108,40 @@ class MpvPlayer(
     private var audioManager: android.media.AudioManager? = null
     private var focusListener: android.media.AudioManager.OnAudioFocusChangeListener? = null
 
+    private val holderCallback: SurfaceHolder.Callback by lazy { object : SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: SurfaceHolder) = onSurfaceCreated(holder)
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) =
+            onSurfaceChanged(holder, format, width, height)
+        override fun surfaceDestroyed(holder: SurfaceHolder) = onSurfaceDestroyed(holder)
+    } }
+
+    private val textureWatch: Runnable by lazy { object : Runnable {
+        override fun run() {
+            val tv = host as? android.view.TextureView ?: return
+            if (!inited) return
+            val st = tv.surfaceTexture
+            if (tv.isAvailable && st != null) {
+                if (!surfaceReady) {
+                    val s = ownedSurface?.takeIf { it.isValid } ?: Surface(st).also { ownedSurface = it }
+                    MpvDebug.log("[mpv] textureReady ${tv.width}x${tv.height}（TextureView 形态）")
+                    attachSurface(s, tv.width, tv.height, first = true)
+                }
+            } else if (surfaceReady) {
+                MpvDebug.log("[mpv] textureLost（TextureView 被回收）")
+                surfaceReady = false
+                attachedSurface = null
+                runCatching {
+                    core.setPropertyString("vo", "null")
+                    core.setOptionString("force-window", "no")
+                    core.detachSurface()
+                }
+                runCatching { ownedSurface?.release() }
+                ownedSurface = null
+            }
+            tv.postDelayed(this, 120)
+        }
+    } }
+
     init {
         // 这里**不要**调 setZOrderMediaOverlay(true)。
         // 原版全工程零命中；而它的语义是把 surface 放到「窗口之下的独立媒体层」，
@@ -110,10 +158,15 @@ class MpvPlayer(
         }
         current = this
         liveCount++
-        surfaceView.holder.addCallback(this)
-        // 加回调时 surface 若已经可用，系统不会再补发 created，这里手动走一遍
-        val holder = surfaceView.holder
-        if (holder.surface?.isValid == true) surfaceCreated(holder)
+        when (val v = host) {
+            is SurfaceView -> {
+                v.holder.addCallback(holderCallback)
+                // 已经被 SurfaceView 自己创建过：手动补一次
+                if (v.holder.surface?.isValid == true) onSurfaceCreated(v.holder)
+            }
+            is android.view.TextureView -> watchTexture()
+            else -> MpvDebug.log("[mpv] 画面层宿主类型不支持：${v.javaClass.simpleName}")
+        }
     }
 
     // ---------------------------------------------------------------- 生命周期
@@ -127,14 +180,14 @@ class MpvPlayer(
         }
         runCatching {
             if (created) {
-                `is`.xyz.mpv.MPVLib.addObserver(this)
+                core.addObserver(this)
                 observeAll()
                 inited = true
                 Log.i(TAG, "[mpv] 内嵌内核复用")
                 return
             }
-            `is`.xyz.mpv.MPVLib.create(activity.applicationContext)
-            `is`.xyz.mpv.MPVLib.setOptionString("config", "no")
+            core.create()
+            core.setOptionString("config", "no")
             // 让 mpv 把自己的日志写到私有目录。VO 建不起来时平台侧到底报了什么，
             // 只有它自己知道；只报「中断」等于永远查不到真因。
             //
@@ -145,113 +198,105 @@ class MpvPlayer(
             runCatching {
                 if (logFile.exists() && logFile.length() > 2L * 1024 * 1024) logFile.delete()
             }
-            `is`.xyz.mpv.MPVLib.setOptionString("log-file", logFile.absolutePath)
-            `is`.xyz.mpv.MPVLib.setOptionString("msg-level", "all=w")
-            `is`.xyz.mpv.MPVLib.setOptionString("idle", "yes")
-            `is`.xyz.mpv.MPVLib.setOptionString("vo", "gpu")
-            // 官方 MPVView.kt:42 无条件把显示器实测刷新率喂给 mpv（display-fps-override）。
-            // 不设的话 mpv 自己探，探错就会按 60Hz 去排 50Hz 的片源，表现为轻微抖动 / 隔几秒一顿。
-            runCatching {
-                val fps = activity.windowManager.defaultDisplay.refreshRate
-                if (fps > 0f) {
-                    `is`.xyz.mpv.MPVLib.setOptionString("display-fps-override", fps.toString())
-                }
-            }
-            // ★ 官方 mpv-android MPVView.kt:92-96 的必备项，之前一直漏掉。
-            //   缺 gpu-context=android 时 mpv 会去用默认的 gpu 上下文（桌面平台的），
-            //   在 Android 上创建 GL 上下文直接失败 → VO 初始化失败 → loadfile 之后立刻 END_FILE，
-            //   idle-active 回到 true，我们这边看到的提示就是「mpv 播放中断」。
-            //   这是 mpv 在安卓上起播即失败最常见的原因，和片源、网络、解码器都无关。
-            `is`.xyz.mpv.MPVLib.setOptionString("gpu-context", "android")
-            `is`.xyz.mpv.MPVLib.setOptionString("opengl-es", "yes")
+            core.setOptionString("log-file", logFile.absolutePath)
+            core.setOptionString("msg-level", "all=w")
+            core.setOptionString("idle", "yes")
+            // ★ 输出是 libmpv：帧不再由 mpv 自己往 Surface 上推，而是由我们的
+            //   mpv_render_context_render + eglSwapBuffers 上屏（xh_mpv.cpp）。
+            //   vo 必须是 libmpv，且只有在 initialize 之前设才有效；
+            //   xh_mpv.cpp 的 nativeCreate 已经设好，这里不要再覆盖成 gpu / mediacodec_embed，
+            //   一旦覆盖，render 上下文就拿不到帧，画面直接空。
+            core.setOptionString("vo", "libmpv")
+            core.setOptionString("gpu-context", "android")
+            core.setOptionString("opengl-es", "yes")
             // ao 不显式指定时可能一个音频输出都找不到，结果是没声音或整条播放失败
-            `is`.xyz.mpv.MPVLib.setOptionString("ao", "audiotrack,opensles")
+            core.setOptionString("ao", "audiotrack,opensles")
             // 官方 MPVView.kt:97 无条件设。不设时安卓会把这条音频流当成普通/通知类，
             // 表现为遥控器音量键调的是铃声而不是播放音量、HDMI/蓝牙音频路由也可能不对。
-            `is`.xyz.mpv.MPVLib.setOptionString("audio-set-media-role", "yes")
+            core.setOptionString("audio-set-media-role", "yes")
             // 官方 MPVView.kt:101 无条件设：蓝光盘里同一部片的多个 edition 合并成单轨，
             // 否则遇到这类源会多出一条轨道、选轨界面里看着莫名其妙。点播源基本遇不到，设了无害。
-            `is`.xyz.mpv.MPVLib.setOptionString("flatten-editions", "yes")
+            core.setOptionString("flatten-editions", "yes")
             // 只让这些编码走硬解，其余走软解，避免 mediacodec 对不认识的编码直接报错
-            `is`.xyz.mpv.MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
+            core.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
             // 硬解开关是 mpv 自己的偏好（官方 key hardware_decoding），和 EXO 的软/硬解各存各的
             val mpvSet = Settings(activity)
-            `is`.xyz.mpv.MPVLib.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec" else "no")
-            `is`.xyz.mpv.MPVLib.setOptionString("keep-open", "no")
-            `is`.xyz.mpv.MPVLib.setOptionString("pause", "yes")
-            `is`.xyz.mpv.MPVLib.setOptionString("osc", "no")
-            `is`.xyz.mpv.MPVLib.setOptionString("input-default-bindings", "no")
-            `is`.xyz.mpv.MPVLib.setOptionString("input-vo-keyboard", "no")
+            core.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec" else "no")
+            core.setOptionString("keep-open", "no")
+            core.setOptionString("pause", "yes")
+            core.setOptionString("osc", "no")
+            core.setOptionString("input-default-bindings", "no")
+            core.setOptionString("input-vo-keyboard", "no")
             // ★★ 真正的根因：mpv 默认 ytdl=auto，遇到没有可识别扩展名的 http 直链
             //   会先走 ytdl_hook 去调 youtube-dl。安卓上没有 youtube-dl，
             //   于是 [ytdl_hook] youtube-dl failed → [cplayer] finished playback, loading failed，
             //   文件根本没加载成功，VO 自然一个都建不起来（这就是 vo=空 cfg=false）。
             //   关掉它，让 mpv 直接把 URL 交给 lavf demuxer。
-            `is`.xyz.mpv.MPVLib.setOptionString("ytdl", "no")
-            `is`.xyz.mpv.MPVLib.setOptionString("cache", "yes")
+            core.setOptionString("ytdl", "no")
+            core.setOptionString("cache", "yes")
             val cacheMb = if (mpvSet.mpvCacheMb in 32..64) mpvSet.mpvCacheMb else 64
             // 用纯字节数而不是 "64MiB" 后缀：官方 MPVView.kt:104 就是 ${cacheMegs * 1024 * 1024}，
             // 后缀写法依赖 mpv 的单位解析，一旦不被识别会静默忽略整条选项、缓存其实没生效。
             val cacheBytes = cacheMb * 1024 * 1024
-            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-bytes", "$cacheBytes")
+            core.setOptionString("demuxer-max-bytes", "$cacheBytes")
             // 官方 MPVView.kt:104-105 是 max-bytes 与 max-back-bytes 一起设的。
             // 只设前向缓存时，往回拖/倒退播放会重新走网络，表现为卡一下。
-            `is`.xyz.mpv.MPVLib.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
+            core.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
             // 官方 MPVView.kt:114：播放位置由宿主自己管（我们记在 HistoryStore），
             // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
-            `is`.xyz.mpv.MPVLib.setOptionString("save-position-on-quit", "no")
+            core.setOptionString("save-position-on-quit", "no")
             // 官方 MPVView.kt:98-99 用 tls-verify=yes + filesDir/cacert.pem。
             // 我们没有这个 ca bundle，留 yes 会让 https 片源在证书链不全时直接失败，
             // 电视盒子场景（片源多变、证书不规范）取 no 更实用；只连片源，不涉及登录凭据。
-            `is`.xyz.mpv.MPVLib.setOptionString("tls-verify", "no")
+            core.setOptionString("tls-verify", "no")
             // 官方 MPVView.kt:23 是无条件设 profile=fast（关掉 gradfun/deband 这类高成本滤镜）。
             // 这里做成设置页开关：T1 这类低端芯片默认开，想拿画质细节时可以关掉。
             if (mpvSet.mpvFastProfile) {
-                `is`.xyz.mpv.MPVLib.setOptionString("profile", "fast")
+                core.setOptionString("profile", "fast")
             }
             // 缩放算法（官方 MPVView.kt:48-59 的 video_scale / video_downscale / video_tscale）。
             // 官方只在偏好非空时下发，空就交给 mpv 默认；这里保持同样的语义。
             // 注意：1080p 片源在 1080p 输出上不触发缩放，这三个值对那种场景完全没作用；
             // 真正生效的是 4K→1080p（dscale）和 720p→1080p（scale）。
             mpvSet.mpvScale.takeIf { it.isNotBlank() }?.let {
-                `is`.xyz.mpv.MPVLib.setOptionString("scale", it)
+                core.setOptionString("scale", it)
             }
             mpvSet.mpvDscale.takeIf { it.isNotBlank() }?.let {
-                `is`.xyz.mpv.MPVLib.setOptionString("dscale", it)
+                core.setOptionString("dscale", it)
             }
             mpvSet.mpvTscale.takeIf { it.isNotBlank() }?.let {
-                `is`.xyz.mpv.MPVLib.setOptionString("tscale", it)
+                core.setOptionString("tscale", it)
             }
             // 去色带（官方 video_debanding）：gradfun 走 vf，gpu 走 deband 滤镜
             when (mpvSet.mpvDeband) {
-                1 -> `is`.xyz.mpv.MPVLib.setOptionString("vf", "gradfun=radius=12")
-                2 -> `is`.xyz.mpv.MPVLib.setOptionString("deband", "yes")
+                1 -> core.setOptionString("vf", "gradfun=radius=12")
+                2 -> core.setOptionString("deband", "yes")
             }
             // 插帧（官方 video_interpolation）：必须配 display-resample 才有意义
             if (mpvSet.mpvInterpolation) {
-                `is`.xyz.mpv.MPVLib.setOptionString("video-sync", "display-resample")
-                `is`.xyz.mpv.MPVLib.setOptionString("interpolation", "yes")
+                core.setOptionString("video-sync", "display-resample")
+                core.setOptionString("interpolation", "yes")
             }
             // 快速解码（官方 video_fastdecode）
             if (mpvSet.mpvFastDecode) {
-                `is`.xyz.mpv.MPVLib.setOptionString("vd-lavc-fast", "yes")
-                `is`.xyz.mpv.MPVLib.setOptionString("vd-lavc-skiploopfilter", "nonkey")
+                core.setOptionString("vd-lavc-fast", "yes")
+                core.setOptionString("vd-lavc-skiploopfilter", "nonkey")
             }
             // 中文环境：音轨/字幕优先中文，避免默认选中英文字幕
-            `is`.xyz.mpv.MPVLib.setOptionString("alang", "zh,chi,zho,eng")
-            `is`.xyz.mpv.MPVLib.setOptionString("slang", "zh,chi,zho,eng")
+            core.setOptionString("alang", "zh,chi,zho,eng")
+            core.setOptionString("slang", "zh,chi,zho,eng")
             // 死链不要无限等待（EXO 侧靠超时判定，mpv 这边也要有）
-            `is`.xyz.mpv.MPVLib.setOptionString("network-timeout", "15")
+            core.setOptionString("network-timeout", "15")
             val ua = Settings(activity).ua
-            if (ua.isNotBlank()) `is`.xyz.mpv.MPVLib.setOptionString("user-agent", ua)
-            `is`.xyz.mpv.MPVLib.init()
+            if (ua.isNotBlank()) core.setOptionString("user-agent", ua)
+            core.init()
             // 照官方 BaseMPVView.initialize：init 之后立刻关掉 force-window。
             // 官方原注释「would crash before the surface is attached」——
             // surface 还没到时若 force-window 开着，mpv 会试图建一个没有 surface 的窗口。
             // 之后 surfaceCreated 会把它重新打开。
-            runCatching { `is`.xyz.mpv.MPVLib.setOptionString("force-window", "no") }
+            runCatching { core.setOptionString("force-window", "no") }
             created = true
-            `is`.xyz.mpv.MPVLib.addObserver(this)
+            core.addObserver(this)
             observeAll()
             inited = true
             Log.i(TAG, "[mpv] 内嵌内核已初始化")
@@ -274,7 +319,7 @@ class MpvPlayer(
     //   2. holder.surface 由 SurfaceView 自己持有，**不能**由我们 release，所以不再 track ownsSurface；
     //   3. surface 的生命周期跟着 SurfaceView，Activity 不可见时系统照样会 destroyed，逻辑与原来一致。
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
+    private fun onSurfaceCreated(holder: SurfaceHolder) {
         val w = holder.surfaceFrame.width()
         val h = holder.surfaceFrame.height()
         MpvDebug.log("[mpv] surfaceCreated(SurfaceView) inited=$inited playPending=$playPending ${w}x$h")
@@ -283,28 +328,42 @@ class MpvPlayer(
         attachSurface(holder.surface, w, h, first = true)
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    private fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         lastSurfaceW = width
         lastSurfaceH = height
         MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format")
         if (!inited) return
         runCatching {
-            `is`.xyz.mpv.MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+            core.setPropertyString("android-surface-size", "${width}x$height")
         }
     }
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    private fun onSurfaceDestroyed(holder: SurfaceHolder) {
         MpvDebug.log("[mpv] surfaceDestroyed(SurfaceView) inited=$inited")
         surfaceReady = false
         attachedSurface = null
         if (inited) {
             // 关掉视频输出：vo 留着旧 surface 的话，回来时黑屏有声
             runCatching {
-                `is`.xyz.mpv.MPVLib.setPropertyString("vo", "null")
-                `is`.xyz.mpv.MPVLib.setOptionString("force-window", "no")
-                `is`.xyz.mpv.MPVLib.detachSurface()
+                core.setPropertyString("vo", "null")
+                core.setOptionString("force-window", "no")
+                core.detachSurface()
             }
         }
+    }
+
+    /**
+     * TextureView 形态：没有 SurfaceHolder 回调可用。
+     *
+     * media3 的 PlayerView 自己挂着 SurfaceTextureListener（它要负责把 texture 交给 ExoPlayer），
+     * 我们**不能**再注册一个，否则会把它的监听顶掉、EXO 直接没画面。
+     * 所以这里用轮询：可用就绑，掉了就按 surfaceDestroyed 的语义收干净，再等它回来。
+     */
+    private var ownedSurface: Surface? = null
+    private fun watchTexture() {
+        val tv = host as? android.view.TextureView ?: return
+        tv.removeCallbacks(textureWatch)
+        tv.post(textureWatch)
     }
 
     private fun attachSurface(surface: Surface, width: Int, height: Int, first: Boolean) {
@@ -312,13 +371,13 @@ class MpvPlayer(
         lastSurfaceW = width
         lastSurfaceH = height
         runCatching {
-            `is`.xyz.mpv.MPVLib.attachSurface(surface)
+            core.attachSurface(surface, host.width.coerceAtLeast(1), host.height.coerceAtLeast(1))
             // 照官方 BaseMPVView 的三步：attach → force-window=yes → 重开 vo。
             // surfaceDestroyed 里把 vo 置 null 了，这里必须重开，否则 vo 指向已销毁的 surface。
-            `is`.xyz.mpv.MPVLib.setOptionString("force-window", "yes")
-            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "gpu")
+            core.setOptionString("force-window", "yes")
+            core.setPropertyString("vo", "gpu")
             if (width > 0 && height > 0) {
-                `is`.xyz.mpv.MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+                core.setPropertyString("android-surface-size", "${width}x$height")
             }
         }
         surfaceReady = true
@@ -329,16 +388,28 @@ class MpvPlayer(
             // 回前台时 onResume 早于 surface 可用：resume() 当时只记账，这里才真正下发 pause=false
             pendingResume = false
             paused = false
-            runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", false) }
+            runCatching { core.setPropertyBoolean("pause", false) }
         } else if (first && pendingUrl.isNotBlank() && !backgrounded) {
             // 换了一块新 surface，但 mpv 因为 vo 曾被置 null 已经掉到 idle（文件没在播），
             // 只重开 vo 是黑屏，按最后一次地址重新 loadfile，位置沿用记下来的进度。
             val wasIdle = runCatching {
-                `is`.xyz.mpv.MPVLib.getPropertyBoolean("idle-active")
+                core.getPropertyBoolean("idle-active")
             }.getOrNull() ?: false
             if (wasIdle) {
                 pendingSeekMs = pendingStartMs
                 doPlay(pendingUrl)
+            }
+        }
+    }
+
+    /** 页面回到前台后重新确认一次画面层（TextureView 可能被系统回收过） */
+    fun ensureSurface() {
+        if (!inited) return
+        when (host) {
+            is android.view.TextureView -> watchTexture()
+            is SurfaceView -> {
+                val h = (host as SurfaceView).holder
+                if (h.surface?.isValid == true && !surfaceReady) onSurfaceCreated(h)
             }
         }
     }
@@ -356,11 +427,14 @@ class MpvPlayer(
         pendingUrl = ""
         // 照官方 BaseMPVView.destroy：先摘掉 surface 回调再 destroy，
         // 否则释放后视图的可见性变化还会回调进来，把已经 destroy 的 libmpv 再 init 一遍
-        runCatching { surfaceView.holder.removeCallback(this) }
+        runCatching { (host as? SurfaceView)?.holder?.removeCallback(holderCallback) }
         attachedSurface = null
-        runCatching { `is`.xyz.mpv.MPVLib.removeObserver(this) }
-        runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("stop")) }
-        runCatching { `is`.xyz.mpv.MPVLib.destroy() }
+        runCatching { (host as? android.view.TextureView)?.removeCallbacks(textureWatch) }
+        runCatching { ownedSurface?.release() }
+        ownedSurface = null
+        runCatching { core.removeObserver(this) }
+        runCatching { core.command(arrayOf("stop")) }
+        runCatching { core.destroy() }
         created = false
         if (current === this) current = null
         liveCount--
@@ -442,11 +516,11 @@ class MpvPlayer(
     }
 
     private fun observeAll() {
-        `is`.xyz.mpv.MPVLib.observeProperty("time-pos", `is`.xyz.mpv.MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
-        `is`.xyz.mpv.MPVLib.observeProperty("duration", `is`.xyz.mpv.MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
-        `is`.xyz.mpv.MPVLib.observeProperty("pause", `is`.xyz.mpv.MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+        core.observeProperty("time-pos", MpvCore.MpvFormat.MPV_FORMAT_DOUBLE)
+        core.observeProperty("duration", MpvCore.MpvFormat.MPV_FORMAT_DOUBLE)
+        core.observeProperty("pause", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
         // 用 eof-reached 判"真的播完"：END_FILE 在换文件/stop 时也会来，拿它判会误跳下一集
-        `is`.xyz.mpv.MPVLib.observeProperty("eof-reached", `is`.xyz.mpv.MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+        core.observeProperty("eof-reached", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
     }
 
     private fun doPlay(url: String) {
@@ -455,14 +529,14 @@ class MpvPlayer(
             val headerLine = pendingHeaders.entries
                 .filter { it.key.isNotBlank() }
                 .joinToString(",") { "${it.key}: ${it.value}" }
-            `is`.xyz.mpv.MPVLib.setPropertyString("http-header-fields", headerLine)
+            core.setPropertyString("http-header-fields", headerLine)
             // 起播前的定位必须等 FILE_LOADED：文件还没加载时 seek absolute 会直接失败
             pendingSeekMs = pendingStartMs
-            `is`.xyz.mpv.MPVLib.command(arrayOf("loadfile", url, "replace"))
+            core.command(arrayOf("loadfile", url, "replace"))
             // 尊重起播前按下的暂停意图：不能无条件解暂停
             val startPaused = pendingStartPaused
             paused = startPaused
-            `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", startPaused)
+            core.setPropertyBoolean("pause", startPaused)
             Log.i(TAG, "[mpv] 起播 $url")
         }.onFailure { Log.e(TAG, "[mpv] 起播失败", it) }
     }
@@ -497,7 +571,7 @@ class MpvPlayer(
      */
     fun isPausedActual(): Boolean {
         if (!inited) return true
-        val real = runCatching { `is`.xyz.mpv.MPVLib.getPropertyBoolean("pause") }.getOrNull()
+        val real = runCatching { core.getPropertyBoolean("pause") }.getOrNull()
         if (real != null) paused = real
         return paused
     }
@@ -510,15 +584,15 @@ class MpvPlayer(
     private fun applyPause(value: Boolean) {
         if (!inited) return
         paused = value
-        runCatching { `is`.xyz.mpv.MPVLib.setPropertyBoolean("pause", value) }
+        runCatching { core.setPropertyBoolean("pause", value) }
         runCatching {
-            `is`.xyz.mpv.MPVLib.command(arrayOf("set", "pause", if (value) "yes" else "no"))
+            core.command(arrayOf("set", "pause", if (value) "yes" else "no"))
         }
-        val actual = runCatching { `is`.xyz.mpv.MPVLib.getPropertyBoolean("pause") }.getOrNull()
+        val actual = runCatching { core.getPropertyBoolean("pause") }.getOrNull()
         MpvDebug.log("[mpv] set pause=$value 实际=$actual")
         if (actual != null && actual != value && value) {
             // 个别实例会被自己延迟的一大串属性事件覆盖回 false，再补一条命令兜住
-            runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("set", "pause", "yes")) }
+            runCatching { core.command(arrayOf("set", "pause", "yes")) }
         }
     }
 
@@ -531,7 +605,7 @@ class MpvPlayer(
         if (!inited) return
         if (eofReached) {
             eofReached = false
-            runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", "0", "absolute+exact")) }
+            runCatching { core.command(arrayOf("seek", "0", "absolute+exact")) }
         }
         paused = false
         // surface 还没回来：此时 vo 是 null（surfaceDestroyed 置的），
@@ -552,7 +626,7 @@ class MpvPlayer(
     fun voNow(): String {
         if (!inited) return "未初始化"
         return runCatching {
-            `is`.xyz.mpv.MPVLib.getPropertyString("current-vo") ?: "空"
+            core.getPropertyString("current-vo") ?: "空"
         }.getOrElse { "读取失败" }
     }
 
@@ -581,19 +655,12 @@ class MpvPlayer(
             return false
         }
         MpvDebug.log("[mpv] 渲染自检 vo=$vo → 复位")
+        // render API 下 vo 恒为 libmpv，帧在我们自己手里：
+        // 不需要 detach/attach 重建渲染后端，直接把上一帧再画一遍即可 ——
+        // 这正是"画面层空白一帧"能盖住、而重绘能盖住的那一类。
+        runCatching { core.redrawNow() }
         runCatching {
-            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "null")
-            `is`.xyz.mpv.MPVLib.detachSurface()
-        }
-        runCatching {
-            `is`.xyz.mpv.MPVLib.attachSurface(surface)
-            `is`.xyz.mpv.MPVLib.setOptionString("force-window", "yes")
-            `is`.xyz.mpv.MPVLib.setPropertyString("vo", "gpu")
-            if (lastSurfaceW > 0 && lastSurfaceH > 0) {
-                `is`.xyz.mpv.MPVLib.setPropertyString(
-                    "android-surface-size", "${lastSurfaceW}x${lastSurfaceH}"
-                )
-            }
+            core.attachSurface(surface, host.width.coerceAtLeast(1), host.height.coerceAtLeast(1))
         }
         MpvDebug.log("[mpv] vo 已复位 gpu")
         return true
@@ -613,7 +680,7 @@ class MpvPlayer(
     fun positionMs(): Long {
         if (!inited) return 0
         return runCatching {
-            val v = `is`.xyz.mpv.MPVLib.getPropertyDouble("time-pos") ?: 0.0
+            val v = core.getPropertyDouble("time-pos") ?: 0.0
             (v * 1000).toLong()
         }.getOrDefault(0)
     }
@@ -621,7 +688,7 @@ class MpvPlayer(
     fun durationMs(): Long {
         if (!inited) return 0
         return runCatching {
-            val v = `is`.xyz.mpv.MPVLib.getPropertyDouble("duration") ?: 0.0
+            val v = core.getPropertyDouble("duration") ?: 0.0
             (v * 1000).toLong()
         }.getOrDefault(0)
     }
@@ -630,19 +697,19 @@ class MpvPlayer(
         if (!inited) return
         val target = ms.coerceAtLeast(0)
         val sec = String.format(Locale.US, "%.3f", target / 1000.0)
-        runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute+exact")) }
+        runCatching { core.command(arrayOf("seek", sec, "absolute+exact")) }
         MpvDebug.log("[mpv] seek -> ${sec}s")
         // 1.2 秒后核对位置：这条命令在个别内核/异常流上会被静默丢掉（不报错也不动），
         // 表现就是用户说的「快进快退没反应」。真没动就补一条普通 absolute。
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (!inited) return@postDelayed
             val nowSec = runCatching {
-                `is`.xyz.mpv.MPVLib.getPropertyDouble("time-pos")
+                core.getPropertyDouble("time-pos")
             }.getOrNull() ?: return@postDelayed
             val nowMs = (nowSec * 1000).toLong()
             if (target > 3000 && kotlin.math.abs(nowMs - target) > 3000) {
                 MpvDebug.log("[mpv] seek 未生效（现在 ${nowSec}s，目标 ${target}ms），改用 absolute 重试")
-                runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute")) }
+                runCatching { core.command(arrayOf("seek", sec, "absolute")) }
             }
         }, 1200)
     }
@@ -650,7 +717,7 @@ class MpvPlayer(
     fun setSpeed(speed: Float) {
         desiredSpeed = speed
         if (!inited) return
-        runCatching { `is`.xyz.mpv.MPVLib.setPropertyDouble("speed", speed.toDouble()) }
+        runCatching { core.setPropertyDouble("speed", speed.toDouble()) }
     }
 
     /** 缩放 5 档，对应原版 select_scale：原始 / 16:9 / 4:3 / 填充 / 裁剪 */
@@ -661,31 +728,31 @@ class MpvPlayer(
             when (idx) {
                 // 原始：保持片源宽高比
                 0 -> {
-                    `is`.xyz.mpv.MPVLib.setPropertyString("video-aspect-override", "no")
-                    `is`.xyz.mpv.MPVLib.setPropertyBoolean("keepaspect", true)
-                    `is`.xyz.mpv.MPVLib.setPropertyDouble("panscan", 0.0)
+                    core.setPropertyString("video-aspect-override", "no")
+                    core.setPropertyBoolean("keepaspect", true)
+                    core.setPropertyDouble("panscan", 0.0)
                 }
                 1 -> {
-                    `is`.xyz.mpv.MPVLib.setPropertyString("video-aspect-override", "16:9")
-                    `is`.xyz.mpv.MPVLib.setPropertyBoolean("keepaspect", true)
-                    `is`.xyz.mpv.MPVLib.setPropertyDouble("panscan", 0.0)
+                    core.setPropertyString("video-aspect-override", "16:9")
+                    core.setPropertyBoolean("keepaspect", true)
+                    core.setPropertyDouble("panscan", 0.0)
                 }
                 2 -> {
-                    `is`.xyz.mpv.MPVLib.setPropertyString("video-aspect-override", "4:3")
-                    `is`.xyz.mpv.MPVLib.setPropertyBoolean("keepaspect", true)
-                    `is`.xyz.mpv.MPVLib.setPropertyDouble("panscan", 0.0)
+                    core.setPropertyString("video-aspect-override", "4:3")
+                    core.setPropertyBoolean("keepaspect", true)
+                    core.setPropertyDouble("panscan", 0.0)
                 }
                 // 填充：拉伸铺满，不保持比例
                 3 -> {
-                    `is`.xyz.mpv.MPVLib.setPropertyString("video-aspect-override", "no")
-                    `is`.xyz.mpv.MPVLib.setPropertyBoolean("keepaspect", false)
-                    `is`.xyz.mpv.MPVLib.setPropertyDouble("panscan", 0.0)
+                    core.setPropertyString("video-aspect-override", "no")
+                    core.setPropertyBoolean("keepaspect", false)
+                    core.setPropertyDouble("panscan", 0.0)
                 }
                 // 裁剪：保持比例并拉满，超出部分裁掉
                 else -> {
-                    `is`.xyz.mpv.MPVLib.setPropertyString("video-aspect-override", "no")
-                    `is`.xyz.mpv.MPVLib.setPropertyBoolean("keepaspect", true)
-                    `is`.xyz.mpv.MPVLib.setPropertyDouble("panscan", 1.0)
+                    core.setPropertyString("video-aspect-override", "no")
+                    core.setPropertyBoolean("keepaspect", true)
+                    core.setPropertyDouble("panscan", 1.0)
                 }
             }
         }
@@ -702,27 +769,27 @@ class MpvPlayer(
         if (!inited) return emptyList()
         return runCatching {
             val out = ArrayList<MpvTrackInfo>()
-            val n = `is`.xyz.mpv.MPVLib.getPropertyInt("track-list/count") ?: 0
+            val n = core.getPropertyInt("track-list/count") ?: 0
             for (i in 0 until n) {
-                if (`is`.xyz.mpv.MPVLib.getPropertyString("track-list/$i/type") != kind) continue
-                val id = `is`.xyz.mpv.MPVLib.getPropertyInt("track-list/$i/id") ?: continue
-                val selected = `is`.xyz.mpv.MPVLib.getPropertyBoolean("track-list/$i/selected") ?: false
+                if (core.getPropertyString("track-list/$i/type") != kind) continue
+                val id = core.getPropertyInt("track-list/$i/id") ?: continue
+                val selected = core.getPropertyBoolean("track-list/$i/selected") ?: false
                 val parts = ArrayList<String>()
-                `is`.xyz.mpv.MPVLib.getPropertyString("track-list/$i/title")
+                core.getPropertyString("track-list/$i/title")
                     ?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
-                `is`.xyz.mpv.MPVLib.getPropertyString("track-list/$i/lang")
+                core.getPropertyString("track-list/$i/lang")
                     ?.takeIf { it.isNotBlank() && it != "und" }?.let { parts.add(it) }
                 if (kind == "video") {
-                    val h = `is`.xyz.mpv.MPVLib.getPropertyInt("track-list/$i/demux-h")
+                    val h = core.getPropertyInt("track-list/$i/demux-h")
                     if (h != null && h > 0) parts.add("${h}p")
                 }
                 if (kind == "audio") {
-                    val ch = `is`.xyz.mpv.MPVLib.getPropertyInt("track-list/$i/demux-channel-count")
+                    val ch = core.getPropertyInt("track-list/$i/demux-channel-count")
                     if (ch != null && ch > 0) parts.add("${ch}ch")
                 }
-                `is`.xyz.mpv.MPVLib.getPropertyString("track-list/$i/codec")
+                core.getPropertyString("track-list/$i/codec")
                     ?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
-                if (`is`.xyz.mpv.MPVLib.getPropertyBoolean("track-list/$i/external") == true) parts.add("外挂")
+                if (core.getPropertyBoolean("track-list/$i/external") == true) parts.add("外挂")
                 out.add(MpvTrackInfo(id, if (parts.isEmpty()) "轨道 $id" else parts.joinToString(" · "), selected))
             }
             out
@@ -732,13 +799,13 @@ class MpvPlayer(
     /** 选中某一路：aid / vid / sid 传轨道 id */
     fun selectTrack(kind: String, id: Int) {
         if (!inited) return
-        runCatching { `is`.xyz.mpv.MPVLib.setPropertyString(propOf(kind), id.toString()) }
+        runCatching { core.setPropertyString(propOf(kind), id.toString()) }
     }
 
     /** 关掉某一类轨道（aid=no / sid=no）。视轨不给这个入口，关了就是黑屏 */
     fun disableTracks(kind: String) {
         if (!inited) return
-        runCatching { `is`.xyz.mpv.MPVLib.setPropertyString(propOf(kind), "no") }
+        runCatching { core.setPropertyString(propOf(kind), "no") }
     }
 
     private fun propOf(kind: String) = when (kind) {
@@ -751,15 +818,15 @@ class MpvPlayer(
     fun cycleTrack(which: String): String {
         if (!inited) return "0"
         return runCatching {
-            `is`.xyz.mpv.MPVLib.command(arrayOf("cycle", when (which) {
+            core.command(arrayOf("cycle", when (which) {
                 "audio" -> "audio"
                 "sub" -> "sub"
                 else -> "video"
             }))
             when (which) {
-                "audio" -> `is`.xyz.mpv.MPVLib.getPropertyInt("aid") ?: 0
-                "sub" -> `is`.xyz.mpv.MPVLib.getPropertyInt("sid") ?: 0
-                else -> `is`.xyz.mpv.MPVLib.getPropertyInt("vid") ?: 0
+                "audio" -> core.getPropertyInt("aid") ?: 0
+                "sub" -> core.getPropertyInt("sid") ?: 0
+                else -> core.getPropertyInt("vid") ?: 0
             }.toString()
         }.getOrDefault("0")
     }
@@ -768,7 +835,7 @@ class MpvPlayer(
     fun setHardwareDecode(hard: Boolean) {
         if (!inited) return
         runCatching {
-            `is`.xyz.mpv.MPVLib.setPropertyString("hwdec", if (hard) "mediacodec" else "no")
+            core.setPropertyString("hwdec", if (hard) "mediacodec" else "no")
         }
         // hwdec 是加载期选项：只对之后加载的文件生效，当前文件不重新加载就切不过去。
         // 跟 EXO 那边"重建播放器再回到原位置"的做法对齐。
@@ -777,15 +844,15 @@ class MpvPlayer(
         val at = positionMs()
         pendingStartMs = at
         pendingSeekMs = at
-        runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("loadfile", cur, "replace")) }
+        runCatching { core.command(arrayOf("loadfile", cur, "replace")) }
         Log.i(TAG, "[mpv] 切换解码：hard=$hard，重载当前位置 ${at}ms")
     }
 
     fun toggleSubVisible() {
         if (!inited) return
         runCatching {
-            val vis = `is`.xyz.mpv.MPVLib.getPropertyBoolean("sub-visibility") ?: true
-            `is`.xyz.mpv.MPVLib.setPropertyBoolean("sub-visibility", !vis)
+            val vis = core.getPropertyBoolean("sub-visibility") ?: true
+            core.setPropertyBoolean("sub-visibility", !vis)
         }
     }
 
@@ -797,28 +864,28 @@ class MpvPlayer(
 
     override fun event(eventId: Int) {
         when (eventId) {
-            `is`.xyz.mpv.MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> ui {
+            MpvCore.MpvEvent.MPV_EVENT_FILE_LOADED -> ui {
                 eofReached = false
                 // 起播前的 speed / scale 可能不生效，文件加载完成后补下发
-                runCatching { `is`.xyz.mpv.MPVLib.setPropertyDouble("speed", desiredSpeed.toDouble()) }
+                runCatching { core.setPropertyDouble("speed", desiredSpeed.toDouble()) }
                 applyScale(desiredScale)
                 // 外挂字幕必须等文件加载后再 sub-add，提前下发会被丢掉
                 for ((i, sub) in pendingSubs.withIndex()) {
                     runCatching {
-                        `is`.xyz.mpv.MPVLib.command(arrayOf("sub-add", sub, "select", "字幕${i + 1}"))
+                        core.command(arrayOf("sub-add", sub, "select", "字幕${i + 1}"))
                     }
                 }
                 val startMs = pendingSeekMs
                 pendingSeekMs = 0
                 if (startMs > 1000) {
                     val sec = String.format(Locale.US, "%.3f", startMs / 1000.0)
-                    runCatching { `is`.xyz.mpv.MPVLib.command(arrayOf("seek", sec, "absolute+exact")) }
+                    runCatching { core.command(arrayOf("seek", sec, "absolute+exact")) }
                 }
                 onLoaded?.invoke()
             }
             // END_FILE 在 loadfile replace / stop 时也会触发，播完判定交给 eof-reached；
             // 但"加载失败/解码失败"也只有这个事件能感知，所以延迟 800ms 看是否真的掉回 idle
-            `is`.xyz.mpv.MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
+            MpvCore.MpvEvent.MPV_EVENT_END_FILE -> {
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     if (!inited || pendingUrl.isBlank()) return@postDelayed
                     // 后台期间 / surface 已销毁时一律不判异常结束：
@@ -830,7 +897,7 @@ class MpvPlayer(
                         return@postDelayed
                     }
                     val idle = runCatching {
-                        `is`.xyz.mpv.MPVLib.getPropertyBoolean("idle-active")
+                        core.getPropertyBoolean("idle-active")
                     }.getOrNull() ?: false
                     // 换集时新文件会立刻接管，idle-active 回到 false；真的失败才停在这里
                     if (idle && !eofReached) {
@@ -839,13 +906,13 @@ class MpvPlayer(
                         //   current-vo       有值（通常是 gpu）说明渲染后端起来了
                         //   vo-configured    false 说明 VO 压根没配成功
                         val voName = runCatching {
-                            `is`.xyz.mpv.MPVLib.getPropertyString("current-vo")
+                            core.getPropertyString("current-vo")
                         }.getOrNull()
                         val voReady = runCatching {
-                            `is`.xyz.mpv.MPVLib.getPropertyBoolean("vo-configured")
+                            core.getPropertyBoolean("vo-configured")
                         }.getOrNull()
                         val ver = runCatching {
-                            `is`.xyz.mpv.MPVLib.getPropertyString("mpv-version")
+                            core.getPropertyString("mpv-version")
                         }.getOrNull()
                         Log.e(TAG, "[mpv] 异常结束 vo=${voName ?: "空"} cfg=$voReady ver=$ver url=$pendingUrl")
                         onFailed?.invoke(

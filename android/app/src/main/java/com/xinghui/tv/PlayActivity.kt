@@ -119,6 +119,7 @@ class PlayActivity : Activity() {
         siteKey = SubscriptionStore(this).currentKey() ?: ""
 
         playerView = findViewById<PlayerView>(R.id.playView)
+        enableKeepContent()
         /**
          * keep_content_on_player_reset 不在这里设，保持 media3 默认（false），与点播场景一致。
          *
@@ -162,9 +163,9 @@ class PlayActivity : Activity() {
             // 从详情页进来那一两秒的按键会被系统直接丢掉，表现就是"进去按 OK 没反应"。
             // 原版 onCreate 里只有 ExoPlayer 的构造（轻得多），不存在这个空档。
             // 挪到首帧之后：窗口先挂上、先拿到输入焦点，内核随后建好（地址解析本来也要时间）。
-            val sv = mpvSurfaceView()
+            val sv = videoHost()
             if (sv == null) {
-                MpvDebug.log("[mpv] 拿不到共用 SurfaceView，起播时会退回 EXO")
+                MpvDebug.log("[mpv] 拿不到共用画面层，起播时会退回 EXO")
             } else {
                 sv.post {
                     if (isFinishing || isDestroyed) return@post
@@ -183,6 +184,7 @@ class PlayActivity : Activity() {
         // 原版播放页没有返回按钮（VideoActivity 靠系统返回键），这里同样不摆
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
+        playerView?.post { lockSurfaceBuffer() }
         // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
         // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
         // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
@@ -1146,9 +1148,15 @@ class PlayActivity : Activity() {
         sv.setApplyEmbeddedFontSizes(false)
     }
 
-    /** 画面层唯一的那块 surface：EXO 与 mpv 共用（路线 A） */
-    private fun mpvSurfaceView(): android.view.SurfaceView? =
-        runCatching { playerView?.videoSurfaceView as? android.view.SurfaceView }.getOrNull()
+    /**
+     * 画面层唯一的宿主：EXO 与 mpv 共用。
+     *
+     * 可能是 SurfaceView（surface_type=surface_view，window 上挖洞）或
+     * TextureView（surface_type=texture_view，就是普通视图内容）。
+     * 后者不挖洞，控制条显隐/窗口重绘都不会牵动画面层那一帧，这是纯官方能力。
+     */
+    private fun videoHost(): android.view.View? =
+        runCatching { playerView?.videoSurfaceView }.getOrNull()
 
     /**
      * PlayerView 的 shutter 开关。
@@ -1158,6 +1166,83 @@ class PlayActivity : Activity() {
      * 所以 mpv 模式下必须把它让开：背景透明 + 直接 GONE。
      * 切回 EXO 时恢复不透明黑，仍然让 media3 自己在首帧后隐藏它。
      */
+    /** exo_shutter 缓存：media3 自带的黑挡板，播放中它若被翻出来就是一整块黑 */
+    private var exoShutterRef: View? = null
+    private fun shutterView(): View? {
+        exoShutterRef?.let { return it }
+        val pv = playerView ?: return null
+        val id = pv.resources.getIdentifier("exo_shutter", "id", "androidx.media3.ui")
+        if (id == 0) return null
+        val v = pv.findViewById<View>(id)
+        exoShutterRef = v
+        return v
+    }
+
+    /**
+     * 播放中永久释放快门。
+     *
+     * media3 的 exo_shutter 是一整块不透明黑，只要它被翻成 VISIBLE，画面区域立刻全黑
+     * （控制条在它上层，所以看上去是"整屏黑、条还在"）。它的显隐由 media3 内部
+     * updateShutter 逻辑决定，我们这边任何一次 setPlayer/setVisibility/布局都可能把它翻出来，
+     * 而它翻出来之后再也不会自己退回去（EXO 只在 onRenderedFirstFrame 里关一次）。
+     * 所以播放真正开始后，直接把它置透明 + GONE 并保持，起播前的遮挡交给自己的 playProgress。
+     */
+    private var shutterReleased = false
+    private fun forceReleaseShutter(reason: String) {
+        val sh = shutterView() ?: return
+        if (shutterReleased && sh.visibility == View.GONE) return
+        runCatching {
+            playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+            sh.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            sh.visibility = View.GONE
+            shutterReleased = true
+            MpvDebug.log("[shutter] 释放快门（$reason）")
+        }
+    }
+
+    /**
+     * 黑闪取证：16ms 一拍，连续 1.1 秒，只在状态发生变化时打一行。
+     * 目的是在"按菜单那一瞬间"抓到到底是哪个状态翻了 —— 快门 / 画面层 / 窗口 / 播放器。
+     */
+    private var flickLast = ""
+    private fun armFlickSampler(tag: String) {
+        flickLast = ""
+        val total = 68
+        for (i in 0 until total) {
+            uiHandler.postDelayed({
+                if (isFinishing || isDestroyed) return@postDelayed
+                val st = runCatching {
+                    "sh=${shutterView()?.visibility}/${playerView?.visibility} " +
+                        "sv=${videoHost()?.visibility}/${videoHost()?.alpha} " +
+                        "mpv=${mpv != null}/${mpv?.let { runCatching { it.isPausedActual() }.getOrNull() }} " +
+                        "bar=${controlBar?.visibility} win=${window?.decorView?.windowVisibility} " +
+                        "exo=${player?.isPlaying}"
+                }.getOrElse { "?" }
+                if (st != flickLast) {
+                    flickLast = st
+                    MpvDebug.log("[flick] $tag +${i * 16}ms $st")
+                }
+            }, (i * 16).toLong())
+        }
+    }
+
+    /**
+     * 打开官方接口 keepContentOnPlayerReset（media3 1.3.1 自带，不是分叉专有）。
+     *
+     * 官方 PlayerView.updateForCurrentTrackSelections()：
+     *   if (player == null || tracks.isEmpty()) { if (!keepContentOnPlayerReset) closeShutter(); }
+     *   if (isNewPlayer && !keepContentOnPlayerReset) closeShutter();
+     * closeShutter() 就是把 exo_shutter 置 VISIBLE —— 一整块不透明黑。
+     * 我们切内核时 `playerView.player = null` 正好命中“tracks 为空”，于是必然盖一块黑上去，
+     * 直到 EXO 下一次 onRenderedFirstFrame 才打开。打开这个开关后，清空/替换播放器不关快门。
+     */
+    private fun enableKeepContent() {
+        runCatching {
+            playerView?.setKeepContentOnPlayerReset(true)
+            MpvDebug.log("[ui] keepContentOnPlayerReset=true")
+        }
+    }
+
     private fun setPlayerViewShutter(transparent: Boolean) {
         runCatching {
             val pv = playerView ?: return@runCatching
@@ -1210,7 +1295,7 @@ class PlayActivity : Activity() {
      * 现在进页面就先建好实例（还没文件，pause 属性照样能设、能保持），
      * startMpv 只负责 play(url)，按键从第一秒起就有效。
      */
-    private fun ensureMpv(surface: android.view.SurfaceView): MpvPlayer {
+    private fun ensureMpv(surface: android.view.View): MpvPlayer {
         mpv?.let { return it }
         val p = MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
@@ -1252,16 +1337,27 @@ class PlayActivity : Activity() {
         // 彻底释放并置空，切回 EXO 时走 rebuildPlayer 重建，虽然慢一点但状态是干净的。
         // 顺序很重要：先把 PlayerView 与 EXO 解绑（media3 会把这块 surface 从旧播放器上 clear），
         // 再释放 EXO。反过来的话，release 期间 media3 还会去摸一块马上要被 mpv 接管的 surface。
-        runCatching { playerView?.player = null }
+        // ★官方 switchTargetView 的 javadoc 明确要求：先挂新的、再摘旧的，
+        //   "without transitioning through a state where no surface is attached"。
+        //   只有一块 surface 时做不到真的先挂后摘，但可以避免最坏的一步：
+        //   不要用 setPlayer(null)（那会命中"tracks 为空 → closeShutter"，
+        //   直接盖一整块不透明黑），而是只把这块 surface 从 EXO 身上 clear 掉，
+        //   PlayerView 与 EXO 的绑定留着，release 时一起收。
+        //   配合 setKeepContentOnPlayerReset(true)，清 surface 也不会关快门，画面保留最后一帧。
+        runCatching {
+            val sv = videoHost() as? android.view.SurfaceView
+            if (sv != null) playerView?.player?.clearVideoSurfaceView(sv)
+        }
         runCatching { player?.release() }
         player = null
+        runCatching { playerView?.player = null }
         playerView?.visibility = View.VISIBLE
         // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
         setPlayerViewShutter(transparent = true)
-        val surface = mpvSurfaceView()
-        // 共用 surface 是路线 A 的唯一前提，拿不到就本页退回 EXO（不能静默不播）
+        val surface = videoHost()
+        // 共用画面层是唯一前提，拿不到就本页退回 EXO（不能静默不播）
         if (surface == null) {
-            MpvDebug.log("[mpv] 拿不到共用 SurfaceView（PlayerView 可能不是 surface_view），本页退回 EXO")
+            MpvDebug.log("[mpv] 拿不到共用画面层（PlayerView 没有 surface view），本页退回 EXO")
             mpvFallbackExo = true
             setPlayerViewShutter(transparent = false)
             if (player == null) rebuildPlayer(headers)
@@ -1372,8 +1468,7 @@ class PlayActivity : Activity() {
         // 才 requestLayout），所以这条链路彻底不碰画面层的 frame。
         // 根布局黑底已经做过洋红对照实验：闪的仍是黑、洋红一次都没露出来，
         // 说明盖住画面的不是窗口这层底，只能是画面层自己在那一帧没有内容。
-        controlBar?.visibility = View.INVISIBLE
-        controlBar?.alpha = 0f
+        controlBar?.visibility = View.GONE
         findViewById<View>(R.id.btnEpisodes).setOnClickListener { openEpisodes() }
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
@@ -1651,8 +1746,8 @@ class PlayActivity : Activity() {
     private fun mpvDebugLine(): String {
         val m = mpv
         val surfaceVis = runCatching {
-            val sv = mpvSurfaceView()
-            "${sv?.width}x${sv?.height} vis=${sv?.visibility} valid=${sv?.holder?.surface?.isValid}"
+            val sv = videoHost()
+            "${sv?.width}x${sv?.height} vis=${sv?.visibility} valid=${(sv as? android.view.SurfaceView)?.holder?.surface?.isValid ?: (sv != null)}"
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
@@ -1798,8 +1893,6 @@ class PlayActivity : Activity() {
         controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
-        (controlBar as? android.view.ViewGroup)?.descendantFocusability =
-            android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS
         // 焦点落点：原版 getFocus2() —— 显式指定就用指定的；否则沿用上次；
         // 上次停在片头/片尾时按原版规则换成"下一集"。
         val target = when {
@@ -1847,11 +1940,10 @@ class PlayActivity : Activity() {
         // 父窗口要重画一遍整屏黑底，SurfaceView 的洞晚一帧才合成 = 黑一下。
         // 5.6 没有这一步：条一 GONE，焦点视图从树里消失，系统在**同一次** traversal 里
         // 自动把焦点交给可聚焦的父容器，不额外产生一轮。
-        controlBar?.visibility = View.INVISIBLE
-        controlBar?.alpha = 0f
-        (controlBar as? android.view.ViewGroup)?.descendantFocusability =
-            android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-        findViewById<View>(R.id.playTitle)?.alpha = 0f
+        // 原版 hideControl(:3502) 只有两件事：置 GONE、撤掉自动收起定时器。
+        controlBar?.visibility = View.GONE
+        controlBar?.alpha = 1f
+        findViewById<View>(R.id.playTitle)?.visibility = View.GONE
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         logRenderPulse("hideControl")
     }
@@ -1905,6 +1997,40 @@ class PlayActivity : Activity() {
      * 判读：三拍都 vo=gpu 且 pos 在推进 → 播放器一直活着，黑在合成；
      *       出现 vo=空 / surface valid=false → 表面真丢了。
      */
+    /**
+     * 锁住画面层的缓冲区尺寸 —— 对齐 WebHomeTV 5.6 的 syncVideoSurfaceSize()。
+     *
+     * 5.6 在 RENDER_SURFACE 下对 PlayerView 的 SurfaceView 调 holder.setFixedSize(width,height)，
+     * 这样 Surface 的缓冲区大小由"视频尺寸"决定，不再跟着视图每帧 measure/layout 走。
+     * 我们一直没做这一步，缓冲区尺寸始终由布局推导：只要窗口里发生一次布局
+     * （EXO 内核呼出控制条就是 layouts=1），Surface 就可能按新尺寸重开缓冲区，
+     * 重开那一帧生产者还没写入 → 画面层空白 → 整屏黑一下。
+     * 锁死缓冲区后，布局再多也不会换缓冲区，这一帧就不存在。
+     */
+    private var surfaceBufferLocked = false
+    private fun lockSurfaceBuffer() {
+        val sv = playerView?.videoSurfaceView as? android.view.SurfaceView ?: return
+        if (correctSizeLock(sv)) return
+        sv.addOnLayoutChangeListener { v, l, t, rr, b, ol, ot, orr, ob ->
+            if (l == ol && t == ot && rr == orr && b == ob) return@addOnLayoutChangeListener
+            correctSizeLock(v as android.view.SurfaceView)
+        }
+        MpvDebug.log("[sv] 缓冲区尺寸锁定监听已挂上")
+    }
+
+    private fun correctSizeLock(sv: android.view.SurfaceView): Boolean {
+        val w = sv.width
+        val h = sv.height
+        if (w <= 0 || h <= 0) return false
+        return runCatching {
+            sv.holder.setFixedSize(w, h)
+            val frame = sv.holder.surfaceFrame
+            MpvDebug.log("[sv] setFixedSize ${w}x$h → surface=${frame.width()}x${frame.height()}")
+            surfaceBufferLocked = true
+            true
+        }.getOrDefault(false)
+    }
+
     /** 呼出控制条时把视图树的面板层级打一次：谁盖在画面层上面、谁是不透明的，一眼可查。 */
     private var treeDumped = 0
     private fun dumpPanelTree(tag: String) {
@@ -1913,7 +2039,7 @@ class PlayActivity : Activity() {
         runCatching {
             val root = window.decorView
             fun walk(v: View, d: Int) {
-                if (d > 3) return
+                if (d > 6) return
                 val id = runCatching {
                     if (v.id == View.NO_ID) "-" else resources.getResourceEntryName(v.id)
                 }.getOrDefault("?")
@@ -1924,15 +2050,28 @@ class PlayActivity : Activity() {
                 if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i), d + 1)
             }
             walk(root, 0)
+            runCatching {
+                val id = resources.getIdentifier("exo_shutter", "id", "androidx.media3.ui")
+                if (id != 0) {
+                    val sh = findViewById<View>(id)
+                    MpvDebug.log("[panel] $tag ★快门 exo_shutter vis=${sh?.visibility} alpha=${sh?.alpha} " +
+                        "bg=${sh?.background?.javaClass?.simpleName} size=${sh?.width}x${sh?.height} " +
+                        "shown=${sh?.isShown}")
+                }
+                val pv = findViewById<View>(R.id.playView)
+                MpvDebug.log("[panel] $tag ★playView vis=${pv?.visibility} alpha=${pv?.alpha} " +
+                    "bg=${pv?.background?.javaClass?.simpleName} size=${pv?.width}x${pv?.height}")
+            }
             MpvDebug.log("[panel] $tag 窗口 hasFocus=${root.hasWindowFocus()} winVis=${root.windowVisibility} " +
-                "svShown=${mpvSurfaceView()?.isShown} svAlpha=${mpvSurfaceView()?.alpha}")
+                "svShown=${videoHost()?.isShown} svAlpha=${videoHost()?.alpha} " +
+                "decorBg=${root.background?.javaClass?.simpleName}")
         }
     }
 
     private fun logRenderPulse(tag: String) {
         runCatching {
             val m = mpv
-            val sv = mpvSurfaceView()
+            val sv = videoHost()
             // 数一遍这 300ms 里根布局被"重画/重排"了几次：
             // 正常的收条/呼条应该是 1 次；≥2 次就说明我们额外多造了一轮 traversal。
             var draws = 0
@@ -1948,7 +2087,7 @@ class PlayActivity : Activity() {
             vto?.addOnPreDrawListener(pd)
             vto?.addOnGlobalLayoutListener(gl)
             val sample = {
-                val ok = runCatching { sv?.holder?.surface?.isValid }.getOrNull()
+                val ok = runCatching { (sv as? android.view.SurfaceView)?.holder?.surface?.isValid ?: (sv != null) }.getOrNull()
                 MpvDebug.log("[pulse] $tag vo=${m?.voNow()} pos=${m?.positionMs()} sinkValid=$ok " +
                     "sv=${sv?.width}x${sv?.height} draws=$draws layouts=$layouts " +
                     "bar=${barShown()} barVis=${controlBar?.visibility} barAlpha=${controlBar?.alpha} " +
@@ -2174,7 +2313,8 @@ class PlayActivity : Activity() {
                 } else {
                     val p = player
                     if (p == null) {
-                        uiHandler.postDelayed(this, 1000)
+                        if (contentReady()) forceReleaseShutter("时钟兜底")
+                uiHandler.postDelayed(this, 1000)
                         return
                     }
                     pos = if (p.currentPosition > 0) p.currentPosition else 0L
@@ -2191,6 +2331,7 @@ class PlayActivity : Activity() {
                     if (directUrl.isBlank()) switchEpisode(1)
                 }
                 // 原版 Clock.java:66 是 1000ms
+                if (contentReady()) forceReleaseShutter("时钟兜底")
                 uiHandler.postDelayed(this, 1000)
             }
         }
@@ -2252,6 +2393,9 @@ class PlayActivity : Activity() {
         // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
         //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
         //   == 1 → onEpisodes()：弹选集并收起控制栏
+        if (isMenuKeyCode(event.keyCode) && event.action == KeyEvent.ACTION_DOWN) {
+            armFlickSampler("menu")
+        }
         if (isMenuKeyCode(event.keyCode)) {
             // 原版只认 ACTION_UP。这里 DOWN/UP 都接、400ms 内只算一次：
             // 只发 UP 的遥控器能响应，只发 DOWN 的也能响应，正常成对的不会双触发。
@@ -2297,7 +2441,7 @@ class PlayActivity : Activity() {
                 MpvDebug.log("[key] back 退场前收回焦点 from=$cfId to=root ok=$ok")
             }
             runCatching {
-                controlBar?.visibility = View.INVISIBLE
+                controlBar?.visibility = View.GONE
                 controlBar?.alpha = 0f
                 (controlBar as? android.view.ViewGroup)?.descendantFocusability =
                     android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
@@ -2579,6 +2723,10 @@ class PlayActivity : Activity() {
      */
     override fun onResume() {
         super.onResume()
+        // 面板转储里 DecorView 的背景是不透明 BitmapDrawable（框架自带的深色位图），
+        // 说明主题里 windowBackground=@android:color/black 这条没落生效。
+        // 这里直接在代码里定死，顺便把实际生效的类名打出来，免得再猜。
+        runCatching { window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0xFF000000.toInt())) }
         // 回到播放页时把焦点兜回来：没有焦点视图的窗口在部分老 ROM 上收不到遥控键，
         // 表现就是"进页面什么都不响应，先按一下菜单键才好"。
         rootView?.post {
@@ -2598,6 +2746,7 @@ class PlayActivity : Activity() {
         if (activeUrl.isBlank()) return
         if (isMpvMode()) {
             val m = mpv
+            m?.let { runCatching { it.ensureSurface() } }
             if (m == null) {
                 // 内核在后台没了：按当前进度重建，否则这里什么都不会发生
                 startMpv(activeUrl, activeHeaders, mpvPos)

@@ -19,6 +19,15 @@ android {
         }
     }
 
+    // 我们自己的 libmpv 渲染层（官方 libmpv + render API，零分叉）
+    ndkVersion "26.1.10909125"
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
     // 预编译 .so 由脚本（scripts/build-android.sh / CI）放置到 src/main/jniLibs
     sourceSets {
         main {
