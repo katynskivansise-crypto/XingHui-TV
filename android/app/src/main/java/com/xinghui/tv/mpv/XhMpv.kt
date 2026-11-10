@@ -34,6 +34,14 @@ class XhMpv {
 
     fun init(): Boolean = handle != 0L && nativeInit(handle)
 
+    /** 实际拿到的 GLES 版本（2 或 3），要在 attach 之后才有意义 */
+    fun esVersion(): Int = if (handle == 0L) 2 else nativeEsVersion(handle)
+
+    /** 离屏目标位深：8 或 10（10 需要 GLES3，否则原生侧自动按 8 处理） */
+    fun setColorBits(bits: Int) {
+        if (handle != 0L) nativeSetColorBits(handle, bits)
+    }
+
     fun setOption(name: String, value: String): Boolean =
         handle != 0L && nativeSetOption(handle, name, value)
 
@@ -70,6 +78,8 @@ class XhMpv {
 
     private external fun nativeCreate(listener: Any?): Long
     private external fun nativeInit(handle: Long): Boolean
+    private external fun nativeEsVersion(handle: Long): Int
+    private external fun nativeSetColorBits(handle: Long, bits: Int)
     private external fun nativeSetOption(handle: Long, name: String, value: String): Boolean
     private external fun nativeSetProperty(handle: Long, name: String, value: String): Boolean
     private external fun nativeGetProperty(handle: Long, name: String): String?

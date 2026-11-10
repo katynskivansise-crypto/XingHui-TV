@@ -127,6 +127,9 @@ struct Context {
     int width = 0;
     int height = 0;
 
+    int esVersion = 2;      // 实际拿到的 GLES 版本：2 或 3
+    int colorBits = 8;      // 期望的离屏目标位深：8 或 10（10 需要 ES3）
+
     JavaVM *vm = nullptr;
     jobject listener = nullptr;          // 全局引用，update 回调时调它的 onFrame()
     jmethodID onFrame = nullptr;
@@ -166,9 +169,19 @@ static bool egl_init(Context *c) {
         LOGE("eglChooseConfig 失败");
         return false;
     }
-    EGLint ctxAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-    c->glctx = eglCreateContext(c->display, c->config, EGL_NO_CONTEXT, ctxAttribs);
-    if (c->glctx == EGL_NO_CONTEXT) { LOGE("eglCreateContext 失败"); return false; }
+    // 先要 GLES3 上下文（10bit / HDR 需要），拿不到再回落 GLES2。
+    // GLES3 上下文对 GLES2 调用是向下兼容的，回落只影响能不能用 10bit 目标。
+    EGLint ctx3[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLint ctx2[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    c->glctx = eglCreateContext(c->display, c->config, EGL_NO_CONTEXT, ctx3);
+    if (c->glctx != EGL_NO_CONTEXT) {
+        c->esVersion = 3;
+    } else {
+        c->glctx = eglCreateContext(c->display, c->config, EGL_NO_CONTEXT, ctx2);
+        if (c->glctx == EGL_NO_CONTEXT) { LOGE("eglCreateContext 失败（ES3/ES2 都不行）"); return false; }
+        c->esVersion = 2;
+    }
+    LOGI("EGL 上下文就绪：GLES%d", c->esVersion);
     return true;
 }
 
@@ -245,9 +258,9 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeSetOption(JNIEnv *env, jclass, jlong th, jst
     const char *ks = env->GetStringUTFChars(k, nullptr);
     const char *vs = env->GetStringUTFChars(v, nullptr);
     int rc = p_mpv_set_option_string(c->mpv, ks, vs);
+    if (rc < 0) LOGI("setOption %s 失败 rc=%d", ks, rc);
     env->ReleaseStringUTFChars(k, ks);
     env->ReleaseStringUTFChars(v, vs);
-    if (rc < 0) LOGI("setOption %s 失败 rc=%d", ks, rc);
     return rc >= 0 ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -284,13 +297,33 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeCommand(JNIEnv *env, jclass, jlong th, jobje
     const char **argv = (const char **) calloc(n + 1, sizeof(char *));
     for (int i = 0; i < n; i++) {
         jstring s = (jstring) env->GetObjectArrayElement(args, i);
-        argv[i] = s ? strdup(env->GetStringUTFChars(s, nullptr)) : strdup("");
-        if (s) env->ReleaseStringUTFChars(s, env->GetStringUTFChars(s, nullptr));
+        if (s) {
+            const char *us = env->GetStringUTFChars(s, nullptr);
+            argv[i] = strdup(us ? us : "");
+            if (us) env->ReleaseStringUTFChars(s, us);
+            env->DeleteLocalRef(s);
+        } else {
+            argv[i] = strdup("");
+        }
     }
     int rc = p_mpv_command(c->mpv, argv);
     for (int i = 0; i < n; i++) free((void *) argv[i]);
     free(argv);
     return rc >= 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_xinghui_tv_mpv_XhMpv_nativeEsVersion(JNIEnv *, jclass, jlong th) {
+    Context *c = (Context *) th;
+    return c ? c->esVersion : 2;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_xinghui_tv_mpv_XhMpv_nativeSetColorBits(JNIEnv *, jclass, jlong th, jint bits) {
+    Context *c = (Context *) th;
+    if (!c) return;
+    c->colorBits = bits;
+    LOGI("离屏目标位深=%d（ES%d）", bits, c->esVersion);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -322,7 +355,13 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeRender(JNIEnv *, jclass, jlong th, jint w, j
         p_mpv_set_property_string(c->mpv, "android-surface-size", size);
     }
     if (!eglMakeCurrent(c->display, c->surface, c->surface, c->glctx)) return JNI_FALSE;
-    mpv_opengl_fbo fbo{0, c->width, c->height, GL_RGBA8};
+    // 离屏目标的内部格式按位深选：
+    //   GLES2 → 只有 GL_RGBA（0x1908，8bit/通道）
+    //   GLES3 → 可用 GL_RGB10_A2（0x8059，10bit/通道），HDR 片源才不丢精度
+    // GL_RGBA8 / GL_RGB10_A2 不是 GLES2 头文件里的标识符，这里直接用数值，
+    // 避免为了两个枚举把整个文件切到 GLES3 头（那会要求全链路都是 ES3）。
+    int fboFormat = (c->colorBits >= 10 && c->esVersion >= 3) ? 0x8059 : 0x1908;
+    mpv_opengl_fbo fbo{0, c->width, c->height, fboFormat};
     int flip = 1;
     mpv_render_param params[] = {
             {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},

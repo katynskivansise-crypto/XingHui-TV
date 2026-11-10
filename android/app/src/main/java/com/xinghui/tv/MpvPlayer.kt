@@ -6,6 +6,7 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import com.xinghui.tv.mpv.MpvCore
+import com.xinghui.tv.mpv.XhMpv
 import java.util.Locale
 
 /**
@@ -210,6 +211,19 @@ class MpvPlayer(
             core.setOptionString("gpu-context", "android")
             core.setOptionString("opengl-es", "yes")
             // ao 不显式指定时可能一个音频输出都找不到，结果是没声音或整条播放失败
+            // 色彩链路：
+            //   8bit 屏（T1 / API<26）：dither 到 8bit，HDR 片源由 mpv 做 tonemap，
+            //     否则直接截断会过曝、暗部糊成一片。
+            //   10bit 屏（API>=26 + GLES3）：目标直通 1010102，
+            //     target-colorspace-hint 让 mpv 把色彩空间/亮度信息交给系统合成器。
+            // 两者是运行时选的，不是编译期二选一 —— 同一份代码在不同机器上行为都正确。
+            core.setOptionString("dither-depth", "auto")
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                core.setOptionString("target-colorspace-hint", "yes")
+                core.setOptionString("hdr-compute-peak", "yes")
+            } else {
+                core.setOptionString("target-colorspace-hint", "no")
+            }
             core.setOptionString("ao", "audiotrack,opensles")
             // 官方 MPVView.kt:97 无条件设。不设时安卓会把这条音频流当成普通/通知类，
             // 表现为遥控器音量键调的是铃声而不是播放音量、HDMI/蓝牙音频路由也可能不对。
@@ -378,6 +392,16 @@ class MpvPlayer(
             core.setPropertyString("vo", "gpu")
             if (width > 0 && height > 0) {
                 core.setPropertyString("android-surface-size", "${width}x$height")
+            }
+        }
+        // 10bit 输出：整条链的最后一环是 Surface 的缓冲格式。
+        // 只有系统 >= API26 才有 RGBA_1010102，且必须在这一帧分配之前设好，
+        // 所以放在 attach 之前。拿不到就保持默认 8888，不影响 8bit 路径。
+        if (android.os.Build.VERSION.SDK_INT >= 26 && XhMpv.available) {
+            runCatching {
+                (host as? SurfaceView)?.holder?.setFormat(
+                    android.graphics.PixelFormat.RGBA_1010102
+                )
             }
         }
         surfaceReady = true

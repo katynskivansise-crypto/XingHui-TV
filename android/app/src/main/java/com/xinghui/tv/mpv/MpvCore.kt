@@ -1,6 +1,7 @@
 package com.xinghui.tv.mpv
 
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -59,6 +60,18 @@ class MpvCore(private val appContext: Context) {
     @Volatile private var surfaceW = 0
     @Volatile private var surfaceH = 0
     @Volatile private var renderPending = false
+
+    /** 当前实际使用的离屏位深：8 或 10，attach 之后才定下来 */
+    @Volatile var colorBits = 8
+        private set
+
+    /** 是否尝试 10bit：系统 >= API26（才有 RGBA_1010102 窗口格式）且拿到 GLES3 */
+    fun applyColorDepth(wantTenBit: Boolean): Int {
+        val bits = if (wantTenBit && Build.VERSION.SDK_INT >= 26 && native.esVersion() >= 3) 10 else 8
+        native.setColorBits(bits)
+        colorBits = bits
+        return bits
+    }
 
     @Volatile private var lastPause: Boolean? = null
     @Volatile private var lastEof: Boolean? = null
@@ -126,6 +139,7 @@ class MpvCore(private val appContext: Context) {
         surfaceH = height
         gl.post {
             native.attach(s, width, height)
+            applyColorDepth(true)
             native.render(width, height)
             MpvDebug.log("[mpv] render 挂载 ${width}x${height}")
         }
