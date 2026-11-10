@@ -1765,7 +1765,14 @@ class PlayActivity : Activity() {
     /** 收起控制条（对齐原版 hideControl:1159-1165：控制条与顶部信息一起收，并移走焦点） */
     private fun hideControl() {
         uiHandler.removeCallbacks(autoHide)
-        if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.GONE
+        // 收条用 INVISIBLE，不用 GONE：
+        // GONE 会让 FrameLayout 走一次完整的 layout pass，画面层（SurfaceView/TextureView）的
+        // 合成区域要跟着重算 —— 这家 7.1 ROM 上偶尔会晚一帧才算回来，那一帧露出的就是根布局的黑底，
+        // 也就是"按返回收控制条，黑一下"。
+        // INVISIBLE 只触发一次 draw（不触发 measure/layout），画面层几何不变，挖洞区域不用重算。
+        // 视觉与 GONE 完全一致（都不显示、都不可聚焦），唯一区别是它仍占着自己在 FrameLayout 里的位置 ——
+        // 控制条本来就在底部、不参与其它兄弟的排布，所以没有副作用。
+        if (controlBar?.visibility == View.VISIBLE) controlBar?.visibility = View.INVISIBLE
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
         // 对齐原版 getFocus1(:1670)：控制条收起后焦点回画面容器。
         // 不回收的话焦点会留在一个已经 GONE 的按钮上，方向键会跳进不可见控件里，
@@ -2133,21 +2140,21 @@ class PlayActivity : Activity() {
         // 返回键：对齐原版 onBackPressed:1834 的优先级 —— 控制条 → 居中提示 → 退出页面。
         // 之前 BACK 只在"控制条隐藏"的分支里处理，控制条正显示着按返回会直接把播放页关掉。
         if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-            if (shown) {
-                hideControl()
-                MpvDebug.log("[key] back 收控制条（不退出页面，对齐原版 onBackPressed 三层）")
-                return true
-            }
-            if (findViewById<View>(R.id.playCenter)?.visibility == View.VISIBLE) {
-                hidePlayCenter()
-                return true
-            }
+            // 一次返回直接回详情页 —— 不再"先收控制条"。
+            // 原因：收条那一刻画面必然要重新合成一次，这家 ROM 上会露出根布局黑底（黑一下），
+            // 而且第一次按返回看起来"什么都没发生"，还得再按一次才退出。
+            // 控制条的显隐留给菜单键（isMenuKeyCode 分支里就是"可见就收、不可见就出"），
+            // 返回键只做一件事：退出播放页。
+            if (shown) hideControl()
             // 第三层：真的退出。不走 super —— 各 ROM 对 KEYCODE_BACK 的默认处理不一致，
             // 有的会先给 Activity 一次 onKeyDown/onKeyUp 往返（部分机型伴随窗口重建、画面回到首帧），
             // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
             runCatching { savePosition() }
             MpvDebug.log("[key] back 退出播放页 pos=" + currentPosMs() + " shown=" + shown)
             finish()
+            // 关掉 Activity 转场动画：老 ROM 上退场动画那 200~300ms 里窗口先被清成背景色，
+            // 看起来就是"黑一下再回详情页"。0,0 直接切过去，详情页立刻接管。
+            runCatching { overridePendingTransition(0, 0) }
             return true
         }
 
