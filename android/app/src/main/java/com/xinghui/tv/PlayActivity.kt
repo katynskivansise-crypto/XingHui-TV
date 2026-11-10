@@ -1930,6 +1930,24 @@ class PlayActivity : Activity() {
      */
     private fun applyWindowShapeExperiment() {
         val exp = MpvDebug.experiment
+        // ---- 档位 6：让「视频那块矩形」上一个像素都不画 ----
+        // 判黑结论（真机）：菜单键按下的那约 1 秒里，左上角洋红方块还在 ——
+        // 说明应用窗口这一层画得好好的，黑的是它自己画上去的东西；根布局 bg=ColorDrawable opaque=true，
+        // 而 SurfaceView 靠窗口挖洞露出画面，挖洞这一拍失效 → 整屏被我们的不透明黑盖住。
+        // 所以根治不是"去掉窗口背景"，而是"视频矩形上窗口不画任何像素"：
+        //   1) 窗口 surface 改成 TRANSLUCENT（applyWindowShapeExperiment 里 winFmt 会从 -1 变 -3）
+        //   2) 根布局背景置透明
+        //   3) 快门底色置透明（media3 的内部快门还是黑的）
+        // 窗口透明后 SurfaceView 位于窗口层之下，透明像素直接透出视频层 —— 不再依赖挖洞，
+        // 挖洞对不对都无所谓了。留边处的黑由系统背景（T1 无壁纸=黑）提供，视觉不变。
+        if (exp == 6) {
+            runCatching { window.setBackgroundDrawable(null) }
+            runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
+            runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+            runCatching { playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT) }
+            MpvDebug.log("[exp6] 窗口透明格式 + 根布局/快门均透明（视频矩形上不再画像素）")
+            return
+        }
         if (exp != 3 && exp != 4) return
         runCatching { window.setBackgroundDrawable(null) }
         if (exp == 4) {
@@ -2027,11 +2045,11 @@ class PlayActivity : Activity() {
         // ★ 呼出前先让画面层把上一帧重绘一次：
         //   接下来这一帧要同时合成「视频层 + 控制条」，如果视频层这次没提交新帧，
         //   合成器就会拿到空队列 → 整屏黑一下。先把同一帧重新贴上去，黑的那一下就不存在。
-        // ★只重贴一次。原来这里是 redrawFor(1200)：1.2 秒内每 33ms 调一次 core.redrawNow()
-        //   （36 次 mpv_render_context_render + eglSwapBuffers），正好和窗口 re-layout 撞在一起。
-        //   mpv 内核按菜单键闪退就落在这一段：EGLSurface 在窗口重排期间被系统换掉，
-        //   我们还在它上面 swap → 原生 SIGSEGV。菜单这一刻只需要"把上一帧再贴一次"。
-        if (isMpvMode()) runCatching { mpv?.redrawNow() }
+        // ★菜单路径上一个 native 调用都不做。
+        //   历史：这里曾是 redrawFor(1200)（36 次 render+swap），后改成单次 redrawNow()，
+        //   真机仍闪退 —— 说明 mpv 内核按菜单键的崩溃点就在"窗口变化期间调 render API"本身。
+        //   控制条并不覆盖视频矩形（它在留边/画面之上，由窗口层合成），根本不需要重贴视频帧；
+        //   要恢复画面是在隐/显切换之后（onWindowFocusChanged 的 recoverRendering）再处理。
         detachShutter("showControl")
         controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
@@ -2094,7 +2112,7 @@ class PlayActivity : Activity() {
         controlBar?.visibility = View.GONE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
-        if (isMpvMode()) runCatching { mpv?.redrawNow() }
+        // 同上：收条这一步也不碰 render API（菜单键的 DOWN/UP 常常成对触发呼/收，两次都在窗口变化期）
         detachShutter("hideControl")
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
         logRenderPulse("hideControl")
