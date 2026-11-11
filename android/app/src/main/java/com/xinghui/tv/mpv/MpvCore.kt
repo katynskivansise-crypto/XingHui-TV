@@ -139,13 +139,17 @@ class MpvCore(private val appContext: Context) {
 
     fun attachSurface(s: Surface, width: Int, height: Int) {
         if (dead) return
+        // ★位深/格式这类 setProperty 一律留在调用线程上：
+        //   render.h 明文要求渲染线程除 mpv_render_* 之外不得调用其它 libmpv API，
+        //   在 gl.post 里做 setProperty 属于违规，官方标注会死锁。
+        applyColorDepth(true)
         surface = s
         surfaceW = width
         surfaceH = height
         gl.post {
             native.attach(s, width, height)
-            applyColorDepth(true)
-            native.render(width, height)
+            // 挂上后先强制贴一帧：此刻没有"新帧"概念，不 force 会什么都没画
+            native.render(width, height, force = true)
             MpvDebug.log("[mpv] render 挂载 ${width}x${height}")
         }
     }
@@ -161,7 +165,7 @@ class MpvCore(private val appContext: Context) {
         val h = surfaceH
         if (w <= 0 || h <= 0) return
         requestRender()
-        gl.post { native.render(w, h) }
+        gl.post { native.render(w, h, force = true) }
     }
 
     private fun requestRender() {

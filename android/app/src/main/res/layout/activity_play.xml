@@ -21,13 +21,30 @@
          就是 media3 默认值）。用户实测「最新版 EXO 在原版也没问题」，说明 EXO 这条链在
          同机同 ROM 上本来就正常，这里不做任何偏离原版的改动；要换类实现只在 mpv 侧做
          （原版没有 mpv，不存在参照）。 -->
-    <androidx.media3.ui.PlayerView
-        android:id="@+id/playView"
+    <!-- ★画面层 = 官方 AspectRatioFrameLayout + 一块自有 SurfaceView + 公开 SubtitleView。
+         不再使用 PlayerView：它内部有一套我们控制不了的状态机
+         （shutter 自动盖黑、setVisibility 连带改内部 SurfaceView 的可见性、
+           没播放器时走 placeholderSurface 不画、player=null 命中 tracks 为空就关快门），
+         这几条正是「按菜单黑一下 / 首帧回放」的全部来源。
+         这里三件都是 media3 的公开类：resize_mode 行为与 PlayerView 内部完全一致，
+         SurfaceView 的生死只由我们自己 attach/detach，外界一律不碰。 -->
+    <androidx.media3.ui.AspectRatioFrameLayout
+        android:id="@+id/videoFrame"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        app:auto_show="false"
-        app:resize_mode="fit"
-        app:use_controller="false" />
+        android:layout_gravity="center"
+        app:resize_mode="fit">
+
+        <SurfaceView
+            android:id="@+id/videoSurface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <androidx.media3.ui.SubtitleView
+            android:id="@+id/subtitleView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </androidx.media3.ui.AspectRatioFrameLayout>
 
     <!-- 内嵌 mpv 的画面层已删除（路线 A）：mpv 与 EXO 共用上面 playView 的那一块 SurfaceView。
          播放页现在只有一套画面层，任何地方都不再需要第二块 surface 或第二块视图。 -->

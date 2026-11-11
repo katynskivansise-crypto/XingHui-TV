@@ -263,6 +263,13 @@ class MpvPlayer(
             // 我们没有这个 ca bundle，留 yes 会让 https 片源在证书链不全时直接失败，
             // 电视盒子场景（片源多变、证书不规范）取 no 更实用；只连片源，不涉及登录凭据。
             core.setOptionString("tls-verify", "no")
+            // 直通（官方 MpvPlayer.java:1778 `setOption("audio-spdif", config.audioSpdif())`）：
+            //   AC3/EAC3/DTS 这类码流原样交给 HDMI，盒子不解码，功放才拿得到多声道。
+            //   不设的话这些音轨会被 mpv 解成 PCM 立体声，听感直接降级。
+            core.setOptionString("audio-spdif", "ac3,eac3,dts,dts-hd,truehd")
+            // 字幕自动挂载（官方默认 fuzzy）：同名字幕文件/内嵌字幕自动识别，
+            //   关掉的话 MKV 里的内嵌字幕要手动选，电视盒子上基本等于没有。
+            core.setOptionString("sub-auto", "fuzzy")
             // 官方 MPVView.kt:23 是无条件设 profile=fast（关掉 gradfun/deband 这类高成本滤镜）。
             // 这里做成设置页开关：T1 这类低端芯片默认开，想拿画质细节时可以关掉。
             if (mpvSet.mpvFastProfile) {

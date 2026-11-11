@@ -18,7 +18,6 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import com.xinghui.tv.dialog.EpisodeDialog
 import org.json.JSONArray
 import org.json.JSONObject
@@ -66,7 +65,7 @@ class PlayActivity : Activity() {
     private var speedIdx = 2 // 默认 1.0x
     private var fastForwarding = false
     private var savedSpeedIdx = 2
-    private var playerView: PlayerView? = null
+    private var videoHost: VideoHost? = null
     private var scaleIdx = 0
     // 对齐原版 select_scale：原始 / 16:9 / 4:3 / 填充 / 裁剪 → ExoPlayer resizeMode
     private val scaleModes = intArrayOf(
@@ -118,7 +117,13 @@ class PlayActivity : Activity() {
         if (directUrl.isBlank() && (looksLikeMedia(vodId) || ThunderPlay.match(vodId))) directUrl = vodId
         siteKey = SubscriptionStore(this).currentKey() ?: ""
 
-        playerView = findViewById<PlayerView>(R.id.playView)
+        videoHost = runCatching {
+            VideoHost(
+                findViewById(R.id.videoFrame),
+                findViewById(R.id.videoSurface),
+                findViewById(R.id.subtitleView)
+            )
+        }.getOrNull()
         enableKeepContent()
         /**
          * keep_content_on_player_reset 不在这里设，保持 media3 默认（false），与点播场景一致。
@@ -137,7 +142,7 @@ class PlayActivity : Activity() {
         scaleIdx = HistoryStore(this).scaleOf(historyKey)
             .takeIf { it >= 0 } ?: Settings(this).playerScale
         scaleIdx = scaleIdx.coerceIn(0, scaleModes.size - 1)
-        playerView?.resizeMode = scaleModes[scaleIdx]
+        videoHost?.resizeMode = scaleModes[scaleIdx]
         findViewById<TextView>(R.id.btnScale)?.text = scaleNames[scaleIdx]
         // mpv 内核下不必先建 EXO 实例：T1 只有 2GB 内存，两套解码器并存很吃紧。
         // 切回 EXO 时 rebuildPlayer() 会补建，所以这里可以省。
@@ -147,7 +152,7 @@ class PlayActivity : Activity() {
                 // 原版默认 play_with_others=false → 第二参数 true = 请求音频焦点。
                 // 少了这一步，详情页小窗和播放页互不压制，就是「两个不同的声音」。
                 p.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
-                playerView?.player = p
+                videoHost?.setPlayer(p)
             }
             applyCaptionStyle()
             attachPlayerListeners()
@@ -156,15 +161,14 @@ class PlayActivity : Activity() {
             // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
             // ★路线 A（对齐 WebHomeTV 5.6）：mpv 与 EXO 共用 PlayerView 那一块 SurfaceView。
             // 播放页从此只有一套画面层，切内核 = 换内核、不换视图、不换 window layer。
-            playerView?.visibility = View.VISIBLE
-            setPlayerViewShutter(transparent = true)
-            playerView?.post { detachShutter("onCreate") }
+                setPlayerViewShutter(transparent = true)
+            // 画面层里已不存在任何"盖黑"视图，onCreate 不再需要动快门
             // 原生内核初始化要几十到几百毫秒（mpv_create + 四十多条选项 + observeProperty + attachSurface）。
             // 放在 onCreate 里同步执行会把"首帧"和"窗口拿到输入焦点"一起往后推 ——
             // 从详情页进来那一两秒的按键会被系统直接丢掉，表现就是"进去按 OK 没反应"。
             // 原版 onCreate 里只有 ExoPlayer 的构造（轻得多），不存在这个空档。
             // 挪到首帧之后：窗口先挂上、先拿到输入焦点，内核随后建好（地址解析本来也要时间）。
-            val sv = videoHost()
+            val sv = currentSurface()
             if (sv == null) {
                 MpvDebug.log("[mpv] 拿不到共用画面层，起播时会退回 EXO")
             } else {
@@ -185,17 +189,27 @@ class PlayActivity : Activity() {
         // 原版播放页没有返回按钮（VideoActivity 靠系统返回键），这里同样不摆
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
-        playerView?.post { setupSharedSurface() }
+        videoHost?.post { setupSharedSurface() }
         uiHandler.postDelayed(stallTick, 100)
         // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
         // 用 EXO 时完全看不见 surface 有没有被重建。画面黑一下如果是 surface 重建，
         // 这一行必然出现；如果不出现，黑就与 surface 无关，方向直接分叉。
-        (playerView?.videoSurfaceView as? android.view.SurfaceView)?.holder?.addCallback(object :
+        videoHost?.surfaceView?.holder?.addCallback(object :
             android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
                 surfGen++
+                // ★色深能力恢复：API25 的 SurfaceView 默认是 RGB_565（16bit），
+                //   之前我们是在播放中途 setFormat(RGBA_8888)，等于向 SurfaceFlinger
+                //   申请换一整套 buffer（队列重建），那才是"动画面层拓扑"。
+                //   正确做法是**在 surface 刚创建、还没有任何 buffer 的时候**设一次：
+                //   之后分配的 buffer 天生就是 8888，播放中再也不用碰。
+                //   8bit 链路靠它拿满 24bit；10bit 由 mpv 的离屏格式（RGBA10A2）负责。
+                runCatching { h.setFormat(android.graphics.PixelFormat.RGBA_8888) }
                 lastSurfCreateAt = android.os.SystemClock.uptimeMillis()
-                MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} gen=$surfGen kernel=${if (isMpvMode()) "mpv" else "exo"}")
+                val posNow = runCatching { player?.currentPosition ?: -1L }.getOrDefault(-1L)
+                val playingNow = runCatching { player?.isPlaying }.getOrNull()
+                MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} gen=$surfGen " +
+                    "kernel=${if (isMpvMode()) "mpv" else "exo"} startGen=$startGen pos=${posNow}ms playing=$playingNow mpvPos=${mpvPos}ms")
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
                 MpvDebug.log("[sv2] changed ${w}x$hh fmt=$f kernel=${if (isMpvMode()) "mpv" else "exo"}")
@@ -792,6 +806,13 @@ class PlayActivity : Activity() {
 
     /** 统一挂播放器监听：onCreate 和 rebuildPlayer 都要挂，避免两处逻辑漂移 */
     private fun attachPlayerListeners() {
+        // ★字幕真正的接线点：PlayerView 原本内部监听 onCues 并灌给 SubtitleView，
+        //   我们脱离 PlayerView 之后必须自己接，否则字幕轨选了也不显示。
+        player?.addListener(object : Player.Listener {
+            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                videoHost?.subtitleView?.setCues(cueGroup.cues)
+            }
+        })
         player?.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (directUrl.isNotBlank()) return // 直播直链不自动换线路
@@ -890,7 +911,9 @@ class PlayActivity : Activity() {
         // 原版走 OkHttpDataSource，继承的是用户设置的 UA，所以不会踩这个坑。
         val effHeaders = withUa(headers)
         activeUrl = url
-        MpvDebug.log("[play] 起播 url=${url.take(56)}")
+        startGen++
+        MpvDebug.log("[play] 起播 gen=$startGen url=${url.take(56)} 续播点=${pendingSeek}ms")
+        logVideoCodecOnce()
         // 片头/片尾按片记忆（对齐原版 History.getOpening/getEnding）
         val marks = HistoryStore(this).marks(historyKey, epUrl)
         openingMs = marks[0]
@@ -1002,6 +1025,7 @@ class PlayActivity : Activity() {
     }
 
     private fun rebuildPlayer(headers: Map<String, String>) {
+        runCatching { videoHost?.setPlayer(null) }
         player?.release()
         activeHeaders = headers
         val builder = ExoPlayer.Builder(this)
@@ -1045,7 +1069,7 @@ class PlayActivity : Activity() {
             it.setHandleAudioBecomingNoisy(true)
             // 同 onCreate：音频焦点必须请求（原版 Players.java:155 同一句）
             it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
-            playerView?.player = it
+            videoHost?.setPlayer(it)
         }
         // 玩家表面探针必须在 setPlayer 之后挂：media3 会在这时把 surface 交给播放器
         attachExoSurfaceProbe()
@@ -1125,7 +1149,7 @@ class PlayActivity : Activity() {
     /** 缩放：点击循环档位（对齐原项目 onScale/setScale） */
     private fun toggleScale() {
         scaleIdx = (scaleIdx + 1) % scaleModes.size
-        if (isMpvMode()) mpv?.applyScale(scaleIdx) else playerView?.resizeMode = scaleModes[scaleIdx]
+        if (isMpvMode()) mpv?.applyScale(scaleIdx) else videoHost?.resizeMode = scaleModes[scaleIdx]
         findViewById<TextView>(R.id.btnScale).text = scaleNames[scaleIdx]
         // 对齐原版 VideoActivity.onScale：档位写进本片 History，不动全局 Setting
         if (!HistoryStore(this).setScaleOf(historyKey, scaleIdx)) Settings(this).playerScale = scaleIdx
@@ -1169,8 +1193,8 @@ class PlayActivity : Activity() {
      * 选「系统」时用系统样式覆盖内嵌样式。
      */
     private fun applyCaptionStyle() {
-        val pv = playerView ?: return
-        val sv = pv.subtitleView ?: return
+        val host = videoHost ?: return
+        val sv = host.subtitleView
         val system = Settings(this).captionMode == 1
         val style = if (system) {
             val cm = getSystemService(CAPTIONING_SERVICE) as? android.view.accessibility.CaptioningManager
@@ -1199,8 +1223,8 @@ class PlayActivity : Activity() {
      * TextureView（surface_type=texture_view，就是普通视图内容）。
      * 后者不挖洞，控制条显隐/窗口重绘都不会牵动画面层那一帧，这是纯官方能力。
      */
-    private fun videoHost(): android.view.View? =
-        runCatching { playerView?.videoSurfaceView }.getOrNull()
+    private fun currentSurface(): android.view.View? =
+        videoHost?.surfaceView
 
     /**
      * PlayerView 的 shutter 开关。
@@ -1212,37 +1236,13 @@ class PlayActivity : Activity() {
      */
     /** exo_shutter 缓存：media3 自带的黑挡板，播放中它若被翻出来就是一整块黑 */
     private var exoShutterRef: View? = null
-    private fun shutterView(): View? {
-        exoShutterRef?.let { return it }
-        val pv = playerView ?: return null
-        // ★真机日志里 [flick] 一直是 sh=null，[panel] 的 ★快门 行也从来没有打出来过，
-        //   可树遍历却能把这块板子叫出名字（View id=exo_shutter）。
-        //   根因：AGP 8 把 AAR 资源合并进 App 自己的资源表，按库包名 "androidx.media3.ui"
-        //   查 id 永远返回 0 —— 于是 setPlayerViewShutter / forceReleaseShutter / detachShutter
-        //   全部空转，那块不透明全屏黑一直原样挂着。这就是"快门怎么修都不生效"的真正原因。
-        //   改成：先按 App 包名查，再按库包名兜底，最后按资源条目名遍历视图树（与包名无关，必中）。
-        for (pkg in arrayOf(packageName, "androidx.media3.ui", "androidx.media3.ui.common")) {
-            val id = runCatching { pv.resources.getIdentifier("exo_shutter", "id", pkg) }.getOrDefault(0)
-            if (id == 0) continue
-            val v = runCatching { pv.findViewById<View>(id) }.getOrNull()
-            if (v != null) {
-                exoShutterRef = v
-                return v
-            }
-        }
-        var found: View? = null
-        fun walk(v: View) {
-            if (found != null) return
-            if (runCatching { pv.resources.getResourceEntryName(v.id) }.getOrNull() == "exo_shutter") {
-                found = v
-                return
-            }
-            if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
-        }
-        walk(pv)
-        exoShutterRef = found
-        return found
-    }
+    /**
+     * 旧快门随 PlayerView 一起消失。画面层现在是
+     * AspectRatioFrameLayout + SurfaceView，**里面没有任何会画黑的视图**。
+     * 保留这个函数只为让历史调用点不必逐个删干净。
+     */
+    private fun shutterView(): View? = null
+
 
     /**
      * 播放中永久释放快门。
@@ -1270,7 +1270,6 @@ class PlayActivity : Activity() {
         val sh = shutterView() ?: return
         if (sh.parent == null) return
         runCatching {
-            playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             sh.setBackgroundColor(android.graphics.Color.TRANSPARENT)
             sh.visibility = View.GONE
             (sh.parent as? android.view.ViewGroup)?.removeView(sh)
@@ -1282,7 +1281,6 @@ class PlayActivity : Activity() {
         val sh = shutterView() ?: return
         if (shutterReleased && sh.visibility == View.GONE) return
         runCatching {
-            playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             sh.setBackgroundColor(android.graphics.Color.TRANSPARENT)
             sh.visibility = View.GONE
             shutterReleased = true
@@ -1302,8 +1300,8 @@ class PlayActivity : Activity() {
             uiHandler.postDelayed({
                 if (isFinishing || isDestroyed) return@postDelayed
                 val st = runCatching {
-                    "sh=${shutterView()?.visibility}/${playerView?.visibility} " +
-                        "sv=${videoHost()?.visibility}/${videoHost()?.alpha} " +
+                    "sh=${shutterView()?.visibility}/${videoHost?.visibility} " +
+                        "sv=${currentSurface()?.visibility}/${currentSurface()?.alpha} " +
                         "mpv=${mpv != null}/${mpv?.let { runCatching { it.isPausedActual() }.getOrNull() }} " +
                         "bar=${controlBar?.visibility} win=${window?.decorView?.windowVisibility} " +
                         "exo=${player?.isPlaying}"
@@ -1328,20 +1326,19 @@ class PlayActivity : Activity() {
      */
     private fun enableKeepContent() {
         runCatching {
-            playerView?.setKeepContentOnPlayerReset(true)
+            // 已无 PlayerView，keep_content_on_player_reset 自然失效
+            Unit
             MpvDebug.log("[ui] keepContentOnPlayerReset=true")
         }
     }
 
+    /**
+     * 已无快门可动：画面层不是 PlayerView 了。
+     * 这里保留函数签名，调用点一行都不用改；将来若需要"遮挡窗口期"，
+     * 只改这个函数的实现即可，不会再牵动播放器内部状态。
+     */
     private fun setPlayerViewShutter(transparent: Boolean) {
-        runCatching {
-            val pv = playerView ?: return@runCatching
-            pv.setShutterBackgroundColor(
-                if (transparent) android.graphics.Color.TRANSPARENT else android.graphics.Color.BLACK
-            )
-            // 走统一的 shutterView()：包名无关，AGP 8 合并资源后才查得到
-            shutterView()?.visibility = if (transparent) View.GONE else View.VISIBLE
-        }
+        // no-op
     }
 
     private fun isMpvMode(): Boolean =
@@ -1434,6 +1431,31 @@ class PlayActivity : Activity() {
         return p
     }
 
+    private var codecLogged = false
+    /**
+     * 把"这台机器实际用的视频解码器名"打出来。
+     *
+     * media3 的 MediaCodecVideoRenderer 里有一张按 codec 名匹配的黑名单
+     * `codecNeedsSetOutputSurfaceWorkaround(name)`：命中就走"重建解码器"而不是
+     * 无缝 setOutputSurface。Surface 一旦重建，命中与不命中的差别就是
+     * "毫无察觉" 与 "从零重新起解码、黑一秒"。
+     * 我们无法读到它内部的那个布尔，但可以把 codec 名打出来，按官方那张表就能判定。
+     */
+    private fun logVideoCodecOnce() {
+        if (codecLogged) return
+        codecLogged = true
+        runCatching {
+            val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+            val dec = list.codecInfos.firstOrNull { ci ->
+                !ci.isEncoder && ci.supportedTypes.any { it.equals("video/avc", true) }
+            }
+            MpvDebug.log(
+                "[codec] avc=${dec?.name} hw=${android.os.Build.HARDWARE} " +
+                    "model=${android.os.Build.MODEL} sdk=${android.os.Build.VERSION.SDK_INT}"
+            )
+        }.onFailure { MpvDebug.log("[codec] 读取失败 $it") }
+    }
+
     private fun startMpv(url: String, headers: Map<String, String>, startMs: Long) {
         // EXO 若还在跑，会和 mpv 同时出声，所以切到 mpv 前必须把它收掉。
         // 这里用 release 而不是 stop：stop 只是把状态推到 IDLE，MediaCodec / Surface 还挂着，
@@ -1450,16 +1472,16 @@ class PlayActivity : Activity() {
         //   PlayerView 与 EXO 的绑定留着，release 时一起收。
         //   配合 setKeepContentOnPlayerReset(true)，清 surface 也不会关快门，画面保留最后一帧。
         runCatching {
-            val sv = videoHost() as? android.view.SurfaceView
-            if (sv != null) playerView?.player?.clearVideoSurfaceView(sv)
+            val sv = currentSurface() as? android.view.SurfaceView
         }
+        // 顺序：先把这块 surface 从 EXO 身上摘掉，再释放播放器。
+        // 反过来的话 release 期间 media3 还会去摸一块马上就要交给 mpv 的 surface。
+        runCatching { videoHost?.setPlayer(null) }
         runCatching { player?.release() }
         player = null
-        runCatching { playerView?.player = null }
-        playerView?.visibility = View.VISIBLE
         // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
         setPlayerViewShutter(transparent = true)
-        val surface = videoHost()
+        val surface = currentSurface()
         // 共用画面层是唯一前提，拿不到就本页退回 EXO（不能静默不播）
         if (surface == null) {
             MpvDebug.log("[mpv] 拿不到共用画面层（PlayerView 没有 surface view），本页退回 EXO")
@@ -1502,7 +1524,6 @@ class PlayActivity : Activity() {
         runCatching { mpv?.release() }
         mpv = null
         setPlayerViewShutter(transparent = false)
-        playerView?.visibility = View.VISIBLE
         updatePlayerText()
         resumeOverride = mpvPos
         playUrl(activeUrl, activeHeaders)
@@ -1701,10 +1722,9 @@ class PlayActivity : Activity() {
             mpv = null
             // mpv 走了：把 shutter 恢复成原版的黑色，EXO 出首帧前由它挡着
             setPlayerViewShutter(transparent = false)
-            playerView?.visibility = View.VISIBLE
-            if (player == null) rebuildPlayer(activeHeaders)
+                if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
-            playerView?.resizeMode = scaleModes[scaleIdx]
+            videoHost?.resizeMode = scaleModes[scaleIdx]
             resumeOverride = at
             playUrl(url, activeHeaders)
         }
@@ -1855,18 +1875,18 @@ class PlayActivity : Activity() {
     private fun mpvDebugLine(): String {
         val m = mpv
         val surfaceVis = runCatching {
-            val sv = videoHost()
+            val sv = currentSurface()
             "${sv?.width}x${sv?.height} vis=${sv?.visibility} valid=${(sv as? android.view.SurfaceView)?.holder?.surface?.isValid ?: (sv != null)}"
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
-            "mpvSink=$surfaceVis playView=${playerView?.visibility} exo=${player != null} " +
+            "mpvSink=$surfaceVis playView=${videoHost?.visibility} exo=${player != null} " +
             "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${durNow()}ms " +
             "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }} " +
             "winFlags=${runCatching { Integer.toHexString(window.attributes.flags) }.getOrElse { "?" }} " +
             "winFmt=${runCatching { Integer.toHexString(window.attributes.format) }.getOrElse { "?" }} " +
             "insets=${runCatching { val i = window.decorView.rootWindowInsets; "${i?.systemWindowInsetLeft}x${i?.systemWindowInsetTop}x${i?.systemWindowInsetRight}x${i?.systemWindowInsetBottom}" }.getOrElse { "?" }} " +
-            "exoSurf=${runCatching { val sv = playerView?.videoSurfaceView as? android.view.View; "${sv?.width}x${sv?.height} vis=${sv?.visibility}" }.getOrElse { "?" }} " +
+            "exoSurf=${runCatching { val sv = videoHost?.surfaceView as? android.view.View; "${sv?.width}x${sv?.height} vis=${sv?.visibility}" }.getOrElse { "?" }} " +
             "url=${activeUrl.take(60)}"
     }
 
@@ -1933,7 +1953,7 @@ class PlayActivity : Activity() {
         if (exp == 7) {
             runCatching { window.setFormat(android.graphics.PixelFormat.OPAQUE) }
             runCatching { rootView?.setBackgroundColor(android.graphics.Color.BLACK) }
-            runCatching { playerView?.setShutterBackgroundColor(android.graphics.Color.BLACK) }
+            runCatching { }
             MpvDebug.log("[exp7] 回退旧结构：不透明黑窗口 + 黑根布局")
             return
         }
@@ -1944,12 +1964,12 @@ class PlayActivity : Activity() {
         }
         runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
         runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-        runCatching { playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT) }
+        runCatching { }
         MpvDebug.log("[exp$exp] 透明结构：窗口 TRANSLUCENT + 根布局/快门透明")
     }
 
     private fun attachExoSurfaceProbe() {
-        val v = runCatching { playerView?.videoSurfaceView }.getOrNull() ?: return
+        val v = videoHost?.surfaceView ?: return
         val sv = v as? android.view.SurfaceView ?: return
         if (sv === exoProbeSurface) return
         runCatching { exoProbeSurface?.holder?.removeCallback(exoHolderCallback) }
@@ -1971,12 +1991,12 @@ class PlayActivity : Activity() {
         val p = player
         val surfValid = runCatching { exoProbeSurface?.holder?.surface?.isValid }.getOrNull()
         val viewState = runCatching {
-            val sv = playerView?.videoSurfaceView as? android.view.View
+            val sv = videoHost?.surfaceView as? android.view.View
             "${sv?.width}x${sv?.height} vis=${sv?.visibility} attached=${sv?.isAttachedToWindow}"
         }.getOrElse { "?" }
         return "state=${exoStateName(p?.playbackState)} playing=${p?.isPlaying} " +
             "pos=${p?.currentPosition}ms buffered=${runCatching { p?.bufferedPosition }.getOrNull()}ms " +
-            "surfValid=$surfValid view=$viewState playView=${playerView?.visibility} " +
+            "surfValid=$surfValid view=$viewState playView=${videoHost?.visibility} " +
             "controlBar=${controlBar?.visibility} focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()} " +
             "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }}"
     }
@@ -2027,6 +2047,8 @@ class PlayActivity : Activity() {
          [stall] 迟到  → UI 线程被卡住（这一帧压根没提交，屏幕自然是上一层）
        两者都不出现却还黑 → 显示管线自己切了，代码里改视图没用。 */
     private var surfGen = 0
+    /** 起播代数：只有真正走到 prepare 才算一次。用来分辨"首帧回放"是播放重启还是画面层重建 */
+    private var startGen = 0
     private var lastSurfCreateAt = 0L
     private var stallLast = 0L
 
@@ -2100,7 +2122,7 @@ class PlayActivity : Activity() {
                         "[probe] menu t800 exoPlaying=" + runCatching { player?.isPlaying }.getOrNull() +
                             " mpvPaused=" + runCatching { mpv?.isPausedActual() }.getOrNull() +
                             " focus=${currentFocus?.id} decor=${window.decorView.width}x${window.decorView.height}" +
-                            " exoSurfaceVis=${runCatching { playerView?.videoSurfaceView?.visibility }.getOrNull()}"
+                            " exoSurfaceVis=${runCatching { videoHost?.surfaceView?.visibility }.getOrNull()}"
                     )
                 }
             }, 800)
@@ -2195,7 +2217,7 @@ class PlayActivity : Activity() {
      * 锁死缓冲区后，布局再多也不会换缓冲区，这一帧就不存在。
      */
     private fun setupSharedSurface() {
-        val sv = playerView?.videoSurfaceView as? android.view.SurfaceView ?: return
+        val sv = videoHost?.surfaceView ?: return
         // ★setFixedSize 这条是从 5.6 抄的，但 5.6 只在它自己那套自定义 render surface 上锁尺寸。
         //   我们把它挂在了 PlayerView 的 SurfaceView 上，结果真机日志里：
         //     [sv] setFixedSize 1920x1080 → surface=1920x1080   （此时视图还是满屏 1080）
@@ -2242,12 +2264,12 @@ class PlayActivity : Activity() {
                         "bg=${sh?.background?.javaClass?.simpleName} size=${sh?.width}x${sh?.height} " +
                         "shown=${sh?.isShown}")
                 }
-                val pv = findViewById<View>(R.id.playView)
+                val pv = findViewById<View>(R.id.videoFrame)
                 MpvDebug.log("[panel] $tag ★playView vis=${pv?.visibility} alpha=${pv?.alpha} " +
                     "bg=${pv?.background?.javaClass?.simpleName} size=${pv?.width}x${pv?.height}")
             }
             MpvDebug.log("[panel] $tag 窗口 hasFocus=${root.hasWindowFocus()} winVis=${root.windowVisibility} " +
-                "svShown=${videoHost()?.isShown} svAlpha=${videoHost()?.alpha} " +
+                "svShown=${currentSurface()?.isShown} svAlpha=${currentSurface()?.alpha} " +
                 "decorBg=${root.background?.javaClass?.simpleName}")
         }
     }
@@ -2255,7 +2277,7 @@ class PlayActivity : Activity() {
     private fun logRenderPulse(tag: String) {
         runCatching {
             val m = mpv
-            val sv = videoHost()
+            val sv = currentSurface()
             // 数一遍这 300ms 里根布局被"重画/重排"了几次：
             // 正常的收条/呼条应该是 1 次；≥2 次就说明我们额外多造了一轮 traversal。
             var draws = 0
@@ -2966,6 +2988,7 @@ class PlayActivity : Activity() {
         super.onDestroy()
         sniffer?.cancel()
         sniffer = null
+        runCatching { videoHost?.setPlayer(null) }
         player?.release()
         player = null
         // 播放器已释放，这时候清迅雷任务/分片才安全（文件不删，则 thunder/ 会无限增长）

@@ -61,8 +61,12 @@ class XhMpv {
     fun attach(surface: Surface, width: Int, height: Int): Boolean =
         handle != 0L && nativeAttach(handle, surface, width, height)
 
-    fun render(width: Int, height: Int): Boolean =
-        handle != 0L && nativeRender(handle, width, height)
+    /**
+     * @param force true = 没有新帧也把上一帧重贴一次（窗口扰动后的重绘）；
+     *              false = 只有 mpv 真出了新帧才画（默认路径，避免无意义 buffer 轮换）
+     */
+    fun render(width: Int, height: Int, force: Boolean = false): Boolean =
+        handle != 0L && nativeRender(handle, width, height, force)
 
     fun detach() {
         if (handle != 0L) nativeDetach(handle)
@@ -85,7 +89,7 @@ class XhMpv {
     private external fun nativeGetProperty(handle: Long, name: String): String?
     private external fun nativeCommand(handle: Long, args: Array<String>): Boolean
     private external fun nativeAttach(handle: Long, surface: Surface, width: Int, height: Int): Boolean
-    private external fun nativeRender(handle: Long, width: Int, height: Int): Boolean
+    private external fun nativeRender(handle: Long, width: Int, height: Int, force: Boolean): Boolean
     private external fun nativeDetach(handle: Long)
     private external fun nativeDestroy(handle: Long)
 

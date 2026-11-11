@@ -64,6 +64,8 @@ typedef struct mpv_opengl_fbo {
 #define MPV_RENDER_PARAM_FLIP_Y 4
 #define MPV_RENDER_PARAM_ADVANCED_CONTROL 10
 #define MPV_RENDER_API_TYPE_OPENGL "opengl"
+#define MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME 12
+#define MPV_RENDER_UPDATE_FRAME (1ULL << 0)
 
 typedef void (*mpv_render_update_fn)(void *cb_ctx);
 
@@ -81,6 +83,7 @@ static void (*p_render_set_update_cb)(mpv_render_context *, mpv_render_update_fn
 static int (*p_render_render)(mpv_render_context *, mpv_render_param *) = nullptr;
 static void (*p_render_report_swap)(mpv_render_context *) = nullptr;
 static void (*p_render_free)(mpv_render_context *) = nullptr;
+static uint64_t (*p_render_update)(mpv_render_context *) = nullptr;
 
 static bool load_mpv() {
     static bool tried = false, ok = false;
@@ -109,6 +112,7 @@ static bool load_mpv() {
     BIND("mpv_render_context_render", p_render_render)
     BIND("mpv_render_context_report_swap", p_render_report_swap)
     BIND("mpv_render_context_free", p_render_free)
+    BIND("mpv_render_context_update", p_render_update)
 #undef BIND
     LOGI("libmpv render API 就绪");
     return ok = true;
@@ -362,7 +366,7 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeAttach(JNIEnv *env, jclass, jlong th, jobjec
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_xinghui_tv_mpv_XhMpv_nativeRender(JNIEnv *, jclass, jlong th, jint w, jint h) {
+Java_com_xinghui_tv_mpv_XhMpv_nativeRender(JNIEnv *, jclass, jlong th, jint w, jint h, jboolean force) {
     Context *c = (Context *) th;
     if (!c) return JNI_FALSE;
     std::lock_guard<std::recursive_mutex> guard(c->glLock);
@@ -375,6 +379,14 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeRender(JNIEnv *, jclass, jlong th, jint w, j
         p_mpv_set_property_string(c->mpv, "android-surface-size", size);
     }
     if (!eglMakeCurrent(c->display, c->surface, c->surface, c->glctx)) return JNI_FALSE;
+    // ★官方 render.h 的硬约定：开了 MPV_RENDER_PARAM_ADVANCED_CONTROL，
+    //   宿主必须持续调用 mpv_render_context_update()，否则它的核心线程会一直被吊着
+    //   （vo_libmpv.c 里 flip_page 等宿主画帧，等不到就 200ms 超时丢帧）。
+    //   update() 同时负责跑 render context 内部的 dispatch 队列，不调用等于状态机不推进。
+    uint64_t updateFlags = p_render_update ? p_render_update(c->render) : MPV_RENDER_UPDATE_FRAME;
+    // force=true 用于"没有新帧但要重贴上一帧"（窗口扰动后的重绘）。
+    // 有新帧才准画；没有新帧又没 force 就什么都不做，避免无意义的 buffer 轮换。
+    if (!force && !(updateFlags & MPV_RENDER_UPDATE_FRAME)) return JNI_TRUE;
     // 离屏目标的内部格式按位深选：
     //   GLES2 → 只有 GL_RGBA（0x1908，8bit/通道）
     //   GLES3 → 可用 GL_RGB10_A2（0x8059，10bit/通道），HDR 片源才不丢精度
@@ -383,14 +395,22 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeRender(JNIEnv *, jclass, jlong th, jint w, j
     int fboFormat = (c->colorBits >= 10 && c->esVersion >= 3) ? 0x8059 : 0x1908;
     mpv_opengl_fbo fbo{0, c->width, c->height, fboFormat};
     int flip = 1;
+    // BLOCK_FOR_TARGET_TIME=0：不要让 render 在锁内等到 vsync。
+    //   官方缺省是 1（阻塞到目标显示时间），在持锁状态下等 vsync 会把
+    //   detach/窗口变化全堵在这把锁后面，正是"按菜单卡住一两百毫秒"的来源之一。
+    int block = 0;
     mpv_render_param params[] = {
             {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
             {MPV_RENDER_PARAM_FLIP_Y, &flip},
+            {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block},
             {MPV_RENDER_PARAM_INVALID, nullptr}};
     p_render_render(c->render, params);
-    if (!eglSwapBuffers(c->display, c->surface)) return JNI_FALSE;
+    bool swapped = eglSwapBuffers(c->display, c->surface);
+    // report_swap 一旦开始调就必须成对：官方用 flip_count 判"你到底调不调"，
+    //   漏调一次会让 VO 线程干等到超时再丢帧。所以失败这一次也报。
     p_render_report_swap(c->render);
-    return JNI_TRUE;
+    if (!swapped) LOGE("eglSwapBuffers 失败");
+    return swapped ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
