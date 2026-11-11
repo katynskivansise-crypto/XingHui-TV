@@ -930,6 +930,11 @@ class PlayActivity : Activity() {
      *   详情页小窗读不到位置就只能从片头开始。这就是「按过菜单再返回，小窗回片头」的数据侧原因。
      */
     private fun savePosition(force: Boolean = false) {
+        // 退了就不再写：返回键那一刻已经 force 保存过一次（位置最准），
+        // 之后 onPause / onDestroy 还会各调一次，而 pause 是异步的 —— 位置还在往后走几毫秒，
+        // 于是同一部片会被"最后写一次"覆盖三遍（真机日志里 26647 → 26686 → 26691）。
+        // 位置多跳几毫秒无害，但会让「最后一次到底存在哪」变得不可判读，日志也被刷屏。
+        if (leaving && !force) return
         val pos = if (isMpvMode()) mpvPos else runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
         if (pos <= 0) return
         if (!force && pos == lastSavedPos) return
@@ -1262,6 +1267,9 @@ class PlayActivity : Activity() {
      * 所以每次内核切换都必须是一次有先有后的让渡，并且能在 /debug 里看到谁握着。
      */
     private var surfaceOwner = "none"
+
+    /** 已经按返回键退场：之后不再补写位置（见 savePosition 开头） */
+    private var leaving = false
 
     private fun handOver(to: String, how: String) {
         val from = surfaceOwner
@@ -2317,7 +2325,11 @@ class PlayActivity : Activity() {
         //   我们的语义看焦点，所以这一步在我们这套结构里是必须的，不是多余动作。
         if (isInsideBar(currentFocus)) {
             rootView?.requestFocus()
-            MpvDebug.log("[key] 收条前清焦点 从=${currentFocus?.id} → root ok=${currentFocus === rootView}")
+            MpvDebug.log(
+                "[key] 收条前清焦点 从=${currentFocus?.id} inBar=${isInsideBar(currentFocus)}" +
+                    " lastBarFocus=$lastBarFocusId barVis=${controlBar?.visibility}" +
+                    " barAlpha=${controlBar?.alpha} → root ok=${currentFocus === rootView}"
+            )
         }
         controlBar?.visibility = View.GONE
         controlBar?.alpha = 1f
@@ -2366,7 +2378,11 @@ class PlayActivity : Activity() {
         }
         if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.timeBar)
         val ok = target?.requestFocus() == true
-        MpvDebug.log("[ui] 控制条可见但焦点不在条上 → 重新落点 id=${target?.id} ok=$ok")
+        MpvDebug.log(
+            "[ui] 控制条可见但焦点不在条上 → 重新落点 was=${currentFocus?.id}" +
+                "(${currentFocus?.javaClass?.simpleName}) lastBarFocus=$lastBarFocusId" +
+                " → id=${target?.id}(${target?.javaClass?.simpleName}) ok=$ok"
+        )
         return ok
     }
 
@@ -2583,6 +2599,8 @@ class PlayActivity : Activity() {
     /** 最后一次方向键按下后多久自动提交（不依赖 ACTION_UP，只发 DOWN 的遥控也能跳） */
     private val SEEK_COMMIT_IDLE_MS = 400L
     private var lastSeekRepeatAt = 0L
+    /** 一次按住期间已经计入的台阶数（用来放大后面的步长） */
+    private var seekTicks = 0
     private var seekBaseMs = 0L          // 按下方向键那一刻的位置
     private var seekAccumMs = 0L         // 按住期间累计的偏移
     private var seekingByKey = false
@@ -2722,12 +2740,31 @@ class PlayActivity : Activity() {
     private fun handleSeekKey(dir: Long, event: KeyEvent) {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
+                val nowMs = android.os.SystemClock.uptimeMillis()
                 if (!seekingByKey) {
                     seekingByKey = true
                     seekBaseMs = currentPosMs()
                     seekAccumMs = 0L
+                    lastSeekRepeatAt = 0L
+                    seekTicks = 0
                 }
-                seekAccumMs += dir * SEEK_STEP_MS
+                // T1 的 key repeat 实测 40~60ms 一个。原样按「每来一个 DOWN 加 10s」累加，
+                // 真机上一次 2 秒的按住会累到 27 次 → 一下跳掉 4 分半（现场 base=49021 accum=270000）。
+                // 这里两件事：① repeat 事件按 300ms 节流（SEEK_REPEAT_GAP_MS 原来只声明没接线）；
+                //            ② 台阶越按越大（前 3 阶 10s，之后 20s），长按仍然能快速走远，但不再失控。
+                val stepped = event.repeatCount == 0 ||
+                    nowMs - lastSeekRepeatAt >= SEEK_REPEAT_GAP_MS
+                var step = 0L
+                if (stepped) {
+                    lastSeekRepeatAt = nowMs
+                    seekTicks++
+                    step = if (seekTicks <= 3) SEEK_STEP_MS else SEEK_STEP_MS * 2
+                    seekAccumMs += dir * step
+                }
+                MpvDebug.log(
+                    "[key] 快进起手 dir=$dir step=$step accum=${seekAccumMs}ms ticks=$seekTicks" +
+                        " repeat=${event.repeatCount} 计入=$stepped dur=${durNow()}ms bar=${barShown()}"
+                )
                 // 夹在 [0, dur] 里：原版会开到越界再靠 seekTo 夹，我们提前夹，提示上的时间才不会出现负数
                 val dur = durNow()
                 if (seekAccumMs < -seekBaseMs) seekAccumMs = -seekBaseMs
@@ -2735,7 +2772,12 @@ class PlayActivity : Activity() {
                 showSeekCenter(seekAccumMs)
             }
             KeyEvent.ACTION_UP -> {
-                if (!seekingByKey) return
+                // DOWN 没进过这里 = 快进根本没起手（多半被上游分支吞掉/焦点不在这条路上）。
+                // 以前这里直接 return，日志一片空白，只能看到"按了一下 ←"，判不出丢在哪一层。
+                if (!seekingByKey) {
+                    MpvDebug.log("[key] 快进抬起但未起手 kc=${event.keyCode} (DOWN 未进入快进分支)")
+                    return
+                }
                 seekingByKey = false
                 val target = seekTargetNow()
                 val from = currentPosMs()
@@ -2922,6 +2964,7 @@ class PlayActivity : Activity() {
             // 有的会先给 Activity 一次 onKeyDown/onKeyUp 往返（部分机型伴随窗口重建、画面回到首帧），
             // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
             // ★退场时强制落盘 + 先补建历史行：详情页小窗就是靠这一条位置续播的
+            leaving = true
             runCatching { savePosition(force = true) }
             // 现场对照：不呼出控制条直接返回 → 干净；呼出过控制条再返回 → 黑一下。
             // 差别只有一处：条显示时焦点落在条上的按钮里，条隐藏时焦点在根布局。
@@ -2995,7 +3038,11 @@ class PlayActivity : Activity() {
                 }
             }
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                MpvDebug.log("[key] 交焦点系统 kc=${event.keyCode} focus=${currentFocus?.id}")
+                MpvDebug.log(
+                    "[key] 交焦点系统 kc=${event.keyCode} focus=${currentFocus?.id}" +
+                        " inBar=${isInsideBar(currentFocus)} lastBarFocus=$lastBarFocusId" +
+                        " barAlpha=${controlBar?.alpha} barVis=${controlBar?.visibility}"
+                )
             }
             return super.dispatchKeyEvent(event)
         }
