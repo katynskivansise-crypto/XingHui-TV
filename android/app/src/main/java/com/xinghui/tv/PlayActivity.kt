@@ -96,7 +96,19 @@ class PlayActivity : Activity() {
         }.getOrNull()
         // 对齐原版 VideoActivity:614「进页面就把焦点放到画面容器」：
         // 有焦点时这条 ROM 上按键分发最稳，也是控制条收起时的落点。
-        rootView?.post { rootView?.requestFocus() }
+        // 进页面这一拍的实际焦点状态写进 /debug：进页面到按菜单键之前，
+        // 如果这里是 cur=-1 且 winFocus=false，就说明"按键无效"是窗口/焦点这一层没接上，
+        // 而不是按键分支写错（分支层面 ←→/OK 根本不看焦点）。
+        rootView?.post {
+            val rootOk = rootView?.requestFocus() == true
+            val dv = window?.decorView
+            if (dv != null && !dv.hasWindowFocus()) runCatching { dv.requestFocus() }
+            MpvDebug.log(
+                "[ui] 进页面焦点 rootFocus=$rootOk cur=${currentFocus?.id}" +
+                    " winFocus=${runCatching { dv?.hasWindowFocus() }.getOrElse { null }}" +
+                    " rootFocusable=${rootView?.isFocusable} barVis=${controlBar?.visibility}"
+            )
+        }
         // 调试快照：手机浏览器打开 http://盒子IP:9978/debug 就能看到这份状态（界面零改动）
         MpvDebug.snapshot = { mpvDebugLine() }
         android.view.Choreographer.getInstance().postFrameCallback(frameTick)
@@ -281,7 +293,10 @@ class PlayActivity : Activity() {
         // 原版 VideoActivity:1269-1271 在起播前就把 History 建好（createHistory / updateHistory），
         // 不依赖抖源解析成功。之前只在各条「解析成功」分支里记，解析慢或中途退出就漏记，
         // 「看过的片子历史里没有」就是这么来的。
-        if (vodId.isNotBlank() && vodName.isNotBlank()) recordHistory()
+        // ★条件放宽到与 HistoryStore.addHistory 内部 key 规则一致（vodId 优先、退回片名）。
+        //   原来要求 vodName 也非空：从历史/收藏/推送进来的入口常常只带 vodId，
+        //   于是这部片从来没被写进历史 —— 现场就是 row=false 但 total=9。
+        if (historyKey.isNotBlank()) recordHistory()
 
         // 直播直链：直接播放；影片：先拉详情拿线路（供选集面板），再解析播放
         if (directUrl.isNotBlank()) {
@@ -710,7 +725,11 @@ class PlayActivity : Activity() {
      * 但那一刻还在 BUFFERING、屏幕上只有转圈 —— 而用户恰恰是在这段里按 OK 的。
      * 所以再加一条"转圈还亮着"。
      */
-    private fun preStart(): Boolean = progressShown || !contentReady()
+    // ★判据只用"内核里有没有内容"，不再把 progressShown 掺进来。
+    //   掺进来的后果：EXO 每次 seek 都会进 BUFFERING → showPlayProgress() → preStart() 变 true →
+    //   这一段时间按 OK 只记 pendingPauseIntent、永不 toggle —— 也就是「刚快进完按暂停没反应」。
+    //   BUFFERING 只是缓冲，不是"起播前"，暂停/继续在这个阶段本来就该有效。
+    private fun preStart(): Boolean = !contentReady()
 
     /** 播放/解析失败 → 先切下一条线路，再自动换站点；都失败才停止（对齐原项目 startFlow→checkFlag→checkSearch） */
     private fun onPlayFail(msg: String) {
@@ -2004,22 +2023,36 @@ class PlayActivity : Activity() {
 
     private fun handleMenuKey() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
-        // 调试日志（走 /debug 页面，不弹任何提示）：黑屏到底是「surface 没了」还是「内核假暂停」全靠这行区分
-        MpvDebug.log("[menu] " + mpvDebugLine())
-        runCatching {
-            val d = window?.windowManager?.defaultDisplay
-            MpvDebug.log(
-                "[disp] refresh=${d?.refreshRate} decor=${window?.decorView?.width}x${window?.decorView?.height}" +
-                    " surfGen=$surfGen sinceCreate=${android.os.SystemClock.uptimeMillis() - lastSurfCreateAt}ms" +
-                    " fmt=${window?.attributes?.format} flags=${window?.attributes?.flags}"
-            )
-        }
-        // EXO 模式下再补一串按时间采样的状态，用来判定三秒黑到底属于哪一类
+        // ★菜单这一帧只做「控制条显隐」这一件事，所有诊断全部推到下一帧。
+        //
+        //   推理依据是现成的：?x=2（菜单键完全不呼出控制条）真机**仍然黑** ——
+        //   说明黑跟控制条、跟 showControl 里的任何布局/焦点动作都无关。
+        //   那个档位下，菜单这一帧里还在跑的东西只剩下这两段诊断：
+        //     · mpvDebugLine()：Settings（SharedPreferences）、currentSurface()、
+        //       window.attributes、rootWindowInsets、mpv 的 JNI 属性读——
+        //       全部在主线程同步执行，恰好压在窗口要重新合成的那一帧上；
+        //     · [disp]：windowManager.defaultDisplay + window attributes。
+        //   把它们挪到 post（下一帧）之后，菜单帧里就什么都不剩了。
+        //   这就是最便宜、可判定的一次 A/B：若 x=2 从此不黑，黑源就是诊断自己。
         if (toEpisodes) {
             hideControl()
             openEpisodes()
         } else {
             toggleControl()
+        }
+        uiHandler.post {
+            runCatching {
+                // 调试日志（走 /debug 页面，不弹任何提示）
+                MpvDebug.log("[menu] " + mpvDebugLine())
+            }
+            runCatching {
+                val d = window?.windowManager?.defaultDisplay
+                MpvDebug.log(
+                    "[disp] refresh=${d?.refreshRate} decor=${window?.decorView?.width}x${window?.decorView?.height}" +
+                        " surfGen=$surfGen sinceCreate=${android.os.SystemClock.uptimeMillis() - lastSurfCreateAt}ms" +
+                        " fmt=${window?.attributes?.format} flags=${window?.attributes?.flags}"
+                )
+            }
         }
     }
 
@@ -2147,7 +2180,9 @@ class PlayActivity : Activity() {
         }
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
         if (MpvDebug.experiment != 1) findViewById<View>(target)?.requestFocus()
-        setControlNextFocus()
+        // nextFocus 链只影响**后续**方向键，不影响刚才这次 requestFocus，
+        // 所以推到下一帧再算，别压在呼条那一帧上（17 个按钮 × 2 个属性）。
+        uiHandler.post { runCatching { setControlNextFocus() } }
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null} focus=$focusId")
@@ -2494,10 +2529,15 @@ class PlayActivity : Activity() {
      */
     private fun bindTimeBarScrub() {
         val tb = findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar) ?: return
+        // ★参数错在这里：DefaultTimeBar 的 keyTimeIncrement 默认是 C.TIME_UNSET，
+        //   此时它按「总时长 / 20」算一步 —— 45 分钟的片子每按一次左右就跳 136 秒，
+        //   现场日志 target=137554 / 1227811 就是这个（137554 ≈ 2725040/20）。
+        //   显式给 10s，和我们的方向键步长一致；长按连发就按 10s 一档叠加。
+        tb.setKeyTimeIncrement(10_000L)
+        tb.setKeyCountIncrement(1)
         tb.addListener(object : androidx.media3.ui.TimeBar.OnScrubListener {
             override fun onScrubStart(timeBar: androidx.media3.ui.TimeBar, position: Long) {
                 seekingByKey = true
-                uiHandler.removeCallbacks(commitSeek)
                 uiHandler.removeCallbacks(hideSeekCenterRun)
                 showJumpCenter(position)
             }
@@ -2529,7 +2569,26 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
     }
 
-    /** 当前累加对应的目标位置（与 commitSeek 同一套算法，避免两处算两次） */
+    /** 媒体键（播放/快进/快退）走的一次性跳：只跳一档，不参与方向键的累加状态机 */
+    private fun mediaSeekStep(dir: Long) {
+        val dur = durNow()
+        var target = (currentPosMs() + dir * SEEK_STEP_MS).coerceAtLeast(0L)
+        if (dur > 0L) target = target.coerceAtMost(dur)
+        MpvDebug.log("[key] 媒体键 seek dir=$dir → target=${target}ms dur=${dur}ms")
+        if (!contentReady()) {
+            pendingJumpMs = target
+            showJumpCenter(target)
+            return
+        }
+        seekBaseMs = currentPosMs()
+        seekAccumMs = dir * SEEK_STEP_MS
+        showSeekCenter(seekAccumMs)
+        session.seekTo(target)
+        uiHandler.removeCallbacks(hideSeekCenterRun)
+        uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+    }
+
+    /** 当前累加对应的目标位置（handleSeekKey 每次步进都用它算目标） */
     private fun seekTargetNow(): Long {
         val dur = durNow()
         var t = (seekBaseMs + seekAccumMs).coerceAtLeast(0L)
@@ -2558,67 +2617,30 @@ class PlayActivity : Activity() {
                 lastSeekRepeatAt = nowTick
                 seekAccumMs += dir * SEEK_STEP_MS
                 showSeekCenter(seekAccumMs)
-                // ★轻按一下就跳：不再等 400ms 空闲或 ACTION_UP。
-                //   以前"按一下 → 提示闪一下 → 400ms 后才跳"，观感就是"什么都没发生"。
-                if (kotlin.math.abs(seekAccumMs) == SEEK_STEP_MS) {
-                    session.seekTo(seekTargetNow())
-                    uiHandler.removeCallbacks(hideSeekCenterRun)
-                    uiHandler.postDelayed(hideSeekCenterRun, 1_200)
-                }
+                // ★每一档步进就真跳一次。
+                //   旧实现是「首下跳一次 + 400ms 后 commitSeek 再跳同一个点 + 抬手 250ms 再跳一次」，
+                //   一次轻按会连续下发 2~3 次 seekTo：EXO 反复重进 BUFFERING、mpv 反复重解码，
+                //   现场 `base=4031 delta=30000 → target=34031 from=14611` 里 from 只到 14.6s，
+                //   就是几次 seek 互相打断的结果。这是叠补丁叠出来的错误优化，现在只跳一次。
+                session.seekTo(seekTargetNow())
+                uiHandler.removeCallbacks(hideSeekCenterRun)
+                uiHandler.postDelayed(hideSeekCenterRun, 1_200)
             }
-            uiHandler.removeCallbacks(commitSeek)
-            uiHandler.postDelayed(commitSeek, SEEK_COMMIT_IDLE_MS)
         } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
             seekingByKey = false
             lastSeekRepeatAt = 0L
-            uiHandler.removeCallbacks(commitSeek)
-            uiHandler.postDelayed(commitSeek, 250)
+            // 抬手只做收尾：提示再停留 1.2s，不再补第二次 seek
+            uiHandler.removeCallbacks(hideSeekCenterRun)
+            uiHandler.postDelayed(hideSeekCenterRun, 1_200)
         }
     }
 
-    private val commitSeek = Runnable {
-        val base = seekBaseMs
-        val delta = seekAccumMs
-        seekAccumMs = 0L
-        if (delta == 0L) { hidePlayCenter(); return@Runnable }
-        val dur = durNow()
-        var target = (base + delta).coerceAtLeast(0L)
-        if (dur > 0) target = target.coerceAtMost(dur)
-        // ★媒体项一旦 attach，seekTo 就是排队执行，不需要"就绪"才下发。
-        //   以前这里判"没就绪就只记 pendingJumpMs"，而 EXO 的 pendingJumpMs 还带着
-        //   "起播时先把 pendingSeek 压成 0" 的副作用 → 按一下快进就变成"从片头开始播"。
-        //   现在只对 mpv（文件还没 loadfile）保留补跳，EXO 一律直接 seekTo。
-        val attached = if (isMpvMode()) mpvLoaded
-        else runCatching { (player?.mediaItemCount ?: 0) > 0 }.getOrDefault(false)
-        val fromPos = currentPosMs()
-        MpvDebug.log("[key] seek 提交 base=${base}ms delta=${delta}ms → target=${target}ms " +
-            "dur=${dur}ms from=${fromPos}ms ready=${contentReady()} mpv=${isMpvMode()}")
-        // ★统一走会话：EXO 的 seekTo 是排队执行，不需要"就绪"；mpv 这里同理。
-        //   起播前按快进的补跳只剩 mpv 一处（文件还没 loadfile 时记一次，onLoaded 消费）。
-        if (isMpvMode() && !mpvLoaded) {
-            mpvSeekAfterLoad = target
-        } else {
-            session.seekTo(target)
-        }
-        mpvPos = target
-        // 对齐原版 onSeekTo：跳完立刻收起居中提示并恢复播放（原版在 onSeekTo 里调了 onPlay()，
-        // onPlay 里做的是 addFlags(KEEP_SCREEN_ON) + play() + hideCenter()）。
-        // ★跳完不再立刻收提示：停留 1.2s，轻按也看得见
-        uiHandler.removeCallbacks(hideSeekCenterRun)
-        uiHandler.postDelayed(hideSeekCenterRun, 1_200)
-        if (!contentReady()) {
-            // 起播前按快进：文件还没加载，定位已经记进 pendingJumpMs / mpvSeekAfterLoad。
-            // 这时**不能**顺手 resume —— 会把用户刚按下的暂停冲掉（表现为「暂停没反应」）。
-            // 原版 onSeekTo 里也确实会 onPlay，但那是在已经起播的前提下。
-            return@Runnable
-        }
-        if (isMpvMode()) {
-            if (mpv?.isPausedActual() ?: false) mpv?.resume()
-        } else {
-            runCatching { player?.playWhenReady = true }
-        }
-        setKeepScreenOn(true)
-    }
+    /**
+     * ★已删除 commitSeek：它做的是两件错事——
+     *   1) 再下发一次同一个 target 的 seekTo（与 handleSeekKey 里的立即跳重复）；
+     *   2) `player.playWhenReady = true` —— 暂停中按快进会被强行播起来。
+     *      原版 onSeekEnd:6238-6241 只有 `if (seekTo(time)) hideCenter();`，从不 resume。
+     */
 
     /** 时间栏刷新（原版 view_control_seek 的 position / timeBar / duration） */
     private fun startProgressTicker() {
@@ -2703,7 +2725,9 @@ class PlayActivity : Activity() {
         // OK 的按下也记一行（上面只记了抬起）：用来分辨「键根本没到 Activity」与「到了但没效果」
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
             MpvDebug.log(
-                "[key] 按下 kc=${event.keyCode} ready=${contentReady()} bar=${barShown()} " +
+                "[key] 按下 kc=${event.keyCode} winFocus=${runCatching { window.decorView.hasWindowFocus() }.getOrElse { null }}" +
+                    " ready=${contentReady()} bar=${barShown()} loading=${preStart()} " +
+                    "barVis=${controlBar?.visibility} barAlpha=${controlBar?.alpha} " +
                     "focus=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName ?: "null"}) " +
                     "mpv=${mpv != null} exo=${player != null}"
             )
@@ -2738,20 +2762,16 @@ class PlayActivity : Activity() {
                 }
                 return true
             }
-            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_NEXT -> {
-                handleSeekKey(1L, event)
+            // ★只接 MEDIA_FAST_FORWARD / MEDIA_REWIND，且**只在抬起时**触发一次 ——
+            //   原版 KeyUtil.isMediaFastForward(:59) / isMediaRewind(:55) 都带 isActionUp。
+            //   之前把 MEDIA_NEXT / MEDIA_PREVIOUS 也绑成快进快退，等于把原版的
+            //   「下一集/上一集」（KeyUtil:20/24 里它们是 ↑↓ 的同义键）整个吃掉。
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                if (event.action == KeyEvent.ACTION_UP) mediaSeekStep(1L)
                 return true
             }
-            KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
-                handleSeekKey(-1L, event)
-                return true
-            }
-            KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_MEDIA_EJECT -> {
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    MpvDebug.log("[key] 媒体键 kc=${event.keyCode} → 暂停")
-                    session.pause()
-                    applyPauseUi(true)
-                }
+            KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                if (event.action == KeyEvent.ACTION_UP) mediaSeekStep(-1L)
                 return true
             }
         }
@@ -2815,6 +2835,17 @@ class PlayActivity : Activity() {
             uiHandler.postDelayed(autoHide, 5000)
             // 原版 CustomUpDownView：片头/片尾聚焦时 ↑+1s、↓-1s
             val fid = currentFocus?.id
+            // ★条显示、但焦点怎么都拉不进条里时，方向键交给焦点系统 = "按了没反应"。
+            //   现场表现正是「只有 OK 有反应、←→ 全废」。这种情况按播放语义处理。
+            if ((isLeftKey(event) || isRightKey(event)) &&
+                currentFocus?.let { !isInside(controlBar!!, it) } != false
+            ) {
+                if (!ensureBarFocus()) {
+                    MpvDebug.log("[key] 条显示但焦点拉不回条内 → 方向键退化为快进/快退 kc=${event.keyCode}")
+                    handleSeekKey(if (isLeftKey(event)) -1L else 1L, event)
+                    return true
+                }
+            }
             if ((fid == R.id.btnOpening || fid == R.id.btnEnding) && (isUpKey(event) || isDownKey(event))) {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     val add = isUpKey(event)
@@ -2844,6 +2875,9 @@ class PlayActivity : Activity() {
                     return true
                 }
             }
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                MpvDebug.log("[key] 交焦点系统 kc=${event.keyCode} focus=${currentFocus?.id}")
+            }
             return super.dispatchKeyEvent(event)
         }
 
@@ -2857,12 +2891,15 @@ class PlayActivity : Activity() {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
                     if (loading) {
-                        MpvDebug.log("[key] 起播前 OK → 当暂停处理 bar=${barShown()}")
-                        // 起播前也必须有可见反馈：否则"进页面按 OK 没反应"会被当成功能全废。
-                        // 复用原版的居中提示（widget.center），不新增任何 UI。
+                        // ★起播前按 OK：内核还是空的，toggle 一定是空操作。
+                        //   这里只把"起播后不要自动播"记下来（playUrl 里 wantPlay 读它），
+                        //   并复用原版居中提示给可见反馈。
+                        pendingPauseIntent = true
+                        MpvDebug.log("[key] 起播前 OK → 记 pendingPauseIntent bar=${barShown()}")
                         showPlayCenter()
+                    } else {
+                        togglePlayPause()
                     }
-                    togglePlayPause()
                 }
                 return true
             }
@@ -3034,7 +3071,6 @@ class PlayActivity : Activity() {
      */
     override fun onPause() {
         seekingByKey = false
-        uiHandler.removeCallbacks(commitSeek)
         hidePlayCenter()
         super.onPause()
         // 先置后台标记再暂停：mpv 在「后台 + vo 已空」这段时间会短暂掉进 idle-active=true，
