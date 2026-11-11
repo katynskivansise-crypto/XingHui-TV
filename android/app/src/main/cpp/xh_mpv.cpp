@@ -133,6 +133,17 @@ struct Context {
 
     std::atomic<bool> alive{true};
 
+    /* ★渲染线程与窗口线程的互斥。
+       mpv 的 update 回调在 mpv 自己的线程上触发，回调进 Java 的 onFrame() 又会同步回调
+       nativeRender() —— 也就是说 eglMakeCurrent / mpv_render_context_render / eglSwapBuffers
+       全都跑在 mpv 线程上。而窗口一变（菜单键、焦点变化、沉浸式重排）UI 线程会走
+       nativeDetach()：销毁 render context + eglDestroySurface。
+       两个线程没有任何同步 → 正 swap 的那一帧拿到已销毁的 EGLSurface/context = 原生 SIGSEGV，
+       进程直接被杀（Java 层看不到异常，crashTail 也是空）—— 这就是"按菜单键闪退回桌面"。
+       用 recursive_mutex：render 内部 report_swap 还会再触发 update 回调 → onFrame → nativeRender，
+       同一线程重入，普通 mutex 会自锁死。 */
+    std::recursive_mutex glLock;
+
     JavaVM *vm = nullptr;
     jobject listener = nullptr;          // 全局引用，update 回调时调它的 onFrame()
     jmethodID onFrame = nullptr;
@@ -192,6 +203,7 @@ static bool egl_init(Context *c) {
 }
 
 static bool bind_window(Context *c, ANativeWindow *win, int w, int h) {
+    std::lock_guard<std::recursive_mutex> guard(c->glLock);
     if (!egl_init(c)) return false;
     if (c->surface != EGL_NO_SURFACE) {
         eglMakeCurrent(c->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -352,7 +364,9 @@ Java_com_xinghui_tv_mpv_XhMpv_nativeAttach(JNIEnv *env, jclass, jlong th, jobjec
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_xinghui_tv_mpv_XhMpv_nativeRender(JNIEnv *, jclass, jlong th, jint w, jint h) {
     Context *c = (Context *) th;
-    if (!c || !c->render || c->surface == EGL_NO_SURFACE) return JNI_FALSE;
+    if (!c) return JNI_FALSE;
+    std::lock_guard<std::recursive_mutex> guard(c->glLock);
+    if (!c->alive.load() || !c->render || c->surface == EGL_NO_SURFACE) return JNI_FALSE;
     if (w > 0 && h > 0 && (w != c->width || h != c->height)) {
         c->width = w;
         c->height = h;
@@ -383,6 +397,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_xinghui_tv_mpv_XhMpv_nativeDetach(JNIEnv *, jclass, jlong th) {
     Context *c = (Context *) th;
     if (!c) return;
+    std::lock_guard<std::recursive_mutex> guard(c->glLock);
     if (c->render) {
         p_render_set_update_cb(c->render, nullptr, nullptr);
         p_render_free(c->render);

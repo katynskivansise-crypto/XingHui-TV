@@ -120,7 +120,6 @@ class PlayActivity : Activity() {
 
         playerView = findViewById<PlayerView>(R.id.playView)
         enableKeepContent()
-        installBlackProbe()
         /**
          * keep_content_on_player_reset 不在这里设，保持 media3 默认（false），与点播场景一致。
          *
@@ -187,13 +186,16 @@ class PlayActivity : Activity() {
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
         playerView?.post { setupSharedSurface() }
+        uiHandler.postDelayed(stallTick, 100)
         // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
         // 用 EXO 时完全看不见 surface 有没有被重建。画面黑一下如果是 surface 重建，
         // 这一行必然出现；如果不出现，黑就与 surface 无关，方向直接分叉。
         (playerView?.videoSurfaceView as? android.view.SurfaceView)?.holder?.addCallback(object :
             android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
-                MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} kernel=${if (isMpvMode()) "mpv" else "exo"}")
+                surfGen++
+                lastSurfCreateAt = android.os.SystemClock.uptimeMillis()
+                MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} gen=$surfGen kernel=${if (isMpvMode()) "mpv" else "exo"}")
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
                 MpvDebug.log("[sv2] changed ${w}x$hh fmt=$f kernel=${if (isMpvMode()) "mpv" else "exo"}")
@@ -1324,30 +1326,6 @@ class PlayActivity : Activity() {
      * 我们切内核时 `playerView.player = null` 正好命中“tracks 为空”，于是必然盖一块黑上去，
      * 直到 EXO 下一次 onRenderedFirstFrame 才打开。打开这个开关后，清空/替换播放器不关快门。
      */
-    /**
-     * 【临时诊断，测完必须删】左上角 60×60 洋红方块。
-     *
-     * 它画在**应用窗口**里（视频层之外，纵向落在上下留边的黑条区域），和 SurfaceView 没有任何关系。
-     * 于是按菜单键黑屏那一刻：
-     *   方块还在 → 应用窗口这一层正常合成，黑的是**视频层**（SurfaceView 拿到的是空/黑缓冲）
-     *   方块也没了 → 整个应用窗口这一层被清掉/被盖住，跟视频层无关
-     * 这一条能一次性判掉一半的候选，不用再靠猜。
-     */
-    private fun installBlackProbe() {
-        runCatching {
-            val content = findViewById<android.view.ViewGroup>(android.R.id.content) ?: return@runCatching
-            val root = content.getChildAt(0) as? android.view.ViewGroup ?: return@runCatching
-            val v = View(this)
-            v.setBackgroundColor(0xFFFF00FF.toInt())
-            val lp = android.widget.FrameLayout.LayoutParams(60, 60)
-            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
-            lp.leftMargin = 6
-            lp.topMargin = 6
-            root.addView(v, lp)
-            MpvDebug.log("[probe] 洋红方块已加入（左上角 60x60，判黑屏时窗口层是否还在合成）")
-        }
-    }
-
     private fun enableKeepContent() {
         runCatching {
             playerView?.setKeepContentOnPlayerReset(true)
@@ -1392,7 +1370,17 @@ class PlayActivity : Activity() {
     /** 内容就绪（可以真正暂停/定位）的判断：EXO 看有没有时长，mpv 看文件有没有加载完 */
     private fun contentReady(): Boolean =
         if (isMpvMode()) mpvLoaded && mpv != null
-        else runCatching { (player?.duration ?: 0L) > 0L }.getOrDefault(false)
+        else runCatching {
+            // ★不能用 duration > 0 当就绪判据。
+            //   m3u8 / 切片源的 duration 在 media3 里可能整场都是 C.TIME_UNSET
+            //   （= Long.MIN_VALUE），`> 0` 永远不成立 → 一直判成"没就绪" →
+            //   togglePlayPause 的 EXO 分支被 `if (p != null && ready)` 挡掉，
+            //   只记意图不下发 pause()/play()，表现就是"按 OK 暂停无效"，
+            //   而且快进快退也会被记成"起播前意图"，要等起播后才补跳。
+            //   就绪的正确判据是媒体项已 attach 且播放器离开了 IDLE（BUFFERING / READY 都算）。
+            val p = player ?: return@runCatching false
+            p.mediaItemCount > 0 && p.playbackState != androidx.media3.common.Player.STATE_IDLE
+        }.getOrDefault(false)
 
     /**
      * 建（或复用）mpv 原生实例。
@@ -1930,31 +1918,34 @@ class PlayActivity : Activity() {
      */
     private fun applyWindowShapeExperiment() {
         val exp = MpvDebug.experiment
-        // ---- 档位 6：让「视频那块矩形」上一个像素都不画 ----
-        // 判黑结论（真机）：菜单键按下的那约 1 秒里，左上角洋红方块还在 ——
-        // 说明应用窗口这一层画得好好的，黑的是它自己画上去的东西；根布局 bg=ColorDrawable opaque=true，
-        // 而 SurfaceView 靠窗口挖洞露出画面，挖洞这一拍失效 → 整屏被我们的不透明黑盖住。
-        // 所以根治不是"去掉窗口背景"，而是"视频矩形上窗口不画任何像素"：
-        //   1) 窗口 surface 改成 TRANSLUCENT（applyWindowShapeExperiment 里 winFmt 会从 -1 变 -3）
-        //   2) 根布局背景置透明
-        //   3) 快门底色置透明（media3 的内部快门还是黑的）
-        // 窗口透明后 SurfaceView 位于窗口层之下，透明像素直接透出视频层 —— 不再依赖挖洞，
-        // 挖洞对不对都无所谓了。留边处的黑由系统背景（T1 无壁纸=黑）提供，视觉不变。
-        if (exp == 6) {
-            runCatching { window.setBackgroundDrawable(null) }
-            runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
-            runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-            runCatching { playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT) }
-            MpvDebug.log("[exp6] 窗口透明格式 + 根布局/快门均透明（视频矩形上不再画像素）")
+        /**
+         * 窗口形态现在分三档语义（其余档位只管控制条/取证）：
+         *   默认（0/1/2/5/6）→ 「视频矩形上一个像素都不画」：窗口 TRANSLUCENT + 根布局透明 + 快门透明
+         *   3/4          → 老实验：只清窗口背景 / 再清根布局（外观近似，但仍不透明窗口）
+         *   7            → 回退到旧结构（不透明黑窗口 + 黑根布局），只用来证明新结构是不是真修好了
+         *
+         * 判黑结论（真机）：菜单键按下那约 1 秒里，左上角洋红方块还在 —— 应用窗口这一层画得好好的，
+         * 黑是它自己画上去的不透明黑；SurfaceView 靠窗口挖洞露画面，挖洞那一拍失效就整屏黑。
+         * 根治 = 窗口透明后 SurfaceView 位于窗口层之下，透明像素直接透出视频层，挖洞对不对都无所谓。
+         * 留边处的黑由系统背景（T1 无壁纸=黑）提供，视觉不变。
+         */
+        runCatching { window.setBackgroundDrawable(null) }
+        if (exp == 7) {
+            runCatching { window.setFormat(android.graphics.PixelFormat.OPAQUE) }
+            runCatching { rootView?.setBackgroundColor(android.graphics.Color.BLACK) }
+            runCatching { playerView?.setShutterBackgroundColor(android.graphics.Color.BLACK) }
+            MpvDebug.log("[exp7] 回退旧结构：不透明黑窗口 + 黑根布局")
             return
         }
-        if (exp != 3 && exp != 4) return
-        runCatching { window.setBackgroundDrawable(null) }
-        if (exp == 4) {
-            val content = findViewById<View>(android.R.id.content) as? android.view.ViewGroup
-            runCatching { content?.getChildAt(0)?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+        if (exp == 3 || exp == 4) {
+            if (exp == 4) runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+            MpvDebug.log("[exp$exp] 仅清背景（老实验档）")
+            return
         }
-        MpvDebug.log("[exp$exp] 窗口背景已置空" + (if (exp == 4) "，根布局黑底也去掉" else "") + "（原版窗口形态）")
+        runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
+        runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+        runCatching { playerView?.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT) }
+        MpvDebug.log("[exp$exp] 透明结构：窗口 TRANSLUCENT + 根布局/快门透明")
     }
 
     private fun attachExoSurfaceProbe() {
@@ -1994,8 +1985,15 @@ class PlayActivity : Activity() {
         val toEpisodes = Settings(this).fullscreenMenuKey == 1
         // 调试日志（走 /debug 页面，不弹任何提示）：黑屏到底是「surface 没了」还是「内核假暂停」全靠这行区分
         MpvDebug.log("[menu] " + mpvDebugLine())
+        runCatching {
+            val d = window?.windowManager?.defaultDisplay
+            MpvDebug.log(
+                "[disp] refresh=${d?.refreshRate} decor=${window?.decorView?.width}x${window?.decorView?.height}" +
+                    " surfGen=$surfGen sinceCreate=${android.os.SystemClock.uptimeMillis() - lastSurfCreateAt}ms" +
+                    " fmt=${window?.attributes?.format} flags=${window?.attributes?.flags}"
+            )
+        }
         // EXO 模式下再补一串按时间采样的状态，用来判定三秒黑到底属于哪一类
-        logExoMenuTrace()
         if (toEpisodes) {
             hideControl()
             openEpisodes()
@@ -2021,6 +2019,30 @@ class PlayActivity : Activity() {
      */
     /** 控制条上次的焦点落点（原版 mFocus2）；菜单呼出时恢复到它，避免每次都跳回"下一集" */
     private var lastBarFocusId: Int = 0
+
+    /* ★判黑取证：surface 代数 + UI 线程迟到检测。
+       「黑的那一下连洋红方块都不在」已经排除了"某个视图画黑"这条分支，
+       只剩两种可能，必须靠这两组数分开：
+         surfGen 变大  → 视频 surface 真的被销毁重建（合成器/显示管线跟着重配 → 整屏黑）
+         [stall] 迟到  → UI 线程被卡住（这一帧压根没提交，屏幕自然是上一层）
+       两者都不出现却还黑 → 显示管线自己切了，代码里改视图没用。 */
+    private var surfGen = 0
+    private var lastSurfCreateAt = 0L
+    private var stallLast = 0L
+
+    private val stallTick = object : Runnable {
+        override fun run() {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (stallLast != 0L) {
+                val late = now - stallLast - 100
+                if (late > 120) {
+                    MpvDebug.log("[stall] UI线程迟到 ${late}ms bar=${controlBar?.visibility} surfGen=$surfGen")
+                }
+            }
+            stallLast = now
+            uiHandler.postDelayed(this, 100)
+        }
+    }
 
     private fun showControl(focusId: Int = 0, withTitle: Boolean = false) {
         // 诊断档位 2：菜单键完全不呼出控制条。用来判断黑屏到底跟控制条有没有关系——
@@ -2050,7 +2072,6 @@ class PlayActivity : Activity() {
         //   真机仍闪退 —— 说明 mpv 内核按菜单键的崩溃点就在"窗口变化期间调 render API"本身。
         //   控制条并不覆盖视频矩形（它在留边/画面之上，由窗口层合成），根本不需要重贴视频帧；
         //   要恢复画面是在隐/显切换之后（onWindowFocusChanged 的 recoverRendering）再处理。
-        detachShutter("showControl")
         controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
@@ -2068,8 +2089,6 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null} focus=$focusId")
-        dumpPanelTree("show")
-        logRenderPulse("showControl")
         // 诊断：菜单按下瞬间 vs 800ms 后，播放器还在不在播。
         runCatching {
             val focusIdNow = currentFocus?.id
@@ -2113,9 +2132,7 @@ class PlayActivity : Activity() {
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.visibility = View.GONE
         // 同上：收条这一步也不碰 render API（菜单键的 DOWN/UP 常常成对触发呼/收，两次都在窗口变化期）
-        detachShutter("hideControl")
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
-        logRenderPulse("hideControl")
     }
 
     /**
@@ -2189,9 +2206,12 @@ class PlayActivity : Activity() {
         //   根本不需要我们锁死缓冲区。
         //   这里只做一件必要的事：把 Surface 的像素格式从默认 RGB_565（API25 默认）改成 8888，
         //   否则整条链路只有 16bit，色带明显，mpv 的 RGBA 帧也要被降位再上屏。
+        // ★不再 setFormat(RGBA_8888)。
+        //   改像素格式 = 向 SurfaceFlinger 申请换一套 buffer（buffer 队列重建），
+        //   在播放中去改等于动了画面层的拓扑；原版与官方 PlayerView 全程不碰它。
+        //   色带这一项先不计代价换稳定：真机验证黑屏消失后再决定要不要用别的办法拿 8888。
         runCatching {
-            sv.holder.setFormat(android.graphics.PixelFormat.RGBA_8888)
-            MpvDebug.log("[sv] surface 格式 = RGBA_8888（原默认 565）")
+            MpvDebug.log("[sv] 画面层沿用官方默认 PixelFormat（不再 setFormat）")
         }
     }
 
@@ -2438,7 +2458,9 @@ class PlayActivity : Activity() {
         val dur = durNow()
         var target = (base + delta).coerceAtLeast(0L)
         if (dur > 0) target = target.coerceAtMost(dur)
-        if (!contentReady()) {
+        val attached = if (isMpvMode()) mpvLoaded
+        else runCatching { (player?.mediaItemCount ?: 0) > 0 }.getOrDefault(false)
+        if (!attached) {
             // 起播前的定位：记下来，就绪后补跳（EXO 走 pendingJumpMs，mpv 走 mpvSeekAfterLoad）
             pendingJumpMs = target
             MpvDebug.log("[key] 起播前快进意图 → ${target}ms（就绪后补跳）")
@@ -2559,12 +2581,10 @@ class PlayActivity : Activity() {
         }
         // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
         // 那一瞬间开始方向键与 OK 就全落在根上，看起来就是"没反应"。
-        if (barShown()) ensureBarFocus()
         // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
         //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
         //   == 1 → onEpisodes()：弹选集并收起控制栏
         if (isMenuKeyCode(event.keyCode) && event.action == KeyEvent.ACTION_DOWN) {
-            armFlickSampler("menu")
         }
         if (isMenuKeyCode(event.keyCode)) {
             // 原版只认 ACTION_UP。这里 DOWN/UP 都接、400ms 内只算一次：
@@ -2935,6 +2955,7 @@ class PlayActivity : Activity() {
     }
 
     override fun onDestroy() {
+        uiHandler.removeCallbacks(stallTick)
         MpvDebug.snapshot = null
         uiHandler.removeCallbacks(mpvWatchdog)
         saveHandler.removeCallbacks(saveRunnable)
