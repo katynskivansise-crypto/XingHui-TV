@@ -1684,7 +1684,12 @@ class PlayActivity : Activity() {
         // 才 requestLayout），所以这条链路彻底不碰画面层的 frame。
         // 根布局黑底已经做过洋红对照实验：闪的仍是黑、洋红一次都没露出来，
         // 说明盖住画面的不是窗口这层底，只能是画面层自己在那一帧没有内容。
-        controlBar?.visibility = View.GONE
+        // ★初始态就设 INVISIBLE（不是 GONE）：GONE→VISIBLE 会让父容器重新 measure/layout，
+        //   那一次 layout 会把 playView 连同它内部的 SurfaceView 一起重新摆放，
+        //   ViewRootImpl 随之 relayoutWindow 并重算挖洞区域 —— 真机上"按菜单那一帧整屏黑"
+        //   就走这条链路。INVISIBLE→VISIBLE 只重绘、不触发布局，画面层不受影响。
+        controlBar?.visibility = View.INVISIBLE
+        findViewById<View>(R.id.playTitle)?.visibility = View.INVISIBLE
         findViewById<View>(R.id.btnEpisodes).setOnClickListener { openEpisodes() }
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
@@ -2306,7 +2311,9 @@ class PlayActivity : Activity() {
             MpvDebug.log("[exp8] 收条 alpha=0 vis=${controlBar?.visibility} 焦点=root")
             return
         }
-        if (controlBar?.visibility == View.GONE && findViewById<View>(R.id.playTitle)?.visibility == View.GONE) {
+        if (controlBar?.visibility == View.INVISIBLE &&
+            findViewById<View>(R.id.playTitle)?.visibility == View.INVISIBLE
+        ) {
             return
         }
         // ★收条只做一件事：置 GONE。与 5.6 hideControl(:3502) 逐字一致。
@@ -2323,17 +2330,21 @@ class PlayActivity : Activity() {
         //   —— 用户感受就是"按了没反应 / 得先按一次菜单才好"。
         //   以前这里刻意不碰焦点（照抄 5.6 只置 GONE），是因为 5.6 的按键语义不看焦点；
         //   我们的语义看焦点，所以这一步在我们这套结构里是必须的，不是多余动作。
-        if (isInsideBar(currentFocus)) {
+        val fromId = currentFocus?.id
+        val fromIn = isInsideBar(currentFocus)
+        if (fromIn) {
             rootView?.requestFocus()
+            // from 必须先在 requestFocus 之前取。之前这条日志取的是动作之后的值，
+            // 真机上永远显示"从=-1"，看着像"焦点自己从条上漂走了"，实际是插值取晚了。
             MpvDebug.log(
-                "[key] 收条前清焦点 从=${currentFocus?.id} inBar=${isInsideBar(currentFocus)}" +
+                "[key] 收条前清焦点 从=$fromId inBar=$fromIn" +
                     " lastBarFocus=$lastBarFocusId barVis=${controlBar?.visibility}" +
                     " barAlpha=${controlBar?.alpha} → root ok=${currentFocus === rootView}"
             )
         }
-        controlBar?.visibility = View.GONE
+        controlBar?.visibility = View.INVISIBLE
         controlBar?.alpha = 1f
-        findViewById<View>(R.id.playTitle)?.visibility = View.GONE
+        findViewById<View>(R.id.playTitle)?.visibility = View.INVISIBLE
         // 同上：收条这一步也不碰 render API（菜单键的 DOWN/UP 常常成对触发呼/收，两次都在窗口变化期）
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
     }
