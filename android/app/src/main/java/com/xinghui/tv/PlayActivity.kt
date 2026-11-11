@@ -856,7 +856,10 @@ class PlayActivity : Activity() {
     private val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val saveRunnable = object : Runnable {
         override fun run() {
-            savePosition()
+            // 这是每 15 秒的周期落盘，不是返回键。以前它和退场共用 "[back] 保存" 这个标签，
+            // 真机日志里就会连着出现好几条 "[back] 保存"却没有任何 "[key] back 退出播放页"，
+            // 看起来像"返回键被按了三次还没退出"。标签必须分开。
+            savePosition(reason = "周期")
             saveHandler.postDelayed(this, 15_000)
         }
     }
@@ -909,7 +912,7 @@ class PlayActivity : Activity() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) scheduleSave() else savePosition()
+                if (isPlaying) scheduleSave() else savePosition(reason = "暂停")
             }
         })
     }
@@ -929,7 +932,7 @@ class PlayActivity : Activity() {
      *   于是写入失败也会被标记成"已保存"，之后同一位置永远不再重试，
      *   详情页小窗读不到位置就只能从片头开始。这就是「按过菜单再返回，小窗回片头」的数据侧原因。
      */
-    private fun savePosition(force: Boolean = false) {
+    private fun savePosition(force: Boolean = false, reason: String = "自动") {
         // 退了就不再写：返回键那一刻已经 force 保存过一次（位置最准），
         // 之后 onPause / onDestroy 还会各调一次，而 pause 是异步的 —— 位置还在往后走几毫秒，
         // 于是同一部片会被"最后写一次"覆盖三遍（真机日志里 26647 → 26686 → 26691）。
@@ -942,7 +945,7 @@ class PlayActivity : Activity() {
         if (dur > 0 && pos >= dur - 10_000) return
         if (Settings(this).isIncognito) return
         if (historyKey.isBlank()) {
-            MpvDebug.log("[back] 保存跳过：historyKey 为空 pos=$pos")
+            MpvDebug.log("[hist] 保存[$reason]跳过：historyKey 为空 pos=$pos")
             return
         }
         // 行不存在就先建行（addHistory 会保留旧 position），再写位置。
@@ -951,7 +954,7 @@ class PlayActivity : Activity() {
         HistoryStore(this).setPosition(historyKey, epUrl, pos)
         lastSavedPos = pos
         MpvDebug.log(
-            "[back] 保存 pos=$pos key=${historyKey.take(24)} " +
+            "[hist] 保存[$reason] pos=$pos key=${historyKey.take(24)} " +
                 HistoryStore(this).probe(historyKey, epUrl)
         )
     }
@@ -1638,8 +1641,9 @@ class PlayActivity : Activity() {
 
     private fun barShown(): Boolean {
         val b = controlBar ?: return false
-        if (MpvDebug.experiment == 8) return b.visibility == View.VISIBLE && b.alpha > 0.5f
-        return b.visibility == View.VISIBLE
+        // 常驻 VISIBLE 之后，"显示中"只能按 alpha 判（同一个函数在 showControl/hideControl/按键
+        // 三处都用，判据必须唯一，否则会出现"看着显示着、代码认为已隐藏"这种劈叉）
+        return b.visibility == View.VISIBLE && b.alpha > 0.5f
     }
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
@@ -1664,32 +1668,44 @@ class PlayActivity : Activity() {
         //   a) GONE↔VISIBLE 触发的 requestLayout / 窗口挖洞区域重算
         //   b) 窗口里多了一个带 alpha 的图层（HWC 图层数变化 → GPU 合成回退）
         // 本档位只消除 a，b 仍然存在。若 8 不黑而 0 黑，a 就是根因；若 8 也黑，就是 b。
-        if (MpvDebug.experiment == 8) {
-            controlBar?.visibility = View.VISIBLE
-            controlBar?.alpha = 0f
-            runCatching {
-                (controlBar as? android.view.ViewGroup)?.descendantFocusability =
-                    android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            }
-            MpvDebug.log("[exp8] 控制条常驻 VISIBLE + alpha=0（不改可见性，不产生 relayout）")
+        // ★控制条从页面创建起就常驻 VISIBLE，只用 alpha 显隐（原来的诊断档位 8 现在就是默认行为）。
+        //
+        // 现场定性（21:59 / 22:00 两轮）：「只有第一次按菜单键黑，之后一直正常；退出重进又黑」。
+        // 这说明黑的代价是**每个播放页生命周期的"第一次"**付的，不是每次呼条都付。
+        // 第一次到底在付什么：
+        //   a) 硬件加速下 INVISIBLE / GONE 的子视图不参与 dispatchDraw，整棵控制条
+        //      （17 个按钮 + 进度条 + 文本）的 display list 从未被构建过，第一次 VISIBLE 要一次性建完；
+        //   b) 窗口层的"有绘制内容区域"第一次从"只有画面层的洞"变成"洞 + 整条控制条"，
+        //      ViewRootImpl 要重算挖洞区域并 setTransparentRegionHint，那一帧该窗口层被跳过 = 黑。
+        // 常驻 VISIBLE + alpha=0 让这两件事都在**页面创建、画面还没出来**的时候一次性付掉：
+        // 子视图照常构建 display list，挖洞区域从第一帧起就包含整条，之后只剩改 alpha（纯重绘）。
+        // ★这不是"透明显示一次再收起"那种预热 —— 那种预热要收尾，收尾会把用户那次呼出的条收掉，
+        //   之前踩过（要按两次）。这里从头到尾只有一种可见性状态，没有任何收尾动作。
+        controlBar?.visibility = View.VISIBLE
+        controlBar?.alpha = 0f
+        runCatching {
+            (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+                android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
-        // 与 5.6 showControl/hideControl 完全一致：显隐只用 visibility（VISIBLE / GONE），
-        // 收条时**不做任何焦点动作**（既不 requestFocus 也不 clearFocus）。
-        // 5.6 hideControl(:3502) 全文只有 setVisibility(GONE) 一句，没有 requestFocus ——
-        // 焦点是被系统在同一次 traversal 里自动交还给父容器的，不额外产生一轮重绘。
-        // ★隐藏态用 INVISIBLE，不用 GONE：
-        // GONE→VISIBLE 会强制父容器走一次 measure/layout，那次 layout 会把兄弟 playView 连同
-        // 它内部的 SurfaceView 一起重新摆放一遍 —— 真机上正好就是"呼出菜单那一瞬间整屏黑"。
+        findViewById<View>(R.id.playTitle)?.alpha = 0f
+        MpvDebug.log("[bar] 控制条常驻 VISIBLE + alpha=0（首次绘制与挖洞区域在创建时一次性付掉）")
+        // ★nextFocus 链必须在页面创建时就建好。
+        //   原来它只在 showControl() 里 post 一次，也就是说"第一次按菜单之前"，
+        //   actionLayout 里 17 个按钮的 nextFocusLeftId/nextFocusRightId 全是 0 ——
+        //   焦点停在根 FrameLayout 上按方向键，系统做 focusSearch 找不到任何目标，
+        //   这一下按键就被当"无效输入"丢掉（不是我们没收到，是焦点导航没有落点）。
+        //   按过一次菜单后链建好了，之后一直正常，退出重进又从零开始 ——
+        //   与现场「第一次按了菜单后面一直都可以用，除非退出重新进入」逐字吻合。
+        runCatching { setControlNextFocus() }
+        // 显隐语义与 5.6 的差别（这是本次架构级改动，不要再照抄 5.6 的 GONE）：
+        //   5.6 用 VISIBLE/GONE，因为它没有把 SurfaceView 放进同层布局里被反复重排；
+        //   我们用一块自有 SurfaceView 做画面层，GONE↔VISIBLE 会触发 measure/layout，
+        //   连带把 playView 与它的 SurfaceView 重新摆放 → 挖洞区域重算 → 那一帧整窗被跳过 = 黑。
+        //   现在统一用「常驻 VISIBLE + alpha」：任何一次显隐都只改绘制，不碰布局。
         // INVISIBLE↔VISIBLE 只改绘制、不触发布局（View.setFlags 里只有 GONE 参与可见性位变化
         // 才 requestLayout），所以这条链路彻底不碰画面层的 frame。
         // 根布局黑底已经做过洋红对照实验：闪的仍是黑、洋红一次都没露出来，
         // 说明盖住画面的不是窗口这层底，只能是画面层自己在那一帧没有内容。
-        // ★初始态就设 INVISIBLE（不是 GONE）：GONE→VISIBLE 会让父容器重新 measure/layout，
-        //   那一次 layout 会把 playView 连同它内部的 SurfaceView 一起重新摆放，
-        //   ViewRootImpl 随之 relayoutWindow 并重算挖洞区域 —— 真机上"按菜单那一帧整屏黑"
-        //   就走这条链路。INVISIBLE→VISIBLE 只重绘、不触发布局，画面层不受影响。
-        controlBar?.visibility = View.INVISIBLE
-        findViewById<View>(R.id.playTitle)?.visibility = View.INVISIBLE
         findViewById<View>(R.id.btnEpisodes).setOnClickListener { openEpisodes() }
         findViewById<View>(R.id.btnReset).setOnClickListener { resetCurrentEpisode() }
         findViewById<View>(R.id.btnPlayer).setOnClickListener { openPlayerDialog() }
@@ -2224,12 +2240,15 @@ class PlayActivity : Activity() {
             MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
             return
         }
-        if (MpvDebug.experiment == 8) {
-            controlBar?.alpha = 1f
-            runCatching {
-                (controlBar as? android.view.ViewGroup)?.descendantFocusability =
-                    android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
-            }
+        // ★wasShown 必须在这里取：常驻 VISIBLE 之后 barShown() 只看 alpha，
+        //   下面马上就把 alpha 抬到 1，若在那之后再判就恒为"已显示"，每次呼条都被幂等分支吞掉。
+        val wasShown = barShown()
+        // 常驻 VISIBLE 下"呼出" = 抬 alpha + 放开焦点进入（否则条内控件不接收焦点）
+        controlBar?.alpha = 1f
+        findViewById<View>(R.id.playTitle)?.alpha = 1f
+        runCatching {
+            (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+                android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
         }
         // 幂等 + 只补差集：真机日志里一次菜单键 / 一次起播能连进来 3 次 showControl
         // （菜单键一次、起播一次带标题、焦点兜底一次），打出 draws=4~5 layouts=3 —— 
@@ -2237,8 +2256,8 @@ class PlayActivity : Activity() {
         //   a) withTitle=true 时把标题透明度抬起来（只重绘，不重排）
         //   b) 指定了 focusId 时把焦点挪过去（焦点变化不触发布局）
         // 其余一律跳过，绝不重复 measure/layout。
-        if (controlBar?.visibility == View.VISIBLE) {
-            if (withTitle) findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = 1f }
+        if (wasShown) {
+            if (withTitle) findViewById<View>(R.id.playTitle)?.let { it.alpha = 1f }
             if (focusId != 0) runCatching { findViewById<View>(focusId)?.requestFocus() }
             uiHandler.removeCallbacks(autoHide)
             uiHandler.postDelayed(autoHide, 5000)
@@ -2252,9 +2271,7 @@ class PlayActivity : Activity() {
         //   真机仍闪退 —— 说明 mpv 内核按菜单键的崩溃点就在"窗口变化期间调 render API"本身。
         //   控制条并不覆盖视频矩形（它在留边/画面之上，由窗口层合成），根本不需要重贴视频帧；
         //   要恢复画面是在隐/显切换之后（onWindowFocusChanged 的 recoverRendering）再处理。
-        controlBar?.visibility = View.VISIBLE
-        controlBar?.alpha = 1f
-        findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = if (withTitle) 1f else 0f }
+        findViewById<View>(R.id.playTitle)?.alpha = if (withTitle) 1f else 0f
         // 焦点落点：原版 getFocus2() —— 显式指定就用指定的；否则沿用上次；
         // 上次停在片头/片尾时按原版规则换成"下一集"。
         val target = when {
@@ -2299,23 +2316,9 @@ class PlayActivity : Activity() {
         // 每次 GONE 都给 root 记一次 requestLayout，= 多出 3 轮全树 traversal，
         // 每一轮父窗口重画黑底、SurfaceView 的洞晚一帧合成 = 白闪一格。
         // 5.6 的 hideControl 任意时刻只被调用一次，所以它从来不会连闪。
-        if (MpvDebug.experiment == 8) {
-            // 只改 alpha：不 requestLayout、不产生挖洞区域重算
-            controlBar?.alpha = 0f
-            runCatching {
-                (controlBar as? android.view.ViewGroup)?.descendantFocusability =
-                    android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            }
-            findViewById<View>(R.id.playTitle)?.alpha = 0f
-            rootView?.requestFocus()
-            MpvDebug.log("[exp8] 收条 alpha=0 vis=${controlBar?.visibility} 焦点=root")
-            return
-        }
-        if (controlBar?.visibility == View.INVISIBLE &&
-            findViewById<View>(R.id.playTitle)?.visibility == View.INVISIBLE
-        ) {
-            return
-        }
+        // 常驻 VISIBLE 下"收起" = 清焦点 + 降 alpha + 关掉焦点进入。
+        // 不用 GONE/INVISIBLE：那两种都会让窗口层的绘制内容区域变化（GONE 还额外触发 measure/layout）。
+        if (!barShown()) return
         // ★收条只做一件事：置 GONE。与 5.6 hideControl(:3502) 逐字一致。
         // 之前的 alpha 方案（常驻 VISIBLE + alpha 0 + BLOCK）有个副作用：
         // 控制条子控件**仍然持有焦点**（BLOCK 只挡"新的焦点进来"，不夺走已有的），
@@ -2342,9 +2345,12 @@ class PlayActivity : Activity() {
                     " barAlpha=${controlBar?.alpha} → root ok=${currentFocus === rootView}"
             )
         }
-        controlBar?.visibility = View.INVISIBLE
-        controlBar?.alpha = 1f
-        findViewById<View>(R.id.playTitle)?.visibility = View.INVISIBLE
+        controlBar?.alpha = 0f
+        findViewById<View>(R.id.playTitle)?.alpha = 0f
+        runCatching {
+            (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+                android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
         // 同上：收条这一步也不碰 render API（菜单键的 DOWN/UP 常常成对触发呼/收，两次都在窗口变化期）
         MpvDebug.log("[ui] hideControl isMpv=${isMpvMode()} mpv=${mpv != null}")
     }
@@ -3011,7 +3017,7 @@ class PlayActivity : Activity() {
             // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
             // ★退场时强制落盘 + 先补建历史行：详情页小窗就是靠这一条位置续播的
             leaving = true
-            runCatching { savePosition(force = true) }
+            runCatching { savePosition(force = true, reason = "退场") }
             // 现场对照：不呼出控制条直接返回 → 干净；呼出过控制条再返回 → 黑一下。
             // 差别只有一处：条显示时焦点落在条上的按钮里，条隐藏时焦点在根布局。
             // 退场时若还握着"条内焦点"，窗口要再做一次焦点遍历/重绘，这一帧就会露黑。
@@ -3294,7 +3300,7 @@ class PlayActivity : Activity() {
         // 在真机上表现就是「回主页后后台还在播、按什么都没反应」。
         runCatching { mpv?.pause() }
         runCatching { player?.pause() }
-        savePosition()
+        savePosition(reason = "onPause")
     }
 
     /**
@@ -3360,7 +3366,7 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(mpvWatchdog)
         saveHandler.removeCallbacks(saveRunnable)
         // 先落盘再释放内核：mpv 一旦 destroy 就读不到 time-pos 了
-        runCatching { savePosition() }
+        runCatching { savePosition(reason = "onDestroy") }
         runCatching { mpv?.release() }
         mpv = null
         runCatching { android.view.Choreographer.getInstance().removeFrameCallback(frameTick) }

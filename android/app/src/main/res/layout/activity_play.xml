@@ -163,7 +163,7 @@
         android:paddingTop="18dp"
         android:paddingEnd="16dp"
         android:paddingBottom="8dp"
-        android:visibility="invisible">
+        android:visibility="visible">
 
         <!-- 解析源（原版控制条最上一行 parse） -->
         <HorizontalScrollView
