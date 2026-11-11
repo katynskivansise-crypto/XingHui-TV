@@ -2385,6 +2385,7 @@ class PlayActivity : Activity() {
     private fun ensureBarFocus(): Boolean {
         val bar = controlBar ?: return false
         if (!barShown()) return false
+        val before = currentFocus?.id
         val cur = currentFocus
         // 条内焦点每次按键都顺手记下来。原来只有在按 OK 的分支里才记（3024 行），
         // 所以按方向键时 lastBarFocus 一直是 0，收条/重落点都拿不到"上次停在哪个按钮"。
@@ -2410,10 +2411,12 @@ class PlayActivity : Activity() {
         }
         if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.timeBar)
         val ok = target?.requestFocus() == true
+        // was 要在 requestFocus 之前取。以前取 currentFocus 是在落点之后，所以永远显示
+        // "was=DefaultTimeBar" —— 看着像"焦点本来就在条上却判不在条上"，把排查方向带偏过一次。
         MpvDebug.log(
-            "[ui] 控制条可见但焦点不在条上 → 重新落点 was=${currentFocus?.id}" +
-                "(${currentFocus?.javaClass?.simpleName}) lastBarFocus=$lastBarFocusId" +
-                " → id=${target?.id}(${target?.javaClass?.simpleName}) ok=$ok"
+            "[ui] 控制条可见但焦点不在条上 → 重新落点 was=$before" +
+                " lastBarFocus=$lastBarFocusId → id=${target?.id}" +
+                "(${target?.javaClass?.simpleName}) ok=$ok"
         )
         return ok
     }

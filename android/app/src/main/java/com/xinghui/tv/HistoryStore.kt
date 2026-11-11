@@ -277,7 +277,10 @@ class HistoryStore(context: Context) {
             }
             s = s.substringBefore('?').substringBefore('#')
             val body = if (s.contains("://")) s.substringAfter("://").substringAfter('/', "") else s
-            return body.take(32)
+            // 只截 32 字符会把「集」的信息截掉：现场两部不同的集（ep 尾 JlN2 与 VmYj）归一后
+            // 撞成同一个 key，于是换集后从上一集的 16862ms 起播（日志 eq=false 但 pos=16862）。
+            // 保留 96 字符：同集重进拿到同一串（21:00 与 21:02 的串逐字相同），不同集 hex 不同能分开。
+            return body.take(96)
         }
 
         private const val PREFS = "xinghui_library"
