@@ -138,6 +138,7 @@ class PlayActivity : Activity() {
             }
         )
         session.cueSink = { group -> videoHost?.subtitleView?.setCues(group.cues) }
+        session.setExoBuilder { h -> rebuildPlayerInternal(h) }
         videoHost = runCatching {
             VideoHost(
                 findViewById(R.id.videoFrame),
@@ -182,7 +183,6 @@ class PlayActivity : Activity() {
             // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
             // ★路线 A（对齐 WebHomeTV 5.6）：mpv 与 EXO 共用 PlayerView 那一块 SurfaceView。
             // 播放页从此只有一套画面层，切内核 = 换内核、不换视图、不换 window layer。
-                setPlayerViewShutter(transparent = true)
             // 画面层里已不存在任何"盖黑"视图，onCreate 不再需要动快门
             // 原生内核初始化要几十到几百毫秒（mpv_create + 四十多条选项 + observeProperty + attachSurface）。
             // 放在 onCreate 里同步执行会把"首帧"和"窗口拿到输入焦点"一起往后推 ——
@@ -939,25 +939,22 @@ class PlayActivity : Activity() {
         endingDone = false
         updateOpeningText()
         updateEndingText()
-        // 起播定位：原版 VideoActivity.setPosition(Math.max(opening, position))
-        pendingSeek = if (resumeOverride >= 0) resumeOverride
-                      else maxOf(openingMs, marks[2])
-        // ★用户起播前按过快进时，不再把起播点压成 0。
-        //   压成 0 的直接后果就是：先出片头第一帧、再跳回目标位置 ——
-        //   现场看到的就是"加载中 + 跳回开头重新播放"。
-        //   直接把用户意图当成起播点，一步到位。
-        if (pendingJumpMs >= 0) pendingSeek = pendingJumpMs
-        startPosMs = pendingSeek
+        // ★起播点只在这里算一次，三个来源按优先级取一个：
+        //   显式指定（切内核/重建/换解码器）> 用户起播前按的快进 > 片头标记/历史续播点。
+        //   以前是"先写成续播点、再被 pendingJumpMs 改成 0、再补跳"，三次改写导致
+        //   "先出第一帧再跳回当前位置"；现在一次定下来，装载时就带着位置。
+        val at = when {
+            resumeOverride >= 0 -> resumeOverride
+            pendingJumpMs >= 0 -> pendingJumpMs
+            else -> maxOf(openingMs, marks[2])
+        }
         resumeOverride = -1
+        pendingJumpMs = -1
+        pendingSeek = at
+        startPosMs = at
         lastSavedPos = 0
         // mpv 内核：本进程内 libmpv（内嵌），播放页控制条直接控它
         if (isMpvMode()) {
-            // 起播前按过快进就用用户的位置，否则用续播点
-            val userAt = pendingJumpMs
-            val at = if (userAt >= 0) userAt else pendingSeek
-            // 意图只消费一次。不清零的话，这个位置会一直留在 pendingJumpMs 里：
-            // 下一集起播时既会把续播点压成 0（丢掉历史进度），又会跳回上一集的旧位置。
-            if (userAt >= 0) pendingJumpMs = -1
             startMpv(url, effHeaders, at)
             return
         }
@@ -969,14 +966,14 @@ class PlayActivity : Activity() {
         val itemBuilder = MediaItem.Builder().setUri(url).setMediaId(url)
         // 字幕轨：对齐原版 ExoUtil.getMediaItem → setSubtitleConfigurations(getSubtitleConfigs(subs))
         if (activeSubs.isNotEmpty()) itemBuilder.setSubtitleConfigurations(activeSubs)
-        if (applyMediaSource(itemBuilder)) {
-            // 起播前按过暂停：媒体项照样加载，但不自动播（与正常暂停的观感一致）
-            val wantPlay = pendingPauseIntent != true
-            // 意图只消费一次：留着的话，下一集起播会被误判成"也要暂停"
-            pendingPauseIntent = null
+        // 起播前按过暂停：媒体项照样装载，但不自动播（与正常暂停的观感一致）
+        val wantPlay = pendingPauseIntent != true
+        pendingPauseIntent = null
+        if (session.playExo(itemBuilder.build(), at, wantPlay)) {
             setKeepScreenOn(wantPlay)
-            player?.playWhenReady = wantPlay
             if (!wantPlay) showPlayCenter()
+        } else {
+            Toast.makeText(this, "该片源当前内核不支持", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1045,9 +1042,15 @@ class PlayActivity : Activity() {
         }
     }
 
+    /** 对外语义不变：丢掉旧的、按新请求头重建一个（实例归会话） */
     private fun rebuildPlayer(headers: Map<String, String>) {
-        runCatching { videoHost?.setPlayer(null) }
-        player?.release()
+        activeHeaders = headers
+        session.ensureExo(headers, forceRebuild = true)
+        player = session.player
+    }
+
+    /** 纯构造：只建实例、装监听、绑画面，不动 ownership（会话调用它） */
+    private fun rebuildPlayerInternal(headers: Map<String, String>): ExoPlayer? {
         activeHeaders = headers
         val builder = ExoPlayer.Builder(this)
         builder.setRenderersFactory(buildRenderersFactory())
@@ -1084,19 +1087,21 @@ class PlayActivity : Activity() {
         // （表现为 EXO 放不了、mpv 能放）。包一层后不依赖调用方自觉。
         val dataSource = androidx.media3.datasource.DefaultDataSource.Factory(this, httpFactory)
         builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSource, extractors))
-        player = builder.build().also {
+        val built = builder.build().also {
             // 官方 Players.java:158 setHandleAudioBecomingNoisy(true)：
             // HDMI / 蓝牙音频突然断开时自动暂停，而不是继续无声播放。
             it.setHandleAudioBecomingNoisy(true)
             // 同 onCreate：音频焦点必须请求（原版 Players.java:155 同一句）
             it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
-            session.adoptExo(it)
+            it.setPlaybackSpeed(speedSteps[speedIdx])
         }
-        // 玩家表面探针必须在 setPlayer 之后挂：media3 会在这时把 surface 交给播放器
+        player = built
+        session.adoptExo(built)
+        // 玩家表面探针必须在绑定之后挂：media3 会在这时把 surface 交给播放器
         attachExoSurfaceProbe()
         applyCaptionStyle()
         attachPlayerListeners()
-        player?.setPlaybackSpeed(speedSteps[speedIdx])
+        return built
     }
 
     /**
@@ -1255,7 +1260,6 @@ class PlayActivity : Activity() {
      * AspectRatioFrameLayout + SurfaceView，**里面没有任何会画黑的视图**。
      * 保留这个函数只为让历史调用点不必逐个删干净。
      */
-    private fun shutterView(): View? = null
 
 
     /**
@@ -1280,27 +1284,6 @@ class PlayActivity : Activity() {
      * 摘出视图树后，它再 visibility=VISIBLE 也没有绘制效果。
      * 起播前的遮挡由我们自己的 playProgress 负责，本来就不依赖它。
      */
-    private fun detachShutter(reason: String) {
-        val sh = shutterView() ?: return
-        if (sh.parent == null) return
-        runCatching {
-            sh.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            sh.visibility = View.GONE
-            (sh.parent as? android.view.ViewGroup)?.removeView(sh)
-            shutterReleased = true
-            MpvDebug.log("[shutter] 已从视图树移除（$reason）")
-        }
-    }
-    private fun forceReleaseShutter(reason: String) {
-        val sh = shutterView() ?: return
-        if (shutterReleased && sh.visibility == View.GONE) return
-        runCatching {
-            sh.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            sh.visibility = View.GONE
-            shutterReleased = true
-            MpvDebug.log("[shutter] 释放快门（$reason）")
-        }
-    }
 
     /**
      * 黑闪取证：16ms 一拍，连续 1.1 秒，只在状态发生变化时打一行。
@@ -1314,7 +1297,7 @@ class PlayActivity : Activity() {
             uiHandler.postDelayed({
                 if (isFinishing || isDestroyed) return@postDelayed
                 val st = runCatching {
-                    "sh=${shutterView()?.visibility}/${videoHost?.visibility} " +
+                    "host=${videoHost?.visibility} " +
                         "sv=${currentSurface()?.visibility}/${currentSurface()?.alpha} " +
                         "mpv=${mpv != null}/${mpv?.let { runCatching { it.isPausedActual() }.getOrNull() }} " +
                         "bar=${controlBar?.visibility} win=${window?.decorView?.windowVisibility} " +
@@ -1351,9 +1334,6 @@ class PlayActivity : Activity() {
      * 这里保留函数签名，调用点一行都不用改；将来若需要"遮挡窗口期"，
      * 只改这个函数的实现即可，不会再牵动播放器内部状态。
      */
-    private fun setPlayerViewShutter(transparent: Boolean) {
-        // no-op
-    }
 
     private fun isMpvMode(): Boolean =
         !mpvFallbackExo && PlayerManager.shouldUseMpv(this) &&
@@ -1495,13 +1475,11 @@ class PlayActivity : Activity() {
         session.releaseExo()
         player = null
         // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
-        setPlayerViewShutter(transparent = true)
         val surface = currentSurface()
         // 共用画面层是唯一前提，拿不到就本页退回 EXO（不能静默不播）
         if (surface == null) {
             MpvDebug.log("[mpv] 拿不到共用画面层（PlayerView 没有 surface view），本页退回 EXO")
             mpvFallbackExo = true
-            setPlayerViewShutter(transparent = false)
             if (player == null) rebuildPlayer(headers)
             resumeOverride = startMs
             playUrl(url, headers)
@@ -1538,7 +1516,6 @@ class PlayActivity : Activity() {
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
-        setPlayerViewShutter(transparent = false)
         updatePlayerText()
         resumeOverride = mpvPos
         playUrl(activeUrl, activeHeaders)
@@ -1736,7 +1713,6 @@ class PlayActivity : Activity() {
             mpv?.release()
             mpv = null
             // mpv 走了：把 shutter 恢复成原版的黑色，EXO 出首帧前由它挡着
-            setPlayerViewShutter(transparent = false)
                 if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
             videoHost?.resizeMode = scaleModes[scaleIdx]
@@ -2533,7 +2509,6 @@ class PlayActivity : Activity() {
                 } else {
                     val p = player
                     if (p == null) {
-                        if (contentReady()) forceReleaseShutter("时钟兜底")
                 uiHandler.postDelayed(this, 1000)
                         return
                     }
@@ -2551,7 +2526,6 @@ class PlayActivity : Activity() {
                     if (directUrl.isBlank()) switchEpisode(1)
                 }
                 // 原版 Clock.java:66 是 1000ms
-                if (contentReady()) forceReleaseShutter("时钟兜底")
                 uiHandler.postDelayed(this, 1000)
             }
         }

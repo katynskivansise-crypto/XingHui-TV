@@ -157,6 +157,53 @@ class PlaybackSession(
         runCatching { p?.release() }
     }
 
+
+    /* ───────────── 起播：把「建实例 + 装载 + 定位 + 是否自动播」收成一次调用 ───────────── */
+
+    private var exoBuilder: ((Map<String, String>) -> ExoPlayer?)? = null
+
+    fun setExoBuilder(f: (Map<String, String>) -> ExoPlayer?) {
+        exoBuilder = f
+    }
+
+    /**
+     * 保证有一个可用的 EXO 实例。请求头变了（播放接口返回新的 UA/Referer）才重建，
+     * 其余情况复用——重建播放器是"从片头重播"和"黑一下"的直接来源。
+     */
+    fun ensureExo(headers: Map<String, String>, forceRebuild: Boolean): ExoPlayer? {
+        val cur = exo
+        if (cur != null && !forceRebuild) return cur
+        releaseExo()
+        val p = runCatching { exoBuilder?.invoke(headers) }.getOrNull() ?: return null
+        adoptExo(p)
+        return p
+    }
+
+    /** EXO 起播：setMediaItem → seekTo → prepare → playWhenReady，定位直接排队生效 */
+    fun playExo(item: androidx.media3.common.MediaItem, startMs: Long, autoPlay: Boolean): Boolean {
+        val p = exo ?: return false
+        return runCatching {
+            p.setMediaItem(item)
+            if (startMs > 0L) p.seekTo(startMs)
+            p.prepare()
+            p.playWhenReady = autoPlay
+            true
+        }.getOrDefault(false)
+    }
+
+    /** mpv 起播（实例由 Activity 建，选项在那一侧） */
+    fun playMpv(
+        url: String,
+        headers: Map<String, String>,
+        startMs: Long,
+        autoPlay: Boolean,
+        subs: List<String> = emptyList(),
+    ) {
+        val m = mv ?: return
+        m.setSpeed(1f)
+        m.play(url, headers, startMs, subs, startPaused = !autoPlay)
+    }
+
     /** 内核切换前的位置快照：切内核必须从这里续上，绝不从头 */
     fun snapshotPosition(): Long = positionMs()
 }
