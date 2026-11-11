@@ -450,7 +450,8 @@
                 android:layout_marginEnd="8dp"
                 android:layout_weight="1"
                 android:focusable="true"
-                android:nextFocusUp="@id/btnNext" />
+                android:focusableInTouchMode="true"
+                android:nextFocusUp="@id/btnPlayPause" />
 
             <TextView
                 android:id="@+id/timeDur"

@@ -273,6 +273,7 @@ class PlayActivity : Activity() {
         // 上一集/下一集（对齐原项目 control.prev/next → checkPrev/checkNext）
         findViewById<View>(R.id.btnPrev).setOnClickListener { switchEpisode(-1) }
         findViewById<View>(R.id.btnPlayPause).setOnClickListener { togglePlayPause() }
+        bindTimeBarScrub()
         findViewById<View>(R.id.btnNext).setOnClickListener { switchEpisode(1) }
         // 清晰度切换（对齐原项目 QualityAdapter/setQualityActivated）
         findViewById<View>(R.id.btnQuality).setOnClickListener { toggleQuality() }
@@ -2136,7 +2137,7 @@ class PlayActivity : Activity() {
             focusId != 0 -> focusId
             lastBarFocusId != 0 &&
                 lastBarFocusId != R.id.btnOpening && lastBarFocusId != R.id.btnEnding -> lastBarFocusId
-            else -> R.id.btnPlayPause
+            else -> R.id.timeBar
         }
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
         if (MpvDebug.experiment != 1) findViewById<View>(target)?.requestFocus()
@@ -2226,9 +2227,9 @@ class PlayActivity : Activity() {
         currentFocus?.let { if (isInside(bar, it)) return true }
         var target = runCatching { bar.findFocus() }.getOrNull()
         if (target == null || target.visibility != View.VISIBLE) {
-            target = findViewById<View>(lastBarFocusId.takeIf { it != 0 } ?: R.id.btnPlayPause)
+            target = findViewById<View>(lastBarFocusId.takeIf { it != 0 } ?: R.id.timeBar)
         }
-        if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.btnPlayPause)
+        if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.timeBar)
         val ok = target?.requestFocus() == true
         MpvDebug.log("[ui] 控制条可见但焦点不在条上 → 重新落点 id=${target?.id} ok=$ok")
         return ok
@@ -2477,6 +2478,50 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
     }
 
+
+
+    /**
+     * 时间轴上的左右键 / OK 交给 DefaultTimeBar 自己处理，但必须挂 OnScrubListener：
+     * 它会在没有监听者的情况下**只消费按键**（内部只挪指示器），既不 seek 也不提示，
+     * 现场表现就是"焦点在进度条上，按左右一点变化都没有"。
+     * 这里把拖动过程接成居中提示、松手时才 seekTo（对齐原版 onSeeking / onSeekEnd）。
+     */
+    private fun bindTimeBarScrub() {
+        val tb = findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar) ?: return
+        tb.addListener(object : androidx.media3.ui.TimeBar.OnScrubListener {
+            override fun onScrubStart(timeBar: androidx.media3.ui.TimeBar, position: Long) {
+                seekingByKey = true
+                uiHandler.removeCallbacks(commitSeek)
+                uiHandler.removeCallbacks(hideSeekCenterRun)
+                showJumpCenter(position)
+            }
+
+            override fun onScrubMove(timeBar: androidx.media3.ui.TimeBar, position: Long) {
+                showJumpCenter(position)
+            }
+
+            override fun onScrubStop(timeBar: androidx.media3.ui.TimeBar, position: Long, cancelled: Boolean) {
+                seekingByKey = false
+                if (!cancelled) {
+                    MpvDebug.log("[key] 进度条跳转 target=${position}ms dur=${durNow()}ms")
+                    session.seekTo(position)
+                    seekBaseMs = position
+                    seekAccumMs = 0L
+                }
+                uiHandler.removeCallbacks(hideSeekCenterRun)
+                uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+            }
+        })
+    }
+
+    /** 拖动进度时的居中提示：图标沿用"快进"，数值直接给目标位置 */
+    private fun showJumpCenter(target: Long) {
+        val durMs = durNow()
+        findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(R.drawable.ic_widget_forward)
+        findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(target)
+        findViewById<TextView>(R.id.playCenterDur)?.text = if (durMs > 0L) fmtTime(durMs) else "--:--"
+        findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
+    }
 
     /** 当前累加对应的目标位置（与 commitSeek 同一套算法，避免两处算两次） */
     private fun seekTargetNow(): Long {
