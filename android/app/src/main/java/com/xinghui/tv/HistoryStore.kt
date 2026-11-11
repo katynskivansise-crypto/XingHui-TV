@@ -60,6 +60,7 @@ class HistoryStore(context: Context) {
         if (vodId.isBlank() || positionMs <= 0) return
         val list = history().toMutableList()
         val idx = list.indexOfFirst { it.optString("vod_id") == vodId }
+        com.xinghui.tv.MpvDebug.log("[hist] save vod=$vodId pos=$positionMs row=${idx >= 0} ep=${epUrl.takeLast(18)}")
         if (idx < 0) return
         list[idx] = JSONObject(list[idx].toString()).apply {
             put("position", positionMs)
@@ -88,8 +89,13 @@ class HistoryStore(context: Context) {
         val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return zero
         // 与 position() 完全一致：不做空串特判，否则「集地址为空、历史里也是空」这类站点
         // 会从「能续播」变成「从 0 播」，属于把优化做成行为变更
-        val pos = if (obj.optString("position_ep", obj.optString("vod_ep_url")) == epUrl)
-            obj.optLong("position", 0) else 0L
+        val storedEp = obj.optString("position_ep", obj.optString("vod_ep_url"))
+        val eq = storedEp == epUrl
+        com.xinghui.tv.MpvDebug.log(
+            "[hist] load vod=$vodId pos=${obj.optLong("position", 0)} eq=$eq " +
+                "stored=${storedEp.takeLast(18)} now=${epUrl.takeLast(18)}"
+        )
+        val pos = if (eq) obj.optLong("position", 0) else 0L
         return longArrayOf(obj.optLong("opening", 0), obj.optLong("ending", 0), pos)
     }
 

@@ -1325,7 +1325,6 @@ class PlayActivity : Activity() {
         runCatching {
             // 已无 PlayerView，keep_content_on_player_reset 自然失效
             Unit
-            MpvDebug.log("[ui] keepContentOnPlayerReset=true")
         }
     }
 
@@ -2400,12 +2399,17 @@ class PlayActivity : Activity() {
         //   以前那两个 if (p != null && ready) 就是「按 OK 没反应、要按一次菜单才好」的成因。
         val wasPlaying = session.isPlaying()
         session.toggle()
-        val nowPaused = !session.isPlaying() && wasPlaying
         pendingPauseIntent = null
+        val nowPaused = !session.isPlaying()
         applyPauseUi(nowPaused)
         MpvDebug.log(
             "[key] toggle kernel=${if (isMpvMode()) "mpv" else "exo"} wasPlaying=$wasPlaying 现在暂停=$nowPaused"
         )
+        // 内核的 isPlaying 是异步刷新：刚下发 pause 的那一帧可能还是 true。
+        // 250ms 后回读一次真实状态，日志里这条才是"到底停没停"的判据。
+        uiHandler.postDelayed({
+            MpvDebug.log("[key] toggle+250ms kernel=${if (isMpvMode()) "mpv" else "exo"} isPlaying=${session.isPlaying()}")
+        }, 250)
     }
 
     /** 暂停/继续的界面同步（居中图标 + 常亮）：两条内核共用，避免两边各写一份走偏 */
@@ -2421,6 +2425,11 @@ class PlayActivity : Activity() {
 
     // ===== 左右键快进/快退（原版 CustomKeyDownVod：按住累加，松开 250ms 后一次跳） =====
     private val SEEK_STEP_MS = 10_000L
+    /** 长按重复事件的最小间隔：T1 的 key repeat 是 40~60ms 一个，原样累加会放大 10 倍 */
+    private val SEEK_REPEAT_GAP_MS = 300L
+    /** 最后一次方向键按下后多久自动提交（不依赖 ACTION_UP，只发 DOWN 的遥控也能跳） */
+    private val SEEK_COMMIT_IDLE_MS = 400L
+    private var lastSeekRepeatAt = 0L
     private var seekBaseMs = 0L          // 按下方向键那一刻的位置
     private var seekAccumMs = 0L         // 按住期间累计的偏移
     private var seekingByKey = false
@@ -2451,6 +2460,54 @@ class PlayActivity : Activity() {
         findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
     }
 
+
+    /** 当前累加对应的目标位置（与 commitSeek 同一套算法，避免两处算两次） */
+    private fun seekTargetNow(): Long {
+        val dur = durNow()
+        var t = (seekBaseMs + seekAccumMs).coerceAtLeast(0L)
+        if (dur > 0L) t = t.coerceAtMost(dur)
+        return t
+    }
+
+    /** 跳转提示的收尾：固定停留 1.2s，避免"闪一下"等于没看见 */
+    private val hideSeekCenterRun = Runnable { hidePlayCenter() }
+
+    /**
+     * 方向键 / 媒体快进键共用的累加逻辑。
+     *
+     * 参数只有一套：首按 +10s；长按每 300ms 再 +10s；最后一次按下后 400ms 自动提交。
+     */
+    private fun handleSeekKey(dir: Long, event: KeyEvent) {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            if (!seekingByKey) {
+                seekingByKey = true
+                seekBaseMs = currentPosMs()
+                seekAccumMs = 0L
+                lastSeekRepeatAt = 0L
+            }
+            val nowTick = android.os.SystemClock.uptimeMillis()
+            if (seekAccumMs == 0L || nowTick - lastSeekRepeatAt >= SEEK_REPEAT_GAP_MS) {
+                lastSeekRepeatAt = nowTick
+                seekAccumMs += dir * SEEK_STEP_MS
+                showSeekCenter(seekAccumMs)
+                // ★轻按一下就跳：不再等 400ms 空闲或 ACTION_UP。
+                //   以前"按一下 → 提示闪一下 → 400ms 后才跳"，观感就是"什么都没发生"。
+                if (kotlin.math.abs(seekAccumMs) == SEEK_STEP_MS) {
+                    session.seekTo(seekTargetNow())
+                    uiHandler.removeCallbacks(hideSeekCenterRun)
+                    uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+                }
+            }
+            uiHandler.removeCallbacks(commitSeek)
+            uiHandler.postDelayed(commitSeek, SEEK_COMMIT_IDLE_MS)
+        } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
+            seekingByKey = false
+            lastSeekRepeatAt = 0L
+            uiHandler.removeCallbacks(commitSeek)
+            uiHandler.postDelayed(commitSeek, 250)
+        }
+    }
+
     private val commitSeek = Runnable {
         val base = seekBaseMs
         val delta = seekAccumMs
@@ -2478,7 +2535,9 @@ class PlayActivity : Activity() {
         mpvPos = target
         // 对齐原版 onSeekTo：跳完立刻收起居中提示并恢复播放（原版在 onSeekTo 里调了 onPlay()，
         // onPlay 里做的是 addFlags(KEEP_SCREEN_ON) + play() + hideCenter()）。
-        hidePlayCenter()
+        // ★跳完不再立刻收提示：停留 1.2s，轻按也看得见
+        uiHandler.removeCallbacks(hideSeekCenterRun)
+        uiHandler.postDelayed(hideSeekCenterRun, 1_200)
         if (!contentReady()) {
             // 起播前按快进：文件还没加载，定位已经记进 pendingJumpMs / mpvSeekAfterLoad。
             // 这时**不能**顺手 resume —— 会把用户刚按下的暂停冲掉（表现为「暂停没反应」）。
@@ -2597,6 +2656,36 @@ class PlayActivity : Activity() {
                 fireMenuKeyOnce()
             }
             return true
+        }
+
+        // ★遥控器上的「播放/暂停」「快进」「快退」发的是 MEDIA_* 码，不是 DPAD/OK。
+        //   以前这三个键一路 return super，系统没人消费 → 按下去一点变化都没有。
+        //   这不是参数不对，是这三个键从来没接线。
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY,
+            KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    MpvDebug.log("[key] 媒体键 kc=${event.keyCode} → 暂停/继续")
+                    togglePlayPause()
+                }
+                return true
+            }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                handleSeekKey(1L, event)
+                return true
+            }
+            KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                handleSeekKey(-1L, event)
+                return true
+            }
+            KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_MEDIA_EJECT -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    MpvDebug.log("[key] 媒体键 kc=${event.keyCode} → 暂停")
+                    session.pause()
+                    applyPauseUi(true)
+                }
+                return true
+            }
         }
 
         val shown = barShown()
@@ -2729,29 +2818,13 @@ class PlayActivity : Activity() {
             return true
         }
         if (isLeftKey(event) || isRightKey(event)) {
-            // 对齐原版 CustomKeyDownVod.check()：
-            //   DOWN（含长按 repeat）只累加偏移并刷新提示，不立刻跳
-            //   UP 之后 post 250ms 再一次性 seekTo
-            val dir = if (isLeftKey(event)) -1L else 1L
-            if (event.action == KeyEvent.ACTION_DOWN) {
-                if (!seekingByKey) {
-                    seekingByKey = true
-                    // 基准位置：就绪时用真实位置；未就绪时用"将要起播的位置"（续播点），
-                    // 否则 base 恒为 0，按一下 → 跳 10s，看着就像"快进把进度打回片头"。
-                    // ★基准只有一处来源：内核真实位置。
-                    //   以前未就绪时用 startPosMs（历史续播点），遇到"续播点=0"就变成
-                    //   从 0 起算 → 按一下快进看着像"回片头"。
-                    seekBaseMs = currentPosMs()
-                    seekAccumMs = 0L
-                }
-                seekAccumMs += dir * SEEK_STEP_MS
-                showSeekCenter(seekAccumMs)
-            } else if (event.action == KeyEvent.ACTION_UP && seekingByKey) {
-                seekingByKey = false
-                uiHandler.removeCallbacks(commitSeek)
-                uiHandler.postDelayed(commitSeek, 250)
-            }
+            handleSeekKey(if (isLeftKey(event)) -1L else 1L, event)
             return true
+        }
+        // ★所有没被上面任何分支接住的键，在这里统一留痕。
+        //   这条只是为了让"按了没反应"能立刻变成一行具体键码，不再靠猜。
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            MpvDebug.log("[key] 未接 kc=${event.keyCode}(${KeyEvent.keyCodeToString(event.keyCode)})")
         }
         return super.dispatchKeyEvent(event)
     }
