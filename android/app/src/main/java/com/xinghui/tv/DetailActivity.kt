@@ -301,7 +301,7 @@ class DetailActivity : Activity() {
         if (autoStarted) return
         autoStarted = true
         val v0 = vod
-        val hKey = (v0?.vodId.orEmpty()).ifBlank { v0?.vodName.orEmpty() }
+        val hKey = HistoryStore.keyOf(v0?.vodId.orEmpty(), v0?.vodName.orEmpty(), episodes.getOrNull(playingIdx)?.second)
         val last = runCatching { HistoryStore(this).lastEpUrl(hKey) }.getOrDefault("")
         val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == last }
             .takeIf { it >= 0 } ?: 0
@@ -621,7 +621,7 @@ class DetailActivity : Activity() {
         // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
         // 换集就是从 0 开始，不会出现点第 3 集跳到第 1 集进度的情况。
         val resumeMs = runCatching {
-            HistoryStore(this).marks(v.vodId.ifBlank { v.vodName }, ep.second)[2]
+            HistoryStore(this).marks(HistoryStore.keyOf(v.vodId, v.vodName, ep.second), ep.second)[2]
         }.getOrDefault(0L)
         // 对齐原版 VideoActivity:1269 —— 起播之前就把 History 建好，不看解析成败。
         // 放在解析之后写的话，解析慢、解析失败、看两眼就退出，三种情况都不留记录。
@@ -815,7 +815,7 @@ class DetailActivity : Activity() {
         val ep = episodes.getOrNull(playingIdx) ?: return
         val pos = runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
         if (pos > 1000) runCatching {
-            HistoryStore(this).setPosition(v.vodId.ifBlank { v.vodName }, ep.second, pos)
+            HistoryStore(this).setPosition(HistoryStore.keyOf(v.vodId, v.vodName, ep.second), ep.second, pos)
         }
         Log.i("XingHuiTV", "[detail] 保存进度 ${pos}ms ep=${ep.first}")
     }
@@ -873,11 +873,17 @@ class DetailActivity : Activity() {
         //   2. 从别处回来（首页回来、系统弹窗回来）→ 保持原样，不自动出声
         if (inlineResumeOnReturn) {
             inlineResumeOnReturn = false
+            // ★从播放页回来先把「全屏预览」复位。
+            //   进播放页的两条路（小窗全屏 enterInlineFullscreen、转独立播放页 openPlayPage）
+            //   都会把 inlineFullscreen 置为 true 并**一直保留**，而它只在详情页自己的返回键里
+            //   才会复位。于是从播放页按返回时，看到的是「铺满整页的预览」，还得再按一次返回
+            //   才回到详情页 —— 这就是"要按两次"的结构性来源（原版没有内嵌预览，没有这个状态）。
+            if (inlineFullscreen) runCatching { exitInlineFullscreen() }
             // 在独立播放页里换过集：集号以历史里最后记下的那一集为准。
             // 不这样做，返回后小窗会退回离开前那一集 —— 就是「选了第 3 集，退回来又变第 1 集」。
             val v0 = vod
             if (v0 != null) {
-                val key0 = v0.vodId.ifBlank { v0.vodName }
+                val key0 = HistoryStore.keyOf(v0.vodId, v0.vodName, episodes.getOrNull(playingIdx)?.second)
                 val lastEp = runCatching { HistoryStore(this).lastEpUrl(key0) }.getOrDefault("")
                 if (lastEp.isNotBlank()) {
                     val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == lastEp }
@@ -906,7 +912,7 @@ class DetailActivity : Activity() {
                 val v = vod
                 val ep = episodes.getOrNull(playingIdx)?.second
                 if (v != null && !ep.isNullOrBlank()) {
-                    val key = v.vodId.ifBlank { v.vodName }
+                    val key = HistoryStore.keyOf(v.vodId, v.vodName, ep)
                     val store = HistoryStore(this)
                     // 一次读出片头与本集进度（原来分别解析两遍历史 JSON）
                     val m = store.marks(key, ep)

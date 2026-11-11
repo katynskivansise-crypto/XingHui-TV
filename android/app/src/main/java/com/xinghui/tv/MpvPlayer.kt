@@ -236,6 +236,23 @@ class MpvPlayer(
             // 硬解开关是 mpv 自己的偏好（官方 key hardware_decoding），和 EXO 的软/硬解各存各的
             val mpvSet = Settings(activity)
             core.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec" else "no")
+            // 官方 MPVView.kt:37-46 —— API 23+ 用 disp.mode.refreshRate 显式覆盖 display-fps。
+            // 不设的话 mpv 自己去"估"面板刷新率，估错会出现两件事：
+            //   1) 渲染节拍与面板对不上（24fps 内容在 60Hz 面板上轻微抖、偶发吞帧）
+            //   2) display-fps 未知时，render API 那条路径每帧都要按 target-time 保守等待
+            // T1 是 API 25，正好在这条官方逻辑的生效区间内。
+            runCatching {
+                val wm = activity.getSystemService(android.content.Context.WINDOW_SERVICE)
+                    as android.view.WindowManager
+                @Suppress("DEPRECATION")
+                val disp = wm.defaultDisplay
+                @Suppress("DEPRECATION")
+                val hz = disp.mode.refreshRate
+                if (hz > 1f) {
+                    core.setOptionString("display-fps-override", hz.toString())
+                    MpvDebug.log("[mpv] display-fps-override=$hz display=${disp.displayId}")
+                }
+            }
             core.setOptionString("keep-open", "no")
             core.setOptionString("pause", "yes")
             core.setOptionString("osc", "no")

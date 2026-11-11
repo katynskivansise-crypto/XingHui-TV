@@ -26,7 +26,7 @@ class HistoryStore(context: Context) {
         // 原版 History.createHistory 从不会因为 id 为空就跳过（Room 的 key 由 cid + 片名组合）。
         // 这里原来是一句 `if (vodId.isBlank()) return` —— 详情接口不返回 vod_id 的站点，
         // 看多少遍都不会留下一条记录，而且没有任何报错。这就是「好多看过的都没有」的静默原因。
-        val key = vodId.ifBlank { name }
+        val key = keyOf(vodId, name, epUrl)
         if (key.isBlank()) return
         // 起播时 recordHistory() 会走到这里：它是"记录这部片看过"，不是"位置归零"。
         // 不沿用旧值的话，每次起播都会把续播位置和片头片尾一起冲掉。
@@ -239,6 +239,20 @@ class HistoryStore(context: Context) {
     }
 
     companion object {
+
+        /**
+         * 历史行主键的**唯一推导**，全工程只此一处。
+         *
+         * 为什么必须收成一处：以前播放页和详情页各算各的，看着都是
+         * `vodId.ifBlank { vodName }`，但只要有一边补了兜底（比如给播放页加 epUrl），
+         * **写进去的 key 与读出来的 key 就不是同一个字符串** —— 历史行写了却永远读不到，
+         * 现象是「返回详情页小窗从片头播」，而且没有任何报错。
+         * 顺序：vodId（站点稳定 id）→ 片名 → 剧集地址（前两者都空时兜底）。
+         */
+        @JvmStatic
+        fun keyOf(vodId: String?, name: String?, epUrl: String? = null): String =
+            vodId.orEmpty().ifBlank { name.orEmpty() }.ifBlank { epUrl.orEmpty() }
+
         private const val PREFS = "xinghui_library"
         private const val KEY_HISTORY = "history"
         private const val KEY_FAVORITE = "favorites"
