@@ -251,7 +251,34 @@ class HistoryStore(context: Context) {
          */
         @JvmStatic
         fun keyOf(vodId: String?, name: String?, epUrl: String? = null): String =
-            vodId.orEmpty().ifBlank { name.orEmpty() }.ifBlank { epUrl.orEmpty() }
+            vodId.orEmpty().ifBlank { name.orEmpty() }.ifBlank { stableOf(epUrl) }
+
+        /**
+         * 直链/推送入口既没有 vod_id 也没有片名，只能拿"集地址"当身份。
+         *
+         * 但集地址不是稳定值：现场这个入口传进来的是 `base64({"vodPlayFrom":"Ksvideo","playUrl":"..."})`，
+         * 里面的 playUrl 尾巴带签名/时间，同一个人再看一遍就换一个串。
+         * 于是同一集每次都被当成新片：21:00:26 明明写进了 355862ms，21:02:32 再进同一集读回 0ms
+         * —— 表现就是"回到片头"。这不是读不到，是"每次读的都是另一行"。
+         *
+         * 这里只留能标识"这是同一集"的稳定部分：解开 base64 → 取 playUrl → 去掉 scheme/host
+         * 与 ?# 参数 → 截 32 字符。Ksvideo 的 path 形如 `ksc2/Ksvideo-<hex>`，前 32 字符足以区分不同集。
+         */
+        private fun stableOf(epUrl: String?): String {
+            var s = epUrl.orEmpty().trim()
+            if (s.isEmpty()) return ""
+            runCatching {
+                val json = String(
+                    android.util.Base64.decode(s, android.util.Base64.DEFAULT),
+                    Charsets.UTF_8
+                )
+                Regex("\"playUrl\"\\s*:\\s*\"([^\"]+)\"").find(json)
+                    ?.groupValues?.get(1)?.let { s = it }
+            }
+            s = s.substringBefore('?').substringBefore('#')
+            val body = if (s.contains("://")) s.substringAfter("://").substringAfter('/', "") else s
+            return body.take(32)
+        }
 
         private const val PREFS = "xinghui_library"
         private const val KEY_HISTORY = "history"

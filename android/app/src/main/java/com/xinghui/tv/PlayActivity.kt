@@ -2351,6 +2351,20 @@ class PlayActivity : Activity() {
      * 这里显式置可聚焦再请求，仍失败就退到 decorView，并把结果写进 /debug。
      */
     /** v 是不是 parent 的后代（含自身） */
+    /** 从某个控件往上取 6 层（id/类名），用来判"焦点到底挂在哪棵子树下" */
+    private fun chainOf(v: View?): String {
+        val sb = StringBuilder()
+        var p: View? = v
+        var n = 0
+        while (p != null && n < 6) {
+            if (n > 0) sb.append(" < ")
+            sb.append(p.id).append(':').append(p.javaClass.simpleName)
+            p = p.parent as? View
+            n++
+        }
+        return sb.toString()
+    }
+
     private fun isInside(parent: View, child: View): Boolean {
         var v: View? = child
         while (v != null) {
@@ -2371,7 +2385,25 @@ class PlayActivity : Activity() {
     private fun ensureBarFocus(): Boolean {
         val bar = controlBar ?: return false
         if (!barShown()) return false
-        currentFocus?.let { if (isInside(bar, it)) return true }
+        val cur = currentFocus
+        // 条内焦点每次按键都顺手记下来。原来只有在按 OK 的分支里才记（3024 行），
+        // 所以按方向键时 lastBarFocus 一直是 0，收条/重落点都拿不到"上次停在哪个按钮"。
+        if (cur != null && cur.id != 0 && isInsideBar(cur)) {
+            lastBarFocusId = cur.id
+            return true
+        }
+        // 判据二：焦点树根在条之下时 findFocus() 才会返回非空 —— 这是"焦点是否属于本条"的权威答案。
+        // 现场出现过 was=2131362217(DefaultTimeBar) 却仍判"不在条上"（沿 parent 比较那条路
+        // 在我们这套布局上不可靠），结果是每次按键都对同一个控件再 requestFocus 一次，
+        // 白多一轮焦点变化。这里补上这条，并在两条都失败时把 parent 链打出来。
+        if (cur != null && runCatching { bar.findFocus() === cur }.getOrDefault(false)) {
+            if (cur.id != 0) lastBarFocusId = cur.id
+            return true
+        }
+        MpvDebug.log(
+            "[ui] 条内判据都失败 was=${cur?.id}(${cur?.javaClass?.simpleName})" +
+                " bar=${bar.id}(${bar.javaClass.simpleName}) chain=${chainOf(cur)}"
+        )
         var target = runCatching { bar.findFocus() }.getOrNull()
         if (target == null || target.visibility != View.VISIBLE) {
             target = findViewById<View>(lastBarFocusId.takeIf { it != 0 } ?: R.id.timeBar)
