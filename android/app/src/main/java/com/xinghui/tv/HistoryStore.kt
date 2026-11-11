@@ -69,6 +69,19 @@ class HistoryStore(context: Context) {
         save(KEY_HISTORY, list)
     }
 
+
+    /**
+     * 起播点自检：把「历史行是否存在 / 存的集地址 / 当前集地址 / 存的位置」压成一行，
+     * 直接拼进 [play] 起播 那条日志 —— 续播点为 0 时不用再猜是没落盘还是签名不一致。
+     */
+    fun probe(vodId: String, epUrl: String): String {
+        val obj = history().firstOrNull { it.optString("vod_id") == vodId }
+        if (obj == null) return "row=false total=${history().size}"
+        val stored = obj.optString("position_ep", obj.optString("vod_ep_url"))
+        return "row=true pos=${obj.optLong("position", 0)} eq=${stored == epUrl} " +
+            "stored=${stored.takeLast(24)} now=${epUrl.takeLast(24)}"
+    }
+
     /** 读取续播位置；集地址不一致（换集了）则返回 0，从头播 */
     fun position(vodId: String, epUrl: String): Long {
         val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return 0

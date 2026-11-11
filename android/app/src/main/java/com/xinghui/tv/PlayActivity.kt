@@ -932,7 +932,6 @@ class PlayActivity : Activity() {
         val effHeaders = withUa(headers)
         activeUrl = url
         startGen++
-        MpvDebug.log("[play] 起播 gen=$startGen url=${url.take(56)} 续播点=${pendingSeek}ms")
         logVideoCodecOnce()
         // 片头/片尾按片记忆（对齐原版 History.getOpening/getEnding）
         val marks = HistoryStore(this).marks(historyKey, epUrl)
@@ -955,6 +954,13 @@ class PlayActivity : Activity() {
         pendingSeek = at
         startPosMs = at
         lastSavedPos = 0
+        // ★这条日志以前打在 at 计算之前，打的是还没赋值的 pendingSeek（永远是 0），
+        //   把整条排查线带偏成"续播点没落盘"。现在打在算完之后，并把三个输入一并写出。
+        MpvDebug.log(
+            "[play] 起播 gen=$startGen url=${url.take(48)} 续播点=${at}ms " +
+                "(hist=${marks[2]} opening=${openingMs} ending=${endingMs}) " +
+                HistoryStore(this).probe(historyKey, epUrl)
+        )
         // mpv 内核：本进程内 libmpv（内嵌），播放页控制条直接控它
         if (isMpvMode()) {
             startMpv(url, effHeaders, at)
