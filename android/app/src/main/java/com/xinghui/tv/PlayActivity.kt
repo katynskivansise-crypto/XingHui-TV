@@ -854,6 +854,10 @@ class PlayActivity : Activity() {
     private var lastSavedPos: Long = 0
 
     private val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /** 历史落盘专用单线程：顺序保证与主线程解耦（退场那条仍走同步） */
+    private val saveExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "xh-history-save").apply { isDaemon = true }
+    }
     private val saveRunnable = object : Runnable {
         override fun run() {
             // 这是每 15 秒的周期落盘，不是返回键。以前它和退场共用 "[back] 保存" 这个标签，
@@ -948,14 +952,32 @@ class PlayActivity : Activity() {
             MpvDebug.log("[hist] 保存[$reason]跳过：historyKey 为空 pos=$pos")
             return
         }
-        // 行不存在就先建行（addHistory 会保留旧 position），再写位置。
-        // 只调 setPosition 的话，行不存在时它是静默 return，看不出任何异常。
-        HistoryStore(this).addHistory(historyKey, vodName, vodPic, "", flag, epUrl)
-        HistoryStore(this).setPosition(historyKey, epUrl, pos)
+        val key = historyKey
+        val name = vodName
+        val pic = vodPic
+        val fl = flag
+        val ep = epUrl
+        // ★退场/onPause 必须同步：详情页小窗就是靠这一条位置续播的，晚一个 post 就可能读到旧值。
+        // ★周期（15s）与暂停这两条路径改到后台单线程：真机日志里 22:24:09 按菜单那一秒
+        //   同时触发「暂停落盘」，而 addHistory + setPosition 每次都把 200 条历史全量 JSON 序列化
+        //   再 apply，落在主线程就是那一秒 42 帧（掉 18 帧、约 300ms）。
+        //   落盘和呼条抢同一个主线程帧，本身就是自造的卡顿。
+        if (force) {
+            HistoryStore(this).addHistory(key, name, pic, "", fl, ep)
+            HistoryStore(this).setPosition(key, ep, pos)
+        } else {
+            saveExecutor.execute {
+                runCatching {
+                    HistoryStore(this).addHistory(key, name, pic, "", fl, ep)
+                    HistoryStore(this).setPosition(key, ep, pos)
+                }
+            }
+        }
         lastSavedPos = pos
         MpvDebug.log(
             "[hist] 保存[$reason] pos=$pos key=${historyKey.take(24)} " +
-                HistoryStore(this).probe(historyKey, epUrl)
+                HistoryStore(this).probe(historyKey, epUrl) +
+                (if (force) " sync=true" else " bg=true")
         )
     }
 
@@ -2293,6 +2315,9 @@ class PlayActivity : Activity() {
             val focusIdNow = currentFocus?.id
             val exoPlaying = runCatching { player?.isPlaying }.getOrNull()
             MpvDebug.log("[probe] menu t0 focus=$focusIdNow exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
+            // 黑的是"按菜单那一帧到约 1 秒"，所以采三个点：刚落点、300ms、800ms
+            probeWindowLayer("menu t0")
+            uiHandler.postDelayed({ runCatching { probeWindowLayer("menu t300") } }, 300)
             uiHandler.postDelayed({
                 runCatching {
                     MpvDebug.log(
@@ -2302,11 +2327,55 @@ class PlayActivity : Activity() {
                             " exoSurfaceVis=${runCatching { videoHost?.surfaceView?.visibility }.getOrNull()}"
                     )
                 }
+                runCatching { probeWindowLayer("menu t800") }
             }, 800)
         }
         // 注意：**不要**在这里重建画面层（INVISIBLE→VISIBLE）。
         // 那样每次呼出控制条都会销毁并重建 SurfaceView：EXO 会闪一次黑 shutter、
         // mpv 每次 detach/attach，等于把偶发黑屏换成每次必闪，属于负优化。
+    }
+
+    /**
+     * 窗口层合成探针（PixelCopy）。
+     *
+     * 只有它能回答"按菜单那一下到底黑在哪一层"：
+     *   PixelCopy.request(window, …) 抓的是**窗口层**的合成结果，不含 SurfaceView（那是独立层）。
+     *   - 控制条可见时抓它自己的区域，若 barLum≈0 → 这一帧整个窗口层没被合成（挖洞/relayout 那条链）；
+     *   - 若 barLum 正常 → 窗口层正常，黑的是画面层（解码器/帧没提交）。
+     * 这两条以前只能靠"洋红方块"肉眼判断，现在直接落在日志里。
+     *
+     * 注意：INVISIBLE/GONE 时窗口层那片区域本来就是 0，所以探针只在 alpha>0 时才有判读意义。
+     */
+    private fun probeWindowLayer(tag: String) {
+        if (android.os.Build.VERSION.SDK_INT < 24) return
+        val bar = controlBar ?: return
+        val a = bar.alpha
+        if (a <= 0.05f) return
+        val w = bar.width
+        val h = bar.height
+        if (w <= 0 || h <= 0) return
+        runCatching {
+            val loc = IntArray(2)
+            bar.getLocationInWindow(loc)
+            val src = android.graphics.Rect(loc[0], loc[1], loc[0] + w, loc[1] + h)
+            val dst = android.graphics.Bitmap.createBitmap(32, 8, android.graphics.Bitmap.Config.ARGB_8888)
+            android.view.PixelCopy.request(window, src, dst, { r ->
+                var lum = -1
+                if (r == android.view.PixelCopy.SUCCESS) {
+                    var sum = 0L
+                    for (y in 0 until 8) for (x in 0 until 32) {
+                        val p = dst.getPixel(x, y)
+                        sum += (android.graphics.Color.red(p) * 299 +
+                            android.graphics.Color.green(p) * 587 +
+                            android.graphics.Color.blue(p) * 114) / 1000
+                    }
+                    lum = (sum / 256).toInt()
+                }
+                dst.recycle()
+                // barLum=0 基本等于"窗口层这一帧没被合成"；>0 说明窗口层在正常出画面
+                MpvDebug.log("[dark] $tag barLum=$lum res=$r alpha=$bar.alpha")
+            }, uiHandler)
+        }
     }
 
     /** 收起控制条：对齐 5.6 hideControl(:3502) —— 只置 GONE，不做任何焦点动作 */
@@ -3367,6 +3436,7 @@ class PlayActivity : Activity() {
         saveHandler.removeCallbacks(saveRunnable)
         // 先落盘再释放内核：mpv 一旦 destroy 就读不到 time-pos 了
         runCatching { savePosition(reason = "onDestroy") }
+        runCatching { saveExecutor.shutdown() }
         runCatching { mpv?.release() }
         mpv = null
         runCatching { android.view.Choreographer.getInstance().removeFrameCallback(frameTick) }
