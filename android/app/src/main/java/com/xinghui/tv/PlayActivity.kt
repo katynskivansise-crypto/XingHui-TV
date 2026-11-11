@@ -272,6 +272,7 @@ class PlayActivity : Activity() {
         findViewById<TextView>(R.id.btnScale).setOnClickListener { toggleScale() }
         // 上一集/下一集（对齐原项目 control.prev/next → checkPrev/checkNext）
         findViewById<View>(R.id.btnPrev).setOnClickListener { switchEpisode(-1) }
+        findViewById<View>(R.id.btnPlayPause).setOnClickListener { togglePlayPause() }
         findViewById<View>(R.id.btnNext).setOnClickListener { switchEpisode(1) }
         // 清晰度切换（对齐原项目 QualityAdapter/setQualityActivated）
         findViewById<View>(R.id.btnQuality).setOnClickListener { toggleQuality() }
@@ -1873,7 +1874,8 @@ class PlayActivity : Activity() {
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
             "mpvSink=$surfaceVis playView=${videoHost?.visibility} exo=${player != null} " +
-            "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${mpvPos}ms dur=${durNow()}ms " +
+            "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${snapPosMs}ms dur=${snapDurMs}ms " +
+            "playing=${snapPlaying} " +
             "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }} " +
             "winFlags=${runCatching { Integer.toHexString(window.attributes.flags) }.getOrElse { "?" }} " +
             "winFmt=${runCatching { Integer.toHexString(window.attributes.format) }.getOrElse { "?" }} " +
@@ -2069,6 +2071,14 @@ class PlayActivity : Activity() {
     private var lastSurfCreateAt = 0L
     private var stallLast = 0L
 
+    // ★/debug 快照是在 NanoHttpd 线程里跑的函数式调用，直接读 EXO 会抛
+    //   IllegalStateException(Player is accessed on the wrong thread)。
+    //   位置/时长/播放态改由主线程每 500ms 落一份缓存，快照只读缓存。
+    @Volatile private var snapPosMs = 0L
+    @Volatile private var snapDurMs = 0L
+    @Volatile private var snapPlaying = false
+    private var snapAt = 0L
+
     private val stallTick = object : Runnable {
         override fun run() {
             val now = android.os.SystemClock.uptimeMillis()
@@ -2077,6 +2087,12 @@ class PlayActivity : Activity() {
                 if (late > 120) {
                     MpvDebug.log("[stall] UI线程迟到 ${late}ms bar=${controlBar?.visibility} surfGen=$surfGen")
                 }
+            }
+            if (now - snapAt >= 500L) {
+                snapAt = now
+                snapPosMs = runCatching { session.positionMs() }.getOrDefault(snapPosMs)
+                snapDurMs = runCatching { session.durationMs() }.getOrDefault(snapDurMs)
+                snapPlaying = runCatching { session.isPlaying() }.getOrDefault(snapPlaying)
             }
             stallLast = now
             uiHandler.postDelayed(this, 100)
@@ -2120,7 +2136,7 @@ class PlayActivity : Activity() {
             focusId != 0 -> focusId
             lastBarFocusId != 0 &&
                 lastBarFocusId != R.id.btnOpening && lastBarFocusId != R.id.btnEnding -> lastBarFocusId
-            else -> R.id.btnNext
+            else -> R.id.btnPlayPause
         }
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
         if (MpvDebug.experiment != 1) findViewById<View>(target)?.requestFocus()
@@ -2210,9 +2226,9 @@ class PlayActivity : Activity() {
         currentFocus?.let { if (isInside(bar, it)) return true }
         var target = runCatching { bar.findFocus() }.getOrNull()
         if (target == null || target.visibility != View.VISIBLE) {
-            target = findViewById<View>(lastBarFocusId.takeIf { it != 0 } ?: R.id.btnNext)
+            target = findViewById<View>(lastBarFocusId.takeIf { it != 0 } ?: R.id.btnPlayPause)
         }
-        if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.btnNext)
+        if (target == null || target.visibility != View.VISIBLE) target = findViewById(R.id.btnPlayPause)
         val ok = target?.requestFocus() == true
         MpvDebug.log("[ui] 控制条可见但焦点不在条上 → 重新落点 id=${target?.id} ok=$ok")
         return ok
@@ -2414,6 +2430,7 @@ class PlayActivity : Activity() {
 
     /** 暂停/继续的界面同步（居中图标 + 常亮）：两条内核共用，避免两边各写一份走偏 */
     private fun applyPauseUi(pausing: Boolean) {
+        findViewById<android.widget.TextView>(R.id.btnPlayPause)?.text = if (pausing) "继续" else "暂停"
         if (pausing) {
             setKeepScreenOn(false)
             showPlayCenter()
