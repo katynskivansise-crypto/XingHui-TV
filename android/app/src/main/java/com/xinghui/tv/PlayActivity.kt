@@ -2140,6 +2140,37 @@ class PlayActivity : Activity() {
     private var lastMenuKeyMs = 0L
     /** 窗口未就绪时按下的菜单意图（等窗口就绪补执行，不丢键） */
     private var pendingMenu = false
+    /** 窗口未就绪时按下的其它操作键（同样补执行，不丢键） */
+    private var pendingKeyCode = 0
+    private val flushPendingKeyRun = Runnable { flushPendingKey() }
+
+    /** 允许被闸门挂起的键：不含返回键（返回必须立刻响应）、不含菜单键（它有自己的闸门） */
+    private val userKeys = setOf(
+        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER,
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
+        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND,
+    )
+
+    /**
+     * 补执行被挂起的那一下。
+     * 用合成的 DOWN+UP 一对事件走原来的处理函数，语义与正常按键完全一致
+     * （handleSeekKey 的起手/提交两段都在，不是另写一条捷径）。
+     */
+    private fun flushPendingKey() {
+        val kc = pendingKeyCode
+        if (kc == 0) return
+        pendingKeyCode = 0
+        MpvDebug.log("[key] 补执行挂起 kc=$kc winNow=${runCatching { window.decorView.hasWindowFocus() }.getOrNull()}")
+        runCatching {
+            val down = KeyEvent(KeyEvent.ACTION_DOWN, kc)
+            val up = KeyEvent(KeyEvent.ACTION_UP, kc)
+            when (kc) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> { handleSeekKey(-1, down); handleSeekKey(-1, up) }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { handleSeekKey(1, down); handleSeekKey(1, up) }
+                else -> togglePlayPause()
+            }
+        }
+    }
     /** 返回键去重：DOWN/UP 两个入口都接，500ms 内只处理一次 */
     private var lastBackMs = 0L
 
@@ -3141,6 +3172,31 @@ class PlayActivity : Activity() {
                     "touchMode=${runCatching { window.decorView.isInTouchMode }.getOrNull()} mpv=${mpv != null} exo=${player != null}"
             )
         }
+        // ★★ 通用「窗口就绪闸门」——这一轮真机 /debug 的逐字证据：
+        //   19:27:56 [key] kc=82 ... ready=false
+        //   19:27:56 [key] 菜单推迟到窗口就绪 decor=1920x1080 winFocus=false
+        //   19:27:56 [ui] 窗口焦点 hasFocus=true decor=1920x1080
+        //   19:27:56 [key] 窗口就绪，补执行挂起的菜单
+        //   19:29:34 第二次进页面，四行完全同构。19:29:10 那一按则是 winFocus=true ready=true。
+        //
+        // 也就是说：**每次进页面的第一下按键，窗口都还没有 hasWindowFocus()**。
+        // 这块 SurfaceView 一创建（[sv2] created），窗口就会丢焦并重排一次，
+        // 第一下按键正好落在"首次合成"那一拍上 —— 屏幕正在重排，用户看到的就是"按了没反应"。
+        // 菜单键因为下面那段闸门被推迟补救，所以看起来"能用"；←→/OK 没有闸门，
+        // 直接打在这一拍上。这就是"必须先按一次菜单之后所有键才正常"的全部来源：
+        // 那一下菜单把窗口的首次合成代价付掉了，之后窗口一直稳，键就一直灵。
+        //
+        // 处理：把闸门推广到所有操作键。未就绪时挂起（500ms 兜底），窗口获焦后立刻补执行。
+        // 不吞键、不加提示、不改任何视觉。
+        if (!windowReady() && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            event.keyCode in userKeys
+        ) {
+            pendingKeyCode = event.keyCode
+            MpvDebug.log("[key] 窗口未就绪，挂起 kc=${event.keyCode}")
+            uiHandler.removeCallbacks(flushPendingKeyRun)
+            uiHandler.postDelayed(flushPendingKeyRun, 500)
+            return true
+        }
         // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
         // 那一瞬间开始方向键与 OK 就全落在根上，看起来就是"没反应"。
         // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
@@ -3473,6 +3529,11 @@ class PlayActivity : Activity() {
                 MpvDebug.log("[key] 窗口就绪，补执行挂起的菜单")
                 handleMenuKey()
             }
+            // 同理：窗口未就绪时按下的 ←→/OK 也在这里补执行（见 dispatchKeyEvent 的闸门说明）
+            if (pendingKeyCode != 0) {
+                uiHandler.removeCallbacks(flushPendingKeyRun)
+                flushPendingKey()
+            }
             // ★这里绝不能再调 setLocalFocus：窗口此刻已经持有焦点，再请求一次会让
             //   WindowManager 重新派发焦点事件 → 又进 onWindowFocusChanged → 无限循环。
             //   真机日志里就是 [ui] 窗口焦点 / [win] setLocalFocus 成对刷屏、每帧两条，
@@ -3591,6 +3652,7 @@ class PlayActivity : Activity() {
         super.onDestroy()
         sniffer?.cancel()
         sniffer = null
+        runCatching { uiHandler.removeCallbacks(flushPendingKeyRun) }
         runCatching { videoHost?.releaseOwner() }
         player?.release()
         player = null
