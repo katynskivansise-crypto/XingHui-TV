@@ -34,7 +34,28 @@
             android:visibility="gone"
             app:resize_mode="fit"
             app:use_controller="false"
-            app:shutter_background_color="#00000000" />
+            app:shutter_background_color="#00000000"
+            app:surface_type="texture_view" />
+        <!-- ★surface_type="texture_view" —— 这一行是「从详情页进播放页第一下按键打空 / 首次呼条黑」的根。
+             官方 Surface types 文档（developer.android.com/media/media3/ui/surface）原文：
+               "The lifecycle of a SurfaceView's surface is tied to **view visibility**, whereas a
+                TextureView's surface lifecycle is tied to **window attachment and detachment**.
+                Therefore ... starting playback can take longer because the output surface becomes
+                available slightly later."
+             我们的情况正是它的反面：详情页这块 PlayerView 默认是 surface_view，
+             它的 surface 绑的是**可见性**，而本页离开时只走 onPause（没有 onStop 重载，
+             inlineView 也从不被设回 GONE），所以跳去播放页之后这块 surface 仍然活着 ——
+             两块 SurfaceView（1920x1080 的后台预览 + 播放页画面）在切换那几百毫秒里共存，
+             播放页窗口的首次合成被推后，winFocus 迟到，第一下按键就打空；
+             那一下菜单"刚好"把首次合成的代价付掉，于是看起来"必须先按一次菜单"。
+             改成 texture_view 后，它的 surface 绑的是**窗口 attach/detach**，离开窗口即释放，
+             与播放页的 SurfaceView 永不共存。官方同一页给的分工依据：
+               · SurfaceView 的优势（低功耗 / 精确帧时序 / HDR / DRM secure / **Android TV 上
+                 上采样设备能按屏幕全分辨率输出**）—— 这些只有全屏播放页需要，详情页小窗一样用不上；
+               · "TextureView should be used only if SurfaceView does not meet your needs" ——
+                 "不与另一个 surface 抢合成" 正好就是这里的需求。
+             所以分工是：**会共存的一方（详情页）用 texture_view，独占全屏的一方（播放页）保持 surface_view**，
+             不能反过来 —— TV 上只有 SurfaceView 才能按屏幕全分辨率输出，播放页改 texture 会掉清晰度。 -->
         <!-- 起播浮层：原版 view_widget_vod 的 info，标题 20sp、分辨率 16sp，带阴影 -->
         <RelativeLayout
             android:id="@+id/vodInfo"
