@@ -2100,6 +2100,8 @@ class PlayActivity : Activity() {
      * == 1 → onEpisodes() 弹选集并收起控制栏
      */
     private var lastMenuKeyMs = 0L
+    /** 窗口未就绪时按下的菜单意图（等窗口就绪补执行，不丢键） */
+    private var pendingMenu = false
     /** 返回键去重：DOWN/UP 两个入口都接，500ms 内只处理一次 */
     private var lastBackMs = 0L
 
@@ -2108,8 +2110,42 @@ class PlayActivity : Activity() {
         val now = System.currentTimeMillis()
         if (now - lastMenuKeyMs < 400) return
         lastMenuKeyMs = now
+        // ★窗口就绪闸门。
+        //
+        // 真机 tk6 日志（13:23:36 / 13:25:23 / 13:27:02 三次进页面完全同构）：
+        //   [key] kc=82 focus=-1 bar=false ready=false      ← 菜单到达
+        //   [bar] 呼出完成 nowFocus=DefaultTimeBar          ← 呼条在这一拍就做完了
+        //   [sv2] created / changed 1920x1080
+        //   [life] onResume ... decor=0x0                   ← 此刻窗口还没完成首次布局
+        //   [ui] 进页面焦点 ... cur=-1 winFocus=false       ← 焦点被清空
+        //   [ui] 窗口焦点 hasFocus=true decor=1920x1080     ← 窗口才真正就绪
+        //   [win] 窗口拿到焦点
+        //
+        // 也就是：**第一次按菜单永远落在"窗口首次 attach→布局→获焦"这一拍里**，
+        // 而后续每一次按键窗口都已稳定 —— 这就是"只有第一次"的全部来源。
+        // 呼条本身要新增一个图层并重算挖洞区域，它叠在窗口自身的首次合成上，
+        // 两者合成到同一帧，屏幕必然空一拍（黑），缓过来之后才继续出帧（转圈）。
+        //
+        // 处理：不丢弃这次意图，也不硬抢窗口，而是等窗口就绪后立刻执行（毫秒级，用户无感）。
+        // 这样呼条发生在稳定窗口上，不再与首次布局叠加。
+        if (!windowReady()) {
+            pendingMenu = true
+            MpvDebug.log("[key] 菜单推迟到窗口就绪 decor=${window?.decorView?.width}x${window?.decorView?.height}" +
+                " winFocus=${runCatching { window?.decorView?.hasWindowFocus() }.getOrNull()}")
+            // 兜底：万一窗口迟迟不获焦（例如被别的窗口挡住），500ms 后照常呼出，绝不吞键
+            uiHandler.postDelayed({
+                if (pendingMenu) { pendingMenu = false; handleMenuKey() }
+            }, 500)
+            return
+        }
         handleMenuKey()
     }
+
+    /** 窗口是否已经完成首次布局并拿到焦点 —— 呼条只在这之后做 */
+    private fun windowReady(): Boolean = runCatching {
+        val dv = window?.decorView
+        dv != null && dv.width > 0 && dv.height > 0 && dv.hasWindowFocus()
+    }.getOrDefault(false)
 
     /** 调试快照文本：只在 /debug 页面上出现，播放页 UI 不变 */
     private fun mpvDebugLine(): String {
@@ -3327,6 +3363,12 @@ class PlayActivity : Activity() {
             (rootView ?: findViewById<View>(android.R.id.content))?.requestFocus()
         }
         if (hasFocus) {
+            // 窗口第一次就绪：把"进页面那一拍按下的菜单"补执行（见 fireMenuKeyOnce 的闸门说明）
+            if (pendingMenu) {
+                pendingMenu = false
+                MpvDebug.log("[key] 窗口就绪，补执行挂起的菜单")
+                handleMenuKey()
+            }
             // ★这里绝不能再调 setLocalFocus：窗口此刻已经持有焦点，再请求一次会让
             //   WindowManager 重新派发焦点事件 → 又进 onWindowFocusChanged → 无限循环。
             //   真机日志里就是 [ui] 窗口焦点 / [win] setLocalFocus 成对刷屏、每帧两条，
