@@ -60,7 +60,23 @@ class PlayActivity : Activity() {
      * 后面写进去的位置就落到另一行上 —— 退出再进、返回详情页都读不到，表现就是回片头。
      * 冻结后：写和读永远是同一个字符串。
      */
-    private val historyKey: String by lazy { HistoryStore.keyOf(vodId, vodName, epUrl) }
+    // ★不能用 by lazy 冻结：yield 出来的键只反映"第一次访问那一刻"的 vodId/vodName/epUrl。
+    //   而运行中这三个值会被合法改写 ——
+    //     · 换集 epUrl = ep
+    //     · 手机推送 vodId = playable
+    //     · 自动换源 vodId = target.vodId
+    //   冻结之后，换源/推送的新内容仍然往旧剧那一行写历史，下次进入还按旧剧的位置续播；
+    //   vodId 为空（只靠 epUrl 推键）时换集更糟：不同集算成同一个键，直接串位置。
+    //   这里保留"算一次就缓存"的性能意图，改为在输入真的变化时失效。
+    private var historyKeyCache: String? = null
+    private val historyKey: String
+        get() = historyKeyCache ?: HistoryStore.keyOf(vodId, vodName, epUrl)
+            .also { historyKeyCache = it }
+
+    /** 键推导的任一输入被改写后必须调用，否则历史继续写到旧剧/旧集名下 */
+    private fun invalidateHistoryKey() {
+        historyKeyCache = null
+    }
     private var vodName = ""
     private var vodPic = ""
     private var flag = ""
@@ -143,6 +159,7 @@ class PlayActivity : Activity() {
         vodPic = intent.getStringExtra("vod_pic") ?: ""
         flag = intent.getStringExtra("flag") ?: ""
         epUrl = intent.getStringExtra("ep_url") ?: ""
+        invalidateHistoryKey()
         directUrl = intent.getStringExtra("direct_url") ?: ""
         pushMode = intent.getBooleanExtra("push_mode", false)
         // 直播频道与手机推送写入历史时，vod_id 存的就是播放地址本身（原版同样如此）。
@@ -499,6 +516,7 @@ class PlayActivity : Activity() {
             }
             flag = fl
             epUrl = ep
+            invalidateHistoryKey()
         }.onFailure { err = it.message ?: "解析失败" }
         // 嗅探分支：url 不是媒体直链、playUrl 是解析页 → 交给 WebView 抓真实地址
         if (sniffTarget.isNotBlank()) {
@@ -663,7 +681,10 @@ class PlayActivity : Activity() {
                     val playable = toPlayableUrl(u) ?: u
                     // 推送进来的网页地址本身不可播：抓到真流后把 vod_id 换成流地址，
                     // 历史里这条记录才能被再次点开回放（否则点回去又是那个网页地址）。
-                    if (pushMode) vodId = playable
+                    if (pushMode) {
+                        vodId = playable
+                        invalidateHistoryKey()
+                    }
                     playUrl(playable, merged)
                     updateQualityBtn()
                     recordHistory()
@@ -784,6 +805,7 @@ class PlayActivity : Activity() {
             return false
         }
         vodId = target.vodId
+        invalidateHistoryKey()
         siteKey = target.source
         runOnUiThread {
             Toast.makeText(this, "自动切换到站点[${target.source}]，尝试播放《${target.vodName}》", Toast.LENGTH_LONG).show()
@@ -855,9 +877,10 @@ class PlayActivity : Activity() {
 
     private val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
     /** 历史落盘专用单线程：顺序保证与主线程解耦（退场那条仍走同步） */
-    private val saveExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread(r, "xh-history-save").apply { isDaemon = true }
-    }
+    private val saveExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "xh-history-save").apply { isDaemon = true }
+        }
     private val saveRunnable = object : Runnable {
         override fun run() {
             // 这是每 15 秒的周期落盘，不是返回键。以前它和退场共用 "[back] 保存" 这个标签，
@@ -916,6 +939,9 @@ class PlayActivity : Activity() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // seek 会让 isPlaying 瞬时变 false（EXO 重建缓冲），那不是"用户暂停"。
+                // 真机里每次 [key] 跳 之前都跟一条 保存[暂停]，纯属自造的无效写盘。
+                if (seekingByKey) return
                 if (isPlaying) scheduleSave() else savePosition(reason = "暂停")
             }
         })
@@ -963,13 +989,22 @@ class PlayActivity : Activity() {
         //   再 apply，落在主线程就是那一秒 42 帧（掉 18 帧、约 300ms）。
         //   落盘和呼条抢同一个主线程帧，本身就是自造的卡顿。
         if (force) {
+            // ★必须先把排队的后台写排空再同步写，否则顺序会反过来：
+            //   后台那条带着更早的 pos（真机 22:41:06 bg pos=416924），退场同步写 417876，
+            //   若后台任务晚一点才跑，就会把退场写好的准确位置**覆盖回旧值**。
+            //   表现是"下次进来从小一点的位置续播"，而且很难复现（取决于线程调度）。
+            runCatching { saveExecutor.submit {}.get(2, java.util.concurrent.TimeUnit.SECONDS) }
             HistoryStore(this).addHistory(key, name, pic, "", fl, ep)
             HistoryStore(this).setPosition(key, ep, pos)
         } else {
-            saveExecutor.execute {
-                runCatching {
-                    HistoryStore(this).addHistory(key, name, pic, "", fl, ep)
-                    HistoryStore(this).setPosition(key, ep, pos)
+            // executor 在 onDestroy 已 shutdown 后 execute 会抛 RejectedExecutionException，
+            // 这里包住：宁可这一次后台写丢掉（退场那条是同步写，不会丢），也不要在 onPause 崩。
+            runCatching {
+                saveExecutor.execute {
+                    runCatching {
+                        HistoryStore(this).addHistory(key, name, pic, "", fl, ep)
+                        HistoryStore(this).setPosition(key, ep, pos)
+                    }
                 }
             }
         }
@@ -2303,7 +2338,16 @@ class PlayActivity : Activity() {
             else -> R.id.timeBar
         }
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
-        if (MpvDebug.experiment != 1) findViewById<View>(target)?.requestFocus()
+        var focusOk = false
+        if (MpvDebug.experiment != 1) {
+            focusOk = runCatching { findViewById<View>(target)?.requestFocus() == true }.getOrDefault(false)
+        }
+        // 呼条是否真的把焦点落进条里，这一行说了算。以前只有"条出来了"这一条证据，
+        // 焦点到底进没进条完全看不出来 —— 而"条出来但焦点没进条"就是我们反复踩的那个坑。
+        MpvDebug.log(
+            "[bar] 呼出完成 alpha=${controlBar?.alpha} target=$target focusOk=$focusOk" +
+                " nowFocus=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName})"
+        )
         // nextFocus 链只影响**后续**方向键，不影响刚才这次 requestFocus，
         // 所以推到下一帧再算，别压在呼条那一帧上（17 个按钮 × 2 个属性）。
         uiHandler.post { runCatching { setControlNextFocus() } }
@@ -2316,6 +2360,7 @@ class PlayActivity : Activity() {
             val exoPlaying = runCatching { player?.isPlaying }.getOrNull()
             MpvDebug.log("[probe] menu t0 focus=$focusIdNow exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
             // 黑的是"按菜单那一帧到约 1 秒"，所以采三个点：刚落点、300ms、800ms
+            darkLums.clear()
             probeWindowLayer("menu t0")
             uiHandler.postDelayed({ runCatching { probeWindowLayer("menu t300") } }, 300)
             uiHandler.postDelayed({
@@ -2346,6 +2391,30 @@ class PlayActivity : Activity() {
      *
      * 注意：INVISIBLE/GONE 时窗口层那片区域本来就是 0，所以探针只在 alpha>0 时才有判读意义。
      */
+    /**
+     * 让本窗口始终优先持有输入焦点。
+     * Window.setLocalFocus 在部分 SDK stub 里签名不一致（一参 / 两参都出现过），
+     * 这里用反射按"一参 → 两参"依次尝试，失败也不影响播放页。
+     * 目的只有一个：进页面那一小段时间里窗口没焦点时，遥控键不会整段丢掉。
+     */
+    private fun setLocalFocusCompat() {
+        val w = window ?: return
+        runCatching {
+            val one = w.javaClass.getMethod("setLocalFocus", java.lang.Boolean.TYPE)
+            one.invoke(w, true)
+            MpvDebug.log("[win] setLocalFocus(1参)=true winFocus=${w.decorView.hasWindowFocus()}")
+            return
+        }
+        runCatching {
+            val two = w.javaClass.getMethod("setLocalFocus", java.lang.Boolean.TYPE, java.lang.Boolean.TYPE)
+            two.invoke(w, true, true)
+            MpvDebug.log("[win] setLocalFocus(2参)=true winFocus=${w.decorView.hasWindowFocus()}")
+        }
+    }
+
+    /** 最近一次呼条三个采样点的亮度（t0/t300/t800），用于给出黑帧结论 */
+    private val darkLums = LinkedHashMap<String, Int>()
+
     private fun probeWindowLayer(tag: String) {
         if (android.os.Build.VERSION.SDK_INT < 24) return
         val bar = controlBar ?: return
@@ -2374,6 +2443,22 @@ class PlayActivity : Activity() {
                 dst.recycle()
                 // barLum=0 基本等于"窗口层这一帧没被合成"；>0 说明窗口层在正常出画面
                 MpvDebug.log("[dark] $tag barLum=$lum res=$r alpha=$bar.alpha")
+                // 三个采样点收齐后给一行结论，/debug 顶部直接看，不用在长日志里找
+                val key = tag.substringAfter(' ')
+                darkLums[key] = lum
+                if (darkLums.size >= 3 || (darkLums.size == 1 && key != "t0")) {
+                    val t0 = darkLums["t0"] ?: -1
+                    val t300 = darkLums["t300"] ?: -1
+                    val t800 = darkLums["t800"] ?: -1
+                    val min = listOf(t0, t300, t800).filter { it >= 0 }.minOrNull() ?: -1
+                    val verdict = when {
+                        min < 0 -> "采样无有效值"
+                        min <= 2 -> "整窗这一帧没被合成（窗口层被跳过）"
+                        else -> "窗口层在正常出画面，黑的是视频层"
+                    }
+                    MpvDebug.darkLine =
+                        "t0=$t0 t300=$t300 t800=$t800 最暗=$min → $verdict"
+                }
             }, uiHandler)
         }
     }
@@ -2718,7 +2803,7 @@ class PlayActivity : Activity() {
     /** 长按重复事件的最小间隔：T1 的 key repeat 是 40~60ms 一个，原样累加会放大 10 倍 */
     private val SEEK_REPEAT_GAP_MS = 300L
     /** 最后一次方向键按下后多久自动提交（不依赖 ACTION_UP，只发 DOWN 的遥控也能跳） */
-    private val SEEK_COMMIT_IDLE_MS = 400L
+    // 已删除 SEEK_COMMIT_IDLE_MS：抬手即 seek 之后这条"空闲提交"的阈值没有任何使用点。
     private var lastSeekRepeatAt = 0L
     /** 一次按住期间已经计入的台阶数（用来放大后面的步长） */
     private var seekTicks = 0
@@ -3325,6 +3410,8 @@ class PlayActivity : Activity() {
             (rootView ?: findViewById<View>(android.R.id.content))?.requestFocus()
         }
         if (hasFocus) {
+            setLocalFocusCompat()
+            MpvDebug.log("[win] 窗口拿到焦点 localFocus 已置位 decor=${window.decorView.width}x${window.decorView.height}")
             applyImmersive()
             // 关掉选集弹窗、从系统框回来时，mpv 的 vo 可能已经被窗口变化带掉；
             // 等布局稳定后再自检一次，避免黑屏只剩声音
@@ -3397,6 +3484,15 @@ class PlayActivity : Activity() {
         //   参考实现（5.6 / 原版）的主题是 windowBackground=@null，窗口本身不铺底色，
         //   黑由根布局自己画，所以它永远不黑。这里改成置空，与主题对齐。
         runCatching { window.setBackgroundDrawable(null) }
+        // ★本窗口始终持有输入焦点。
+        //   没有这一行时，窗口的 hasWindowFocus 会在进页面后一小段时间内为 false
+        //   （主题开了 windowDisablePreview，首帧之前窗口不参与输入分发）。
+        //   这段时间里遥控键根本不进 Activity —— 不是我们哪个分支吞了键，
+        //   是按键压根没到 dispatchKeyEvent，所以按什么都没反应。
+        //   等窗口焦点稳定下来（用户往往是先按了一下菜单）之后，所有键才一起"活过来"，
+        //   退出重进又是同一个开头。
+        //   setLocalFocus(true) 让 WindowManager 优先把焦点给本窗口，不再等系统按顺序发。
+        setLocalFocusCompat()
         // 回到播放页时把焦点兜回来：没有焦点视图的窗口在部分老 ROM 上收不到遥控键，
         // 表现就是"进页面什么都不响应，先按一下菜单键才好"。
         rootView?.post {

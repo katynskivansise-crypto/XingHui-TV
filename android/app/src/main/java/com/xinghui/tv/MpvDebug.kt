@@ -33,6 +33,15 @@ object MpvDebug {
     @Volatile
     var snapshot: (() -> String)? = null
 
+    /**
+     * 黑帧探针结论。呼条那 1 秒到底"整窗没被合成"还是"画面层没出帧"，
+     * 全由这一行回答，不再需要从长日志里翻 [dark]。
+     *   barLum≈0  → 窗口层这一帧被整块跳过（挖洞区域重算 / 合成器丢了这层）
+     *   barLum>0  → 窗口层在出画面，黑的是视频层
+     */
+    @Volatile
+    var darkLine: String? = null
+
     @Synchronized
     fun log(msg: String) {
         val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
@@ -47,6 +56,9 @@ object MpvDebug {
         return buildString {
             appendLine("== 当前状态 ==")
             appendLine(head)
+            appendLine()
+            appendLine("== 黑帧探针（最近一次呼条）==")
+            appendLine(darkLine ?: "（还没按过菜单，或呼条时条是隐藏态）")
             appendLine()
             appendLine("== 最近事件（新→旧）==")
             val it = lines.descendingIterator()
