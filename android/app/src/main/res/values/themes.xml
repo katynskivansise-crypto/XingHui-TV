@@ -1,13 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 主主题。逐项对齐原版 leanback/res/values/styles.xml 的 BaseTheme：
-         原版 BaseTheme parent=Theme.MaterialComponents.Light.NoActionBar，
-         这里 parent 换成原生全屏主题（本工程不引 MaterialComponents），其余 item 保持一致。
-
-         最容易漏的是 windowTranslucentStatus / windowTranslucentNavigation 两条：
-         原版全屏并不是只靠 windowFullscreen，而是这两条让 DecorView 不再 fitsSystemWindows，
-         内容才真正从屏幕 (0,0) 起算、铺满整块屏。少了它们，部分 ROM（斐讯 T1 这种）
-         会保留一条 insets，播放页画面四周就露出一圈窗口背景（浅色时看着就是"白条"）。 -->
+    <!-- 主主题：只做「全屏 + 不预显示 + 不留动画」三件事，其余一律交给系统默认。
+         原版 BaseTheme 的 parent 是 MaterialComponents.Light.NoActionBar（它带一整套 AppCompat 栈），
+         我们这边不引 MaterialComponents，换成原生全屏主题，形态等价。
+         铺满屏幕靠 windowFullscreen + 页面里的 SYSTEM_UI 布局 flag，**不靠 translucent 系列**。 -->
     <style name="Theme.TVBox" parent="android:Theme.Black.NoTitleBar.Fullscreen">
         <item name="android:windowFullscreen">true</item>
         <!-- 原版 BaseTheme 是 android:windowBackground=@null（什么都不画），不是铺一层不透明黑。
@@ -20,8 +16,14 @@
              注意 colorBackground 也要跟着空，否则框架会拿它当窗口底色。 -->
         <item name="android:windowBackground">@null</item>
         <item name="android:colorBackground">@null</item>
-        <item name="android:windowTranslucentStatus">true</item>
-        <item name="android:windowTranslucentNavigation">true</item>
+        <!-- ★这两条已撤。它们会让整个窗口走「半透明合成路径」（LayoutParams 带
+             FLAG_TRANSLUCENT_STATUS / FLAG_TRANSLUCENT_NAVIGATION），窗口 buffer 变成带 alpha 的
+             表面，SurfaceView 的挖洞（透明区域）要在半透明表面上再算一遍 —— 全屏播放页正好是
+             「大面积挖洞 + 浮层反复覆盖同一块矩形」，这是这条路径最容易出错的地方。
+             铺满屏幕不需要它：本页 onWindowFocusChanged 里已经设了
+             LAYOUT_STABLE / LAYOUT_HIDE_NAVIGATION / HIDE_NAVIGATION / FULLSCREEN，
+             再加上 windowFullscreen=true，内容本来就从 (0,0) 起算。
+             原版用它是配合自己的小窗结构；我们是全屏画面，形态不同，不能照搬。 -->
         <item name="android:windowDisablePreview">true</item>
         <item name="android:windowAnimationStyle">@null</item>
     </style>

@@ -464,7 +464,6 @@ class MpvPlayer(
     }
 
     fun release() {
-        redrawHandler.removeCallbacksAndMessages(null)
         abandonAudioFocus()
         if (!inited) return
         // 先关闸再动 native：destroy 期间 surfaceDestroyed 和延迟的 idle 探测都可能进来
@@ -689,69 +688,8 @@ class MpvPlayer(
      *
      * @return true 表示确实做过复位
      */
-    fun recoverRendering(): Boolean {
-        val surface = attachedSurface
-        // 入口无条件打点：之前几个早退分支是静默 return，日志里就看不出「调用过但被挡回去了」
-        MpvDebug.log(
-            "[mpv] 渲染自检 进入 inited=$inited surfaceReady=$surfaceReady " +
-                "surface=${surface != null} valid=${surface?.isValid} vo=${runCatching { voNow() }.getOrElse { "读取异常" }}"
-        )
-        if (!inited || !surfaceReady) return false
-        if (surface == null) return false
-        if (!surface.isValid) return false
-        val vo = voNow()
-        if (vo != "空" && vo != "未初始化" && vo != "读取失败" && vo.isNotBlank()) {
-            MpvDebug.log("[mpv] 渲染自检 vo=$vo（正常，不处理）")
-            return false
-        }
-        MpvDebug.log("[mpv] 渲染自检 vo=$vo → 复位")
-        // render API 下 vo 恒为 libmpv，帧在我们自己手里：
-        // 不需要 detach/attach 重建渲染后端，直接把上一帧再画一遍即可 ——
-        // 这正是"画面层空白一帧"能盖住、而重绘能盖住的那一类。
-        // ★这里绝对不能重新 attach。
-        //   attach 的实现是「eglDestroySurface 旧表面 → 为新窗口重建」，
-        //   而 render context 里还有待上屏的帧，重复 attach 会让 mpv 拿到一个已销毁的 EGLSurface
-        //   → native 层 SIGSEGV，真机表现正是「按菜单键瞬间闪退」。
-        //   render API 下恢复画面的唯一动作就是：把上一帧再画一遍。
-        runCatching { core.redrawNow() }
-        MpvDebug.log("[mpv] vo 已复位 gpu")
-        return true
-    }
-
-    /** 调试用：surface 是否还挂着（控制条呼出后黑屏要先看这个） */
+    /** 调试用：surface 是否还挂着 */
     fun surfaceReadyNow(): Boolean = surfaceReady
-
-    /** 主动把上一帧重绘上屏：窗口合成被扰动时用它兜住"空白一帧" */
-    fun redrawNow() {
-        if (!inited || !surfaceReady) return
-        runCatching { core.redrawNow() }
-    }
-
-    /**
-     * 窗口扰动期连续重绘。
-     *
-     * 只重绘一帧不够：层的 buffer 可能在合成之后才被系统丢弃，
-     * 那一次 redrawNow 就白做了，屏幕上仍然空着。这里在 1.2 秒内每 33ms 重贴一次，
-     * 只要 buffer 被丢弃，下一个 tick 就补上 —— 用户看到的是"从没黑过"。
-     * 必须是 mpv：render API 下我们才有这个「同一帧反复上屏」的能力。
-     */
-    private val redrawHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var redrawUntil = 0L
-    private val redrawTick = object : Runnable {
-        override fun run() {
-            if (android.os.SystemClock.uptimeMillis() > redrawUntil) return
-            runCatching { core.redrawNow() }
-            redrawHandler.postDelayed(this, 33)
-        }
-    }
-
-    /** @param durationMs 覆盖"扰动 + 系统合成重算"整段窗口期 */
-    fun redrawFor(durationMs: Long) {
-        if (!inited || !surfaceReady) return
-        redrawUntil = android.os.SystemClock.uptimeMillis() + durationMs
-        redrawHandler.removeCallbacks(redrawTick)
-        redrawHandler.post(redrawTick)
-    }
 
     /** 由宿主 Activity 的 onPause/onResume 置位：后台期间不把 idle 判定成播放中断 */
     fun setBackground(value: Boolean) {

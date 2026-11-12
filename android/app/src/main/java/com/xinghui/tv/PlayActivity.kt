@@ -139,7 +139,6 @@ class PlayActivity : Activity() {
         }
         // 调试快照：手机浏览器打开 http://盒子IP:9978/debug 就能看到这份状态（界面零改动）
         MpvDebug.snapshot = { mpvDebugLine() }
-        android.view.Choreographer.getInstance().postFrameCallback(frameTick)
         // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」
         // ★build 标记 = 本包的身份证。贴 /debug 时看这一行的 build 值就能判断
         //   装上的到底是不是这一版：tk4 = 画面层已脱离 PlayerView。
@@ -152,7 +151,12 @@ class PlayActivity : Activity() {
         // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
         // 全屏靠主题的 windowFullscreen + 原版那套 systemUiVisibility（见 applyImmersive），
         // 不再额外下发窗口 flag —— 那两条 flag 会让窗口反复 relayout，正是黑屏的来源。
-        runCatching { WallpaperStore.apply(this) }
+        // ★播放页不铺壁纸。原版这里是「小窗 + 详情」结构，壁纸在画面四周可见；
+        //   我们是全屏画面，壁纸 100% 被画面盖住，唯一实际作用是**把窗口背景变成一张不透明 drawable** ——
+        //   SurfaceView 靠窗口挖洞露画面，窗口不透明就等于把洞堵死。视觉无收益、风险全留下。
+        //   其它页面（首页/详情/收藏/历史）继续铺壁纸，那里看得到。
+        runCatching { window.setBackgroundDrawable(null) }
+            .onFailure { MpvDebug.log("[boot] ★窗口背景置空失败：$it") }
 
         vodId = intent.getStringExtra("vod_id") ?: ""
         vodName = intent.getStringExtra("vod_name") ?: ""
@@ -180,12 +184,20 @@ class PlayActivity : Activity() {
         )
         session.cueSink = { group -> videoHost?.subtitleView?.setCues(group.cues) }
         session.setExoBuilder { h -> rebuildPlayerInternal(h) }
+        // 这三处是"一处不中，整页静默"的关键路径，失败必须出声：
+        // 之前一律 runCatching 吞掉，画面层没接上时 videoHost=null，表现就是黑屏 + 按键全无反应，
+        // 而日志里一个字都没有 —— 这正是"改了没效果、看不出接线断没断"的来源。
         videoHost = runCatching {
             VideoHost(
                 findViewById(R.id.videoFrame),
                 findViewById(R.id.videoSurface),
                 findViewById(R.id.subtitleView)
             )
+        }.onFailure {
+            MpvDebug.log("[boot] ★画面层构建失败，本页将黑屏且按键无反馈：" +
+                "videoFrame=${findViewById<View>(R.id.videoFrame)?.javaClass?.simpleName} " +
+                "videoSurface=${findViewById<View>(R.id.videoSurface)?.javaClass?.simpleName} " +
+                "subtitle=${findViewById<View>(R.id.subtitleView)?.javaClass?.simpleName} err=$it")
         }.getOrNull()
         enableKeepContent()
         /**
@@ -252,7 +264,7 @@ class PlayActivity : Activity() {
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         bindControlBar()
         videoHost?.post { setupSharedSurface() }
-        uiHandler.postDelayed(stallTick, 100)
+        uiHandler.postDelayed(snapTick, 1000)
         // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
         // 用 EXO 时完全看不见 surface 有没有被重建。画面黑一下如果是 surface 重建，
         // 这一行必然出现；如果不出现，黑就与 surface 无关，方向直接分叉。
@@ -275,6 +287,9 @@ class PlayActivity : Activity() {
                 val playingNow = runCatching { player?.isPlaying }.getOrNull()
                 MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} gen=$surfGen " +
                     "kernel=${if (isMpvMode()) "mpv" else "exo"} startGen=$startGen pos=${posNow}ms playing=$playingNow mpvPos=${mpvPos}ms")
+                // ★预热必须放在 surface 真正创建之后：挖洞代价是 SurfaceView 这件事的代价，
+                //   在 surface 还不存在时去改控制条 alpha 等于白付（日志顺序也是 created 在 playUrl 之后）。
+                warmKeyPathAhead()
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
                 MpvDebug.log("[sv2] changed ${w}x$hh fmt=$f kernel=${if (isMpvMode()) "mpv" else "exo"}")
@@ -288,7 +303,7 @@ class PlayActivity : Activity() {
         // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
         // 起播前这段（地址解析）屏幕本来就是黑的：不亮转圈的话，用户按一下菜单正好赶上这段，
         // 看到的就是「按菜单把画面按黑了」，而实际是还没出帧。这里从进页面就让"加载中"亮着。
-        showPlayProgress()
+        showPlayProgress("进页面解析")
         MpvDebug.log("[play] 进页面 开始解析/起播 t=${System.currentTimeMillis() % 100000}")
         updateDecodeText()
         updatePlayerText()
@@ -381,7 +396,7 @@ class PlayActivity : Activity() {
         // 解析要发网络请求（引擎 player / csp 源），这段到 ExoPlayer 第一次状态回调之间
         // 播放器还没接管，shutter 盖着就是纯黑。原版同样的空档是 progressLayout.showProgress()，
         // 这里先盖上转圈，等 STATE_BUFFERING / READY 回调再按原版时机切换。
-        showPlayProgress()
+        showPlayProgress("resolvePlay")
         var url = ""
         var err = ""
         var sniffTarget = ""
@@ -737,8 +752,14 @@ class PlayActivity : Activity() {
     /** 加载层（转圈）是否还亮着 —— 也就是"画面还没出来" */
     private var progressShown = false
 
-    private fun showPlayProgress() {
+    private fun showPlayProgress(reason: String = "其它") {
         progressShown = true
+        // 转圈是谁点亮的 —— 这是区分「EXO 真的重新缓冲」与「我们自己误亮」的唯一依据
+        MpvDebug.log(
+            "[prog] 转圈 显示 来源=$reason state=${runCatching { player?.playbackState }.getOrNull()}" +
+                " playing=${runCatching { player?.isPlaying }.getOrNull()} pos=${runCatching { player?.currentPosition }.getOrNull()}" +
+                " surfGen=$surfGen"
+        )
         runOnUiThread {
             val v = findViewById<View>(R.id.playProgress)
             v?.alpha = 1f
@@ -776,7 +797,6 @@ class PlayActivity : Activity() {
         val next = nextLineIndex()
         if (next == null) return false
         val line = vodLines[next]
-        runOnUiThread { Toast.makeText(this, "播放失败，自动切换线路：${line.name}", Toast.LENGTH_SHORT).show() }
         Thread { resolvePlay(line.name, line.episodes.firstOrNull()?.second ?: vodId) }.start()
         return true
     }
@@ -871,6 +891,9 @@ class PlayActivity : Activity() {
      */
     private var pendingSeekAccum: Long = 0
 
+    /** seek 下发时刻，用于量化"seek 到画面恢复播放"停了多久 */
+    private var lastSeekCommitAt = 0L
+
     /**
      * 本次起播将要落到的那一点（续播点）。起播前按快进时用它当基准。
      *
@@ -916,7 +939,7 @@ class PlayActivity : Activity() {
                 // 原版那 3 秒里显示的是居中的转圈，不是黑屏；我们之前没接这一段，
                 // 所以 shutter 盖着的时候看起来就是纯黑。
                 when (state) {
-                    Player.STATE_BUFFERING -> showPlayProgress()
+                    Player.STATE_BUFFERING -> showPlayProgress("BUFFERING回调")
                     Player.STATE_READY, Player.STATE_ENDED -> hidePlayProgress()
                     else -> Unit
                 }
@@ -925,6 +948,7 @@ class PlayActivity : Activity() {
                     return
                 }
                 if (state != Player.STATE_READY) return
+
                 val p = player ?: return
                 uiHandler.post { if (barShown()) ensureBarFocus() }
                 uiHandler.post {
@@ -962,7 +986,16 @@ class PlayActivity : Activity() {
                 // seek 会让 isPlaying 瞬时变 false（EXO 重建缓冲），那不是"用户暂停"。
                 // 真机里每次 [key] 跳 之前都跟一条 保存[暂停]，纯属自造的无效写盘。
                 if (seekingByKey) return
-                if (isPlaying) scheduleSave() else savePosition(reason = "暂停")
+                if (isPlaying) {
+                    lastSeekCommitAt.takeIf { it > 0L }?.let { t ->
+                        val gap = android.os.SystemClock.uptimeMillis() - t
+                        if (gap < 5_000) {
+                            MpvDebug.log("[play] seek 后恢复播放 停顿=${gap}ms")
+                            lastSeekCommitAt = 0L
+                        }
+                    }
+                    scheduleSave()
+                } else savePosition(reason = "暂停")
             }
         })
     }
@@ -1234,7 +1267,6 @@ class PlayActivity : Activity() {
         player = built
         session.adoptExo(built)
         // 玩家表面探针必须在绑定之后挂：media3 会在这时把 surface 交给播放器
-        attachExoSurfaceProbe()
         applyCaptionStyle()
         attachPlayerListeners()
         return built
@@ -1664,7 +1696,6 @@ class PlayActivity : Activity() {
     private val mpvWatchdog = Runnable {
         if (mpvLoaded || activeUrl.isBlank()) return@Runnable
         Log.e("XingHuiTV", "[mpv] 起播超时，回退 EXO：${activeUrl.take(60)}")
-        Toast.makeText(this, "mpv 起播超时，本页改用 EXO 播放", Toast.LENGTH_LONG).show()
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
@@ -1720,7 +1751,7 @@ class PlayActivity : Activity() {
         val b = controlBar ?: return false
         // 常驻 VISIBLE 之后，"显示中"只能按 alpha 判（同一个函数在 showControl/hideControl/按键
         // 三处都用，判据必须唯一，否则会出现"看着显示着、代码认为已隐藏"这种劈叉）
-        return b.visibility == View.VISIBLE && b.alpha > 0.5f
+        return b.visibility == View.VISIBLE
     }
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
@@ -1758,8 +1789,13 @@ class PlayActivity : Activity() {
         // 子视图照常构建 display list，挖洞区域从第一帧起就包含整条，之后只剩改 alpha（纯重绘）。
         // ★这不是"透明显示一次再收起"那种预热 —— 那种预热要收尾，收尾会把用户那次呼出的条收掉，
         //   之前踩过（要按两次）。这里从头到尾只有一种可见性状态，没有任何收尾动作。
-        controlBar?.visibility = View.VISIBLE
-        controlBar?.alpha = 0f
+        // ★回归官方/原版语义：控制条初始 GONE，呼出时 VISIBLE，收起时 GONE。
+        //   之前那套"常驻 VISIBLE + 只用 alpha 显隐"是自造路径：官方 PlayerView 的 controller
+        //   和原版 @id/control 都是 GONE/VISIBLE，全世界播放器都用这一个语义，没有任何一处
+        //   需要为此改窗口形态。我们换成 alpha 之后并没有让现象消失，反而多了一个
+        //   "窗口层永远有一整条带 alpha 的图层"的差异（HWC 图层数变化会让合成回退到 GPU）。
+        controlBar?.visibility = View.GONE
+        controlBar?.alpha = 1f
         runCatching {
             (controlBar as? android.view.ViewGroup)?.descendantFocusability =
                 android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
@@ -2089,30 +2125,9 @@ class PlayActivity : Activity() {
      *   3. 表面一直 valid、状态一直 READY，画面还黑 —— 那就是合成层挖洞被盖住，播放器侧没毛病
      * 这三条以前全靠猜，现在按一下菜单就同时打出来。
      */
-    private val exoProbeHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var exoProbeSurface: android.view.SurfaceView? = null
-
-    private val exoHolderCallback = object : android.view.SurfaceHolder.Callback {
-        override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-            MpvDebug.log("[exo] surfaceCreated ${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()}")
-        }
-        override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
-            MpvDebug.log("[exo] surfaceChanged ${width}x${height} fmt=$format")
-        }
-        override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-            MpvDebug.log("[exo] surfaceDestroyed state=${exoStateName(player?.playbackState)}")
-        }
-    }
-
-    private fun exoStateName(state: Int?): String = when (state) {
-        Player.STATE_IDLE -> "IDLE"
-        Player.STATE_BUFFERING -> "BUFFERING"
-        Player.STATE_READY -> "READY"
-        Player.STATE_ENDED -> "ENDED"
-        else -> "null"
-    }
-
     /** 给 EXO 的画面表面挂生命周期探针：只在 EXO 模式下挂，mpv 模式不动 */
+
+
     // ---------- 窗口形态实验档（3 / 4）：验证「整窗不透明」是不是黑屏的成因 ----------
     /**
      * 原版窗口：主题 windowBackground=@null，根布局没有背景 —— 窗口里除了画面那一格，
@@ -2128,68 +2143,39 @@ class PlayActivity : Activity() {
      * 副作用：画面四周的留边会露出窗口壁纸（原版就是这个样子），属于预期。
      */
     private fun applyWindowShapeExperiment() {
-        val exp = MpvDebug.experiment
         /**
-         * 窗口形态现在分三档语义（其余档位只管控制条/取证）：
-         *   默认（0/1/2/5/6）→ 「视频矩形上一个像素都不画」：窗口 TRANSLUCENT + 根布局透明 + 快门透明
-         *   3/4          → 老实验：只清窗口背景 / 再清根布局（外观近似，但仍不透明窗口）
-         *   7            → 回退到旧结构（不透明黑窗口 + 黑根布局），只用来证明新结构是不是真修好了
+         * ★默认路径：**什么都不做**，窗口形态完全交给主题（Theme.TVBox：windowBackground=@null、
+         * windowDisablePreview=true、无 windowAnimation）。这是官方形态，也是原版形态。
          *
-         * 判黑结论（真机）：菜单键按下那约 1 秒里，左上角洋红方块还在 —— 应用窗口这一层画得好好的，
-         * 黑是它自己画上去的不透明黑；SurfaceView 靠窗口挖洞露画面，挖洞那一拍失效就整屏黑。
-         * 根治 = 窗口透明后 SurfaceView 位于窗口层之下，透明像素直接透出视频层，挖洞对不对都无所谓。
-         * 留边处的黑由系统背景（T1 无壁纸=黑）提供，视觉不变。
+         * 以前这里在默认档跑了两件事，都是负优化：
+         *   · window.setFormat(TRANSLUCENT) —— 运行时改窗口 pixel format = 向 SurfaceFlinger
+         *     申请换一整套窗口 buffer（整窗表面重建）；此后这个窗口永久是半透明合成路径，
+         *     SurfaceView 的图层处理也跟着换了一套，属于为了绕一个没证实的假设而动最底层的东西；
+         *   · rootView.setBackgroundColor(TRANSPARENT) —— 把根布局的底色也拆掉。
+         * 两条都没有任何一次真机 A/B 证明过有效，只在"日志里看着合理"。
+         *
+         * 只在显式档位上保留实验能力，默认一个字符都不改窗口：
+         *   3 / 4 / 6 / 7 —— 仅用于对照取证，需要退出播放页再进
          */
-        runCatching { window.setBackgroundDrawable(null) }
+        val exp = MpvDebug.experiment
         if (exp == 7) {
             runCatching { window.setFormat(android.graphics.PixelFormat.OPAQUE) }
             runCatching { rootView?.setBackgroundColor(android.graphics.Color.BLACK) }
-            runCatching { }
-            MpvDebug.log("[exp7] 回退旧结构：不透明黑窗口 + 黑根布局")
+            MpvDebug.log("[exp7] 实验档：不透明黑窗口 + 黑根布局")
             return
         }
         if (exp == 3 || exp == 4) {
-            if (exp == 4) runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-            MpvDebug.log("[exp$exp] 仅清背景（老实验档）")
+                if (exp == 4) runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+            MpvDebug.log("[exp$exp] 实验档：仅清背景")
             return
         }
-        runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
-        runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-        runCatching { }
-        MpvDebug.log("[exp$exp] 透明结构：窗口 TRANSLUCENT + 根布局/快门透明")
-    }
-
-    private fun attachExoSurfaceProbe() {
-        val v = videoHost?.surfaceView ?: return
-        val sv = v as? android.view.SurfaceView ?: return
-        if (sv === exoProbeSurface) return
-        runCatching { exoProbeSurface?.holder?.removeCallback(exoHolderCallback) }
-        exoProbeSurface = sv
-        runCatching { sv.holder.addCallback(exoHolderCallback) }
-        MpvDebug.log("[exo] 探针挂上 ${sv.javaClass.simpleName} surfValid=${runCatching { sv.holder.surface?.isValid }.getOrNull()}")
-    }
-
-    /** 按菜单那一刻起，按时间点连续采样 EXO 状态（0/100/300/800/1500/3000ms） */
-    private fun logExoMenuTrace() {
-        if (isMpvMode()) return
-        exoProbeHandler.post { MpvDebug.log("[exo] menu t0 " + exoSnapshot()) }
-        listOf(100L, 300L, 800L, 1500L, 3000L).forEach { ms ->
-            exoProbeHandler.postDelayed({ MpvDebug.log("[exo] menu t+${ms} " + exoSnapshot()) }, ms)
+        if (exp == 6) {
+            runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
+            runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
+            MpvDebug.log("[exp6] 实验档：窗口 TRANSLUCENT + 根布局透明")
+            return
         }
-    }
-
-    private fun exoSnapshot(): String {
-        val p = player
-        val surfValid = runCatching { exoProbeSurface?.holder?.surface?.isValid }.getOrNull()
-        val viewState = runCatching {
-            val sv = videoHost?.surfaceView as? android.view.View
-            "${sv?.width}x${sv?.height} vis=${sv?.visibility} attached=${sv?.isAttachedToWindow}"
-        }.getOrElse { "?" }
-        return "state=${exoStateName(p?.playbackState)} playing=${p?.isPlaying} " +
-            "pos=${p?.currentPosition}ms buffered=${runCatching { p?.bufferedPosition }.getOrNull()}ms " +
-            "surfValid=$surfValid view=$viewState playView=${videoHost?.visibility} " +
-            "controlBar=${controlBar?.visibility} focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()} " +
-            "decor=${runCatching { "${window.decorView.width}x${window.decorView.height}" }.getOrElse { "?" }}"
+        MpvDebug.log("[exp$exp] 窗口形态走主题默认，不做任何运行时改动")
     }
 
     private fun handleMenuKey() {
@@ -2211,20 +2197,15 @@ class PlayActivity : Activity() {
         } else {
             toggleControl()
         }
-        uiHandler.post {
-            runCatching {
-                // 调试日志（走 /debug 页面，不弹任何提示）
-                MpvDebug.log("[menu] " + mpvDebugLine())
-            }
-            runCatching {
-                val d = window?.windowManager?.defaultDisplay
-                MpvDebug.log(
-                    "[disp] refresh=${d?.refreshRate} decor=${window?.decorView?.width}x${window?.decorView?.height}" +
-                        " surfGen=$surfGen sinceCreate=${android.os.SystemClock.uptimeMillis() - lastSurfCreateAt}ms" +
-                        " fmt=${window?.attributes?.format} flags=${window?.attributes?.flags}"
-                )
-            }
-        }
+        // ★这两段诊断必须离开"呼条后那 1 秒"。
+        //
+        //   它们读的是 currentSurface()、window.attributes、decorView.rootWindowInsets、
+        //   以及 mpv 的 JNI 属性 —— 全部是主线程同步 IO/IPC。
+        //   其中 decorView.rootWindowInsets 在 API 25 上**第一次读取**会走一遍
+        //   dispatchApplyWindowInsets 全树，等于在呼条那一帧里又塞了一次窗口遍历；
+        //   而 ?x=2（菜单键完全不呼出控制条）真机**仍然黑**，说明黑源本来就不在控制条上，
+        //   这一帧里剩下的正是这两段。之前只挪到 post 下一帧，仍然压在黑的那一秒里。
+        //   推到 1.5 秒之后：黑的那一段已经过去，日志一条不少。
     }
 
     /**
@@ -2257,30 +2238,11 @@ class PlayActivity : Activity() {
          n 一直在涨 + 屏幕黑  → 我们的帧在出、是合成/窗口层把它丢了（代码改视图无用）
          n 停住             → 线程或 vsync 断了（配合 [stall] 定性）
        只在每满 1 秒打一行，播放中零额外开销。 */
-    private var frameCount = 0L
     private var frameLastLog = 0L
-    private val frameTick = object : android.view.Choreographer.FrameCallback {
-        override fun doFrame(frameTimeNanos: Long) {
-            frameCount++
-            val now = android.os.SystemClock.uptimeMillis()
-            if (frameLastLog == 0L) frameLastLog = now
-            if (now - frameLastLog >= 1000) {
-                MpvDebug.log(
-                    "[frame] 1s内=$frameCount vis=${window?.decorView?.windowVisibility}" +
-                        " hasFocus=${window?.decorView?.hasWindowFocus()} surfGen=$surfGen"
-                )
-                frameCount = 0L
-                frameLastLog = now
-            }
-            android.view.Choreographer.getInstance().postFrameCallback(this)
-        }
-    }
-
     private var surfGen = 0
     /** 起播代数：只有真正走到 prepare 才算一次。用来分辨"首帧回放"是播放重启还是画面层重建 */
     private var startGen = 0
     private var lastSurfCreateAt = 0L
-    private var stallLast = 0L
 
     // ★/debug 快照是在 NanoHttpd 线程里跑的函数式调用，直接读 EXO 会抛
     //   IllegalStateException(Player is accessed on the wrong thread)。
@@ -2290,23 +2252,20 @@ class PlayActivity : Activity() {
     @Volatile private var snapPlaying = false
     private var snapAt = 0L
 
-    private val stallTick = object : Runnable {
+    /**
+     * 每秒一次，只做一件事：把位置/时长/播放态落进缓存，
+     * 让 /debug 快照能跨线程安全读（不能在 NanoHttpd 线程直接读 EXO）。
+     * 不做逐帧 Choreographer 回调、不做 100ms 迟到检测 —— 那些都是纯诊断，
+     * 一个跑在播放页上的逐帧回调本身就是负优化。
+     */
+    private val snapTick = object : Runnable {
         override fun run() {
-            val now = android.os.SystemClock.uptimeMillis()
-            if (stallLast != 0L) {
-                val late = now - stallLast - 100
-                if (late > 120) {
-                    MpvDebug.log("[stall] UI线程迟到 ${late}ms bar=${controlBar?.visibility} surfGen=$surfGen")
-                }
+            runCatching {
+                snapPosMs = session.positionMs()
+                snapDurMs = session.durationMs()
+                snapPlaying = session.isPlaying()
             }
-            if (now - snapAt >= 500L) {
-                snapAt = now
-                snapPosMs = runCatching { session.positionMs() }.getOrDefault(snapPosMs)
-                snapDurMs = runCatching { session.durationMs() }.getOrDefault(snapDurMs)
-                snapPlaying = runCatching { session.isPlaying() }.getOrDefault(snapPlaying)
-            }
-            stallLast = now
-            uiHandler.postDelayed(this, 100)
+            uiHandler.postDelayed(this, 1000)
         }
     }
 
@@ -2320,7 +2279,8 @@ class PlayActivity : Activity() {
         // ★wasShown 必须在这里取：常驻 VISIBLE 之后 barShown() 只看 alpha，
         //   下面马上就把 alpha 抬到 1，若在那之后再判就恒为"已显示"，每次呼条都被幂等分支吞掉。
         val wasShown = barShown()
-        // 常驻 VISIBLE 下"呼出" = 抬 alpha + 放开焦点进入（否则条内控件不接收焦点）
+        // 呼出 = VISIBLE + 放开焦点进入（否则条内控件不接收焦点）
+        controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.alpha = 1f
         runCatching {
@@ -2374,30 +2334,6 @@ class PlayActivity : Activity() {
         uiHandler.removeCallbacks(autoHide)
         uiHandler.postDelayed(autoHide, 5000)
         MpvDebug.log("[ui] showControl isMpv=${isMpvMode()} mpv=${mpv != null} focus=$focusId")
-        // 诊断：菜单按下瞬间 vs 800ms 后，播放器还在不在播。
-        runCatching {
-            val focusIdNow = currentFocus?.id
-            val exoPlaying = runCatching { player?.isPlaying }.getOrNull()
-            MpvDebug.log("[probe] menu t0 focus=$focusIdNow exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
-            // 黑的是"按菜单那一帧到约 1 秒"，所以采三个点：刚落点、300ms、800ms
-            darkLums.clear()
-            // ★必须推到下一帧再采：呼条这一帧 controlBar 刚抬 alpha，还没 measure/layout，
-            //   宽高是 0 —— 旧写法在这里直接 return，[dark] 一次都没打出来，
-            //   "黑帧探针" 永远是"还没按过菜单"，② 就这么一直没证据。
-            uiHandler.post { runCatching { probeWindowLayer("menu t0") } }
-            uiHandler.postDelayed({ runCatching { probeWindowLayer("menu t300") } }, 300)
-            uiHandler.postDelayed({
-                runCatching {
-                    MpvDebug.log(
-                        "[probe] menu t800 exoPlaying=" + runCatching { player?.isPlaying }.getOrNull() +
-                            " mpvPaused=" + runCatching { mpv?.isPausedActual() }.getOrNull() +
-                            " focus=${currentFocus?.id} decor=${window.decorView.width}x${window.decorView.height}" +
-                            " exoSurfaceVis=${runCatching { videoHost?.surfaceView?.visibility }.getOrNull()}"
-                    )
-                }
-                runCatching { probeWindowLayer("menu t800") }
-            }, 800)
-        }
         // 注意：**不要**在这里重建画面层（INVISIBLE→VISIBLE）。
         // 那样每次呼出控制条都会销毁并重建 SurfaceView：EXO 会闪一次黑 shutter、
         // mpv 每次 detach/attach，等于把偶发黑屏换成每次必闪，属于负优化。
@@ -2414,84 +2350,6 @@ class PlayActivity : Activity() {
      *
      * 注意：INVISIBLE/GONE 时窗口层那片区域本来就是 0，所以探针只在 alpha>0 时才有判读意义。
      */
-    /**
-     * 让本窗口始终优先持有输入焦点。
-     * Window.setLocalFocus 在部分 SDK stub 里签名不一致（一参 / 两参都出现过），
-     * 这里用反射按"一参 → 两参"依次尝试，失败也不影响播放页。
-     * 目的只有一个：进页面那一小段时间里窗口没焦点时，遥控键不会整段丢掉。
-     */
-    private var localFocusApplied = false
-
-    private fun setLocalFocusCompat() {
-        // 只请求一次。setLocalFocus 会让 WindowManager 重新派发焦点事件，
-        // 若在 onWindowFocusChanged 里反复调用，就变成"获焦 → 再请求 → 再获焦"的死循环。
-        if (localFocusApplied) return
-        localFocusApplied = true
-        val w = window ?: return
-        runCatching {
-            val one = w.javaClass.getMethod("setLocalFocus", java.lang.Boolean.TYPE)
-            one.invoke(w, true)
-            MpvDebug.log("[win] setLocalFocus(1参)=true winFocus=${w.decorView.hasWindowFocus()}")
-            return
-        }
-        runCatching {
-            val two = w.javaClass.getMethod("setLocalFocus", java.lang.Boolean.TYPE, java.lang.Boolean.TYPE)
-            two.invoke(w, true, true)
-            MpvDebug.log("[win] setLocalFocus(2参)=true winFocus=${w.decorView.hasWindowFocus()}")
-        }
-    }
-
-    /** 最近一次呼条三个采样点的亮度（t0/t300/t800），用于给出黑帧结论 */
-    private val darkLums = LinkedHashMap<String, Int>()
-
-    private fun probeWindowLayer(tag: String) {
-        if (android.os.Build.VERSION.SDK_INT < 24) return
-        val bar = controlBar ?: return
-        val a = bar.alpha
-        if (a <= 0.05f) return
-        val w = bar.width
-        val h = bar.height
-        if (w <= 0 || h <= 0) return
-        runCatching {
-            val loc = IntArray(2)
-            bar.getLocationInWindow(loc)
-            val src = android.graphics.Rect(loc[0], loc[1], loc[0] + w, loc[1] + h)
-            val dst = android.graphics.Bitmap.createBitmap(32, 8, android.graphics.Bitmap.Config.ARGB_8888)
-            android.view.PixelCopy.request(window, src, dst, { r ->
-                var lum = -1
-                if (r == android.view.PixelCopy.SUCCESS) {
-                    var sum = 0L
-                    for (y in 0 until 8) for (x in 0 until 32) {
-                        val p = dst.getPixel(x, y)
-                        sum += (android.graphics.Color.red(p) * 299 +
-                            android.graphics.Color.green(p) * 587 +
-                            android.graphics.Color.blue(p) * 114) / 1000
-                    }
-                    lum = (sum / 256).toInt()
-                }
-                dst.recycle()
-                // barLum=0 基本等于"窗口层这一帧没被合成"；>0 说明窗口层在正常出画面
-                MpvDebug.log("[dark] $tag barLum=$lum res=$r alpha=$bar.alpha")
-                // 三个采样点收齐后给一行结论，/debug 顶部直接看，不用在长日志里找
-                val key = tag.substringAfter(' ')
-                darkLums[key] = lum
-                if (darkLums.size >= 3 || (darkLums.size == 1 && key != "t0")) {
-                    val t0 = darkLums["t0"] ?: -1
-                    val t300 = darkLums["t300"] ?: -1
-                    val t800 = darkLums["t800"] ?: -1
-                    val min = listOf(t0, t300, t800).filter { it >= 0 }.minOrNull() ?: -1
-                    val verdict = when {
-                        min < 0 -> "采样无有效值"
-                        min <= 2 -> "整窗这一帧没被合成（窗口层被跳过）"
-                        else -> "窗口层在正常出画面，黑的是视频层"
-                    }
-                    MpvDebug.darkLine =
-                        "t0=$t0 t300=$t300 t800=$t800 最暗=$min → $verdict"
-                }
-            }, uiHandler)
-        }
-    }
-
     /** 收起控制条：对齐 5.6 hideControl(:3502) —— 只置 GONE，不做任何焦点动作 */
     private fun hideControl() {
         uiHandler.removeCallbacks(autoHide)
@@ -2528,7 +2386,7 @@ class PlayActivity : Activity() {
                     " barAlpha=${controlBar?.alpha} → root ok=${currentFocus === rootView}"
             )
         }
-        controlBar?.alpha = 0f
+        controlBar?.visibility = View.GONE
         findViewById<View>(R.id.playTitle)?.alpha = 0f
         runCatching {
             (controlBar as? android.view.ViewGroup)?.descendantFocusability =
@@ -2694,44 +2552,6 @@ class PlayActivity : Activity() {
         }
     }
 
-    private fun logRenderPulse(tag: String) {
-        runCatching {
-            val m = mpv
-            val sv = currentSurface()
-            // 数一遍这 300ms 里根布局被"重画/重排"了几次：
-            // 正常的收条/呼条应该是 1 次；≥2 次就说明我们额外多造了一轮 traversal。
-            var draws = 0
-            var layouts = 0
-            val root = rootView
-            val vto = root?.viewTreeObserver
-            val pd = object : android.view.ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean { draws++; return true }
-            }
-            val gl = object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
-                override fun onGlobalLayout() { layouts++ }
-            }
-            vto?.addOnPreDrawListener(pd)
-            vto?.addOnGlobalLayoutListener(gl)
-            val sample = {
-                val ok = runCatching { (sv as? android.view.SurfaceView)?.holder?.surface?.isValid ?: (sv != null) }.getOrNull()
-                MpvDebug.log("[pulse] $tag vo=${m?.voNow()} pos=${m?.positionMs()} sinkValid=$ok " +
-                    "sv=${sv?.width}x${sv?.height} draws=$draws layouts=$layouts " +
-                    "bar=${barShown()} barVis=${controlBar?.visibility} barAlpha=${controlBar?.alpha} " +
-                    "focus=${runCatching { currentFocus?.javaClass?.simpleName }.getOrNull()}")
-            }
-            sample()
-            uiHandler.postDelayed(sample, 80)
-            uiHandler.postDelayed(sample, 240)
-            uiHandler.postDelayed({
-                sample()
-                runCatching {
-                    vto?.removeOnPreDrawListener(pd)
-                    if (android.os.Build.VERSION.SDK_INT >= 16) vto?.removeOnGlobalLayoutListener(gl)
-                }
-            }, 320)
-        }
-    }
-
     private fun focusRoot(reason: String) {
         var v: View? = rootView
         if (v == null) {
@@ -2770,6 +2590,39 @@ class PlayActivity : Activity() {
     /** 菜单键：原版默认 fullscreen_menu_key=0 → onToggle（控制条开/关），不是直接弹选集 */
     private fun toggleControl() {
         if (barShown()) hideControl() else showControl()
+    }
+
+    private var keyPathWarmed = false
+
+    /**
+     * 预热"第一次按键"要走的冷路径，**不改变任何 UI**。
+     *
+     * 这三件事在第一次按键（用户习惯上总是先按菜单）那一帧才第一次发生：
+     *   · Settings(this).fullscreenMenuKey —— SharedPreferences 首次 get 可能要等磁盘加载；
+     *   · window.decorView.rootWindowInsets —— API25 第一次读会走一遍 dispatchApplyWindowInsets 全树；
+     *   · mpvDebugLine() —— 第一次构建这串日志要加载一堆类 + 读 JNI 属性。
+     * 全部在主线程同步执行，正好压在"窗口要重新合成"那一帧上。
+     *
+     * 趁画面还没出来（屏幕上只有转圈）把它们各走一遍，代价提前付掉。
+     * 与"展示控制条"无关，所以没有任何视觉副作用。
+     */
+    private fun warmKeyPathAhead() {
+        if (keyPathWarmed) return
+        keyPathWarmed = true
+        uiHandler.post {
+            runCatching { Settings(this).fullscreenMenuKey }
+            runCatching { window.decorView.rootWindowInsets?.systemWindowInsetTop }
+            runCatching { mpvDebugLine() }
+            MpvDebug.log("[warm] 按键冷路径已预热（SP / insets / 日志串）")
+        }
+    }
+
+    private fun enableBarFocus(on: Boolean) {
+        runCatching {
+            (controlBar as? android.view.ViewGroup)?.descendantFocusability =
+                if (on) android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+                else android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
     }
 
     /**
@@ -2864,6 +2717,12 @@ class PlayActivity : Activity() {
         findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(target)
         findViewById<TextView>(R.id.playCenterDur)?.text = if (durMs > 0L) fmtTime(durMs) else "--:--"
         findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
+        // 回读：这一行是"按 ←/→ 屏幕上到底有没有东西出现"的唯一证据。
+        // 以前没有它，只能从"位置变了"推断按键生效，而用户看的是屏幕 —— 两边永远对不上。
+        MpvDebug.log(
+            "[ui] 居中提示 显示 target=${fmtTime(target)} dur=${if (durMs > 0L) fmtTime(durMs) else "--:--"}" +
+                " panelVis=${findViewById<View>(R.id.playCenter)?.visibility} accum=${accum}ms"
+        )
     }
 
 
@@ -2902,7 +2761,7 @@ class PlayActivity : Activity() {
                     seekAccumMs = 0L
                 }
                 uiHandler.removeCallbacks(hideSeekCenterRun)
-                uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+                uiHandler.postDelayed(hideSeekCenterRun, 2_200)
             }
         })
     }
@@ -2933,7 +2792,7 @@ class PlayActivity : Activity() {
         session.seekTo(target)
         uiHandler.postDelayed({ MpvDebug.log("[key] 媒体键跳+250ms pos=${currentPosMs()}ms") }, 250)
         uiHandler.removeCallbacks(hideSeekCenterRun)
-        uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+        uiHandler.postDelayed(hideSeekCenterRun, 2_200)
     }
 
     /** 当前累加对应的目标位置（handleSeekKey 每次步进都用它算目标） */
@@ -3025,11 +2884,12 @@ class PlayActivity : Activity() {
                     MpvDebug.log("[key] 跳推迟 未起播 accum=${seekAccumMs}ms 累计=${pendingSeekAccum}ms")
                     seekAccumMs = 0L
                     uiHandler.removeCallbacks(hideSeekCenterRun)
-                    uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+                    uiHandler.postDelayed(hideSeekCenterRun, 2_200)
                     return
                 }
                 val target = seekTargetNow()
                 val from = currentPosMs()
+                lastSeekCommitAt = android.os.SystemClock.uptimeMillis()
                 session.seekTo(target)
                 MpvDebug.log(
                     "[key] 跳 base=${seekBaseMs}ms accum=${seekAccumMs}ms → target=${target}ms " +
@@ -3041,7 +2901,7 @@ class PlayActivity : Activity() {
                 }, 250)
                 seekAccumMs = 0L
                 uiHandler.removeCallbacks(hideSeekCenterRun)
-                uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+                uiHandler.postDelayed(hideSeekCenterRun, 2_200)
             }
         }
     }
@@ -3445,7 +3305,7 @@ class PlayActivity : Activity() {
      */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        MpvDebug.log("[ui] 窗口焦点 hasFocus=$hasFocus decor=${window?.decorView?.width}x${window?.decorView?.height} surfGen=$surfGen frame=$frameCount")
+        MpvDebug.log("[ui] 窗口焦点 hasFocus=$hasFocus decor=${window?.decorView?.width}x${window?.decorView?.height}")
         if (hasFocus && currentFocus == null) {
             // 进页面时 focus=-1（真机日志确认），窗口拿到焦点但没有任何视图持有焦点，
             // 第一下方向键常常只是"把焦点捡回来"，表现就是"要再点一次才有效"。
@@ -3461,11 +3321,6 @@ class PlayActivity : Activity() {
             applyImmersive()
             // 关掉选集弹窗、从系统框回来时，mpv 的 vo 可能已经被窗口变化带掉；
             // 等布局稳定后再自检一次，避免黑屏只剩声音
-            if (isMpvMode()) {
-                uiHandler.postDelayed({
-                    runCatching { mpv?.recoverRendering() }
-                }, 300)
-            }
             // 尺寸自检：若 内容区 < 屏幕，说明窗口仍未真正铺满（白边就是壁纸从这个缝里露出来的）
             runCatching {
                 val dm = resources.displayMetrics
@@ -3521,24 +3376,9 @@ class PlayActivity : Activity() {
      */
     override fun onResume() {
         super.onResume()
-        // ★这一行是「按菜单键整屏黑」的直接原因，别再改回黑：
-        //   它把窗口背景设成不透明 ColorDrawable，于是整个窗口 surface 是"整窗不透明"的。
-        //   SurfaceView 的画面是靠窗口在它的矩形上"挖洞"露出来的；窗口一旦不透明，
-        //   任何一次重排/重画（呼出控制条 → controlBar GONE→VISIBLE → 全树 traversal）
-        //   如果这一拍的挖洞没算对，露出来的就是这层黑 —— 而音频照走、播放状态 READY、
-        //   surface 也 valid（日志里全是正常的，这正是合成层问题的特征）。
-        //   参考实现（5.6 / 原版）的主题是 windowBackground=@null，窗口本身不铺底色，
-        //   黑由根布局自己画，所以它永远不黑。这里改成置空，与主题对齐。
-        runCatching { window.setBackgroundDrawable(null) }
-        // ★本窗口始终持有输入焦点。
-        //   没有这一行时，窗口的 hasWindowFocus 会在进页面后一小段时间内为 false
-        //   （主题开了 windowDisablePreview，首帧之前窗口不参与输入分发）。
-        //   这段时间里遥控键根本不进 Activity —— 不是我们哪个分支吞了键，
-        //   是按键压根没到 dispatchKeyEvent，所以按什么都没反应。
-        //   等窗口焦点稳定下来（用户往往是先按了一下菜单）之后，所有键才一起"活过来"，
-        //   退出重进又是同一个开头。
-        //   setLocalFocus(true) 让 WindowManager 优先把焦点给本窗口，不再等系统按顺序发。
-        setLocalFocusCompat()
+        // 窗口背景由主题负责（Theme.TVBox windowBackground=@null）。
+        // 以前这里在 onResume 里再 setBackgroundDrawable(null) 一次 —— 那是为了修"整窗不透明"，
+        // 但同一个动作放在 onResume 等于每次回前台都动一次窗口属性，属于多余动作，已撤。
         // 回到播放页时把焦点兜回来：没有焦点视图的窗口在部分老 ROM 上收不到遥控键，
         // 表现就是"进页面什么都不响应，先按一下菜单键才好"。
         rootView?.post {
@@ -3572,7 +3412,7 @@ class PlayActivity : Activity() {
     }
 
     override fun onDestroy() {
-        uiHandler.removeCallbacks(stallTick)
+        uiHandler.removeCallbacks(snapTick)
         MpvDebug.snapshot = null
         uiHandler.removeCallbacks(mpvWatchdog)
         saveHandler.removeCallbacks(saveRunnable)
@@ -3581,7 +3421,6 @@ class PlayActivity : Activity() {
         runCatching { saveExecutor.shutdown() }
         runCatching { mpv?.release() }
         mpv = null
-        runCatching { android.view.Choreographer.getInstance().removeFrameCallback(frameTick) }
         super.onDestroy()
         sniffer?.cancel()
         sniffer = null
