@@ -46,7 +46,7 @@ object MpvDebug {
     /** 环形日志：/debug 的「最近事件」段 */
     @Synchronized
     fun log(msg: String) {
-        val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        val t = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
         lines.addLast("$t  $msg")
         while (lines.size > MAX) lines.removeFirst()
         if (msg.startsWith("[key]") || msg.startsWith("[env]") || msg.startsWith("[trace]")) {

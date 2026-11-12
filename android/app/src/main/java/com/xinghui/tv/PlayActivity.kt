@@ -3,6 +3,7 @@ package com.xinghui.tv
 import android.app.Activity
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
@@ -117,6 +118,7 @@ class PlayActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        tCreate = SystemClock.uptimeMillis()
         setContentView(R.layout.activity_play)
         // 根容器当画面容器用（原版 @id/video 的等价物）：可聚焦，收控制条时焦点回这里
         rootView = runCatching {
@@ -205,7 +207,7 @@ class PlayActivity : Activity() {
         // ★必须打在 videoHost 赋值之后：以前它写在前面，host 恒为 null，把「画面层是否接上」
         //   这个最该看的信号变成了永远读不出来的假值。
         MpvDebug.log(
-            "[boot] build=tk6 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
+            "[boot] build=tk9 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
                 " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
         )
 
@@ -1803,6 +1805,10 @@ class PlayActivity : Activity() {
     }
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
+    // 进页面耗时打点：/debug 里直接看「onCreate→onResume→窗口焦点」各多少毫秒，
+    // 用毫秒数据判断"第一下按键被吞"到底是 onCreate 重活、还是首帧后 WMS 焦点移交慢。
+    private var tCreate = 0L
+    private var tResume = 0L
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoHide = Runnable { hideControl() }
 
@@ -3515,7 +3521,12 @@ class PlayActivity : Activity() {
      */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        MpvDebug.log("[ui] 窗口焦点 hasFocus=$hasFocus decor=${window?.decorView?.width}x${window?.decorView?.height}")
+        val now = SystemClock.uptimeMillis()
+        MpvDebug.log(
+            "[ui] 窗口焦点 hasFocus=$hasFocus decor=${window?.decorView?.width}x${window?.decorView?.height}" +
+                " 距onCreate=${if (tCreate > 0) now - tCreate else -1}ms" +
+                " 距onResume=${if (tResume > 0) now - tResume else -1}ms"
+        )
         if (hasFocus && currentFocus == null) {
             // 进页面时 focus=-1（真机日志确认），窗口拿到焦点但没有任何视图持有焦点，
             // 第一下方向键常常只是"把焦点捡回来"，表现就是"要再点一次才有效"。
@@ -3597,6 +3608,7 @@ class PlayActivity : Activity() {
      */
     override fun onResume() {
         super.onResume()
+        tResume = SystemClock.uptimeMillis()
         // 窗口背景由主题负责（Theme.TVBox windowBackground=@null）。
         // 以前这里在 onResume 里再 setBackgroundDrawable(null) 一次 —— 那是为了修"整窗不透明"，
         // 但同一个动作放在 onResume 等于每次回前台都动一次窗口属性，属于多余动作，已撤。

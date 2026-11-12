@@ -100,6 +100,17 @@ class DetailActivity : Activity() {
         // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
         runCatching { WallpaperStore.apply(this) }
         inlineView = findViewById(R.id.inlinePlayer)
+        // ★这一行是「详情页预览到底创建的是 SurfaceView 还是 TextureView」的唯一直接证据。
+        //   PlayerView 在 surface_type=surface_view 下 getVideoSurfaceView() 返回内部的 SurfaceView；
+        //   改成 texture_view 后它返回 null。所以 /debug 里这一行打「null」就说明 texture_view 生效了，
+        //   打「SurfaceView」就说明 XML 没被覆盖（装的还是旧包 / 没重新编译）。
+        //   这是「第二块 overlay plane 到底存不存在」的判据，不靠猜。
+        runCatching {
+            MpvDebug.log(
+                "[det] 预览视图类型=${inlineView.getVideoSurfaceView()?.javaClass?.simpleName ?: "null"}" +
+                    "（null = texture_view 生效，SurfaceView = 仍是 surface_view）"
+            )
+        }
         // 内嵌播放器之前是裸 build()：没有轨道选择参数，没有解码方式，也没有请求头。
         // 照原版 ExoUtil 补齐 TrackSelector（最高码率 / 字幕语言 / 隧道模式），
         // 解码方式跟播放页共用同一个值。
@@ -709,6 +720,13 @@ class DetailActivity : Activity() {
         val ep = line.episodes.getOrNull(idx) ?: return
         // 先把预览那一路停掉，再起播放页：两边同时出声就是「两个不同的声音」
         releaseInlinePlayback()
+        // ★再把预览从窗口里摘掉。
+        //   官方 Surface types 文档："The lifecycle of a SurfaceView's surface is tied to **view visibility**"
+        //   —— 只 release player 不动 View 的时候，这块 SurfaceView 仍然 VISIBLE，
+        //   它的 surface 就一直挂在 SurfaceFlinger 的 overlay plane 上，跟播放页那块抢。
+        //   texture_view 已经把"新装包"这一侧从根上去掉了；这一行是给"万一 XML 没覆盖到"留的兜底：
+        //   GONE 才是可见性变化，才真正让 surface 销毁。返回时 onResume 会重建预览（playInline 里设回 VISIBLE）。
+        runCatching { inlineView.visibility = View.GONE }
         // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
         inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
@@ -790,6 +808,8 @@ class DetailActivity : Activity() {
         val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
         // 同上：交接给播放页之前先停掉预览
         releaseInlinePlayback()
+        // 同上：摘掉预览（全屏那条路这里是 1920x1080 的整屏 overlay，代价最大）
+        runCatching { inlineView.visibility = View.GONE }
         inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
             putExtra("vod_id", v.vodId)
@@ -873,6 +893,9 @@ class DetailActivity : Activity() {
         //   2. 从别处回来（首页回来、系统弹窗回来）→ 保持原样，不自动出声
         if (inlineResumeOnReturn) {
             inlineResumeOnReturn = false
+            // 跳转前 was GONE（见 openPlayPage 的说明），回来先恢复可见，
+            // 否则重建预览时画面在窗外、小窗是黑的
+            runCatching { if (!inlineFullscreen) inlineView.visibility = View.VISIBLE }
             // ★从播放页回来先把「全屏预览」复位。
             //   进播放页的两条路（小窗全屏 enterInlineFullscreen、转独立播放页 openPlayPage）
             //   都会把 inlineFullscreen 置为 true 并**一直保留**，而它只在详情页自己的返回键里
