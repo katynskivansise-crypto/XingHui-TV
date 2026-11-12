@@ -2367,6 +2367,14 @@ class PlayActivity : Activity() {
                 lastBarFocusId != R.id.btnOpening && lastBarFocusId != R.id.btnEnding -> lastBarFocusId
             else -> R.id.timeBar
         }
+        // ★呼条前把进度条内部位置对齐真实位置。
+        //   DefaultTimeBar 的 scrub 起点取它自己的 position（只在 setPosition 时更新）；
+        //   进页面不久就呼条时那份值可能还是 0，焦点一进条、随后一次 ←，就会提交 0
+        //   —— 现场「第一次按菜单视频回到开头 + 黑完出现加载中」正是它（seekTo(0) 触发重缓冲）。
+        runCatching {
+            findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)
+                ?.setPosition(currentPosMs())
+        }
         // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
         var focusOk = false
         if (MpvDebug.experiment != 1) {
@@ -2759,18 +2767,23 @@ class PlayActivity : Activity() {
      */
     private fun showSeekCenter(accum: Long) {
         val durMs = durNow()
-        var target = (seekBaseMs + accum).coerceAtLeast(0L)
-        if (durMs > 0L) target = target.coerceAtMost(durMs)
+        // ★时长未知时不能显示「绝对位置」：那时 seekBaseMs=0，按 ← 的 -10000 会被夹成 0，
+        //   屏幕上和起点一模一样的 00:00 —— 用户看到的就是"按了没反应"。
+        //   这时显示位移本身（-00:10 / +00:10），让人一眼知道键收到了。
+        val target = if (durMs > 0L) (seekBaseMs + accum).coerceIn(0L, durMs) else 0L
         findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(
             if (accum > 0L) R.drawable.ic_widget_forward else R.drawable.ic_widget_rewind
         )
-        findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(target)
+        findViewById<TextView>(R.id.playCenterPos)?.text =
+            if (durMs > 0L) fmtTime(target)
+            else (if (accum < 0L) "-" else "+") + fmtTime(if (accum < 0L) -accum else accum)
         findViewById<TextView>(R.id.playCenterDur)?.text = if (durMs > 0L) fmtTime(durMs) else "--:--"
         findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
         // 回读：这一行是"按 ←/→ 屏幕上到底有没有东西出现"的唯一证据。
         // 以前没有它，只能从"位置变了"推断按键生效，而用户看的是屏幕 —— 两边永远对不上。
         MpvDebug.log(
-            "[ui] 居中提示 显示 target=${fmtTime(target)} dur=${if (durMs > 0L) fmtTime(durMs) else "--:--"}" +
+            "[ui] 居中提示 显示 " + (if (durMs > 0L) "target=${fmtTime(target)}" else "位移=${if (accum<0) "-" else "+"}${fmtTime(if(accum<0) -accum else accum)}") +
+                " dur=${if (durMs > 0L) fmtTime(durMs) else "--:--"}" +
                 " panelVis=${findViewById<View>(R.id.playCenter)?.visibility} accum=${accum}ms"
         )
     }
@@ -2927,8 +2940,15 @@ class PlayActivity : Activity() {
                     return
                 }
                 seekingByKey = false
-                if (durNow() <= 0L) {
-                    // 还没有时长 = 还没起播，此刻 seekTo 只能跳到 0，画面不会动。
+                // ★判据从「有没有时长」改成「内容是否就绪」。
+                //   m3u8 的 duration 在 media3 里常常整场都是 C.TIME_UNSET，
+                //   PlaybackSession.durationMs() 把它归一化成 0；而 seekTo 对这类流完全有效
+                //   （DefaultTimeBar 的 onScrubStop 一直就是这么跳的）。
+                //   用 dur>0 当判据，等于这类源在「控制条收起」时 ←→ 永远只累加、不落地 ——
+                //   现场「进页面按 ← 没反应，按过一次菜单就好了」就是这条：
+                //   菜单把处理器从 handleSeekKey 换成了 DefaultTimeBar，后者不看 duration。
+                if (!contentReady()) {
+                    // 内容还没 attach，此刻 seekTo 无处可跳。
                     // 把位移留下，起播那一刻叠加到续播点（见 onPlaybackStateChanged）。
                     pendingSeekAccum += seekAccumMs
                     MpvDebug.log("[key] 跳推迟 未起播 accum=${seekAccumMs}ms 累计=${pendingSeekAccum}ms")
