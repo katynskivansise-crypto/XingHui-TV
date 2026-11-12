@@ -864,6 +864,14 @@ class PlayActivity : Activity() {
     private var pendingSeek: Long = 0
 
     /**
+     * 起播前按下 ←/→ 累积的位移（毫秒，可为负）。
+     * 解析期 dur=0，没有任何绝对位置可算，旧实现把位移夹成 0 再 seekTo(0)，
+     * 结果就是"按了确实有提示、画面一动不动"，用户判定为按键无效。
+     * 这里把位移留着，起播那一刻叠加到续播点上再跳。
+     */
+    private var pendingSeekAccum: Long = 0
+
+    /**
      * 本次起播将要落到的那一点（续播点）。起播前按快进时用它当基准。
      *
      * 用例：片子的续播点在 1700s，用户刚进页面就按 →。
@@ -931,6 +939,18 @@ class PlayActivity : Activity() {
                     pendingJumpMs = -1
                     p.seekTo(at)
                     MpvDebug.log("[key] 起播前快进生效 → ${at}ms")
+                }
+                // 起播前按过 ←/→：位移留到了这里，叠加在真实起点上再跳一次
+                if (pendingSeekAccum != 0L) {
+                    val accum = pendingSeekAccum
+                    pendingSeekAccum = 0L
+                    val base = if (pendingSeek > 0) pendingSeek else runCatching { p.currentPosition }.getOrDefault(0L)
+                    val dur = runCatching { p.duration }.getOrDefault(0L)
+                    val t = (base + accum).let { v ->
+                        if (v < 0L) 0L else if (dur > 0L && v > dur) dur else v
+                    }
+                    p.seekTo(t)
+                    MpvDebug.log("[key] 起播前快进累积生效 → ${t}ms base=${base} accum=${accum}ms")
                 }
                 if (pendingSeek <= 0) return
                 val target = pendingSeek
@@ -2361,7 +2381,10 @@ class PlayActivity : Activity() {
             MpvDebug.log("[probe] menu t0 focus=$focusIdNow exoPlaying=$exoPlaying decor=${window.decorView.width}x${window.decorView.height}")
             // 黑的是"按菜单那一帧到约 1 秒"，所以采三个点：刚落点、300ms、800ms
             darkLums.clear()
-            probeWindowLayer("menu t0")
+            // ★必须推到下一帧再采：呼条这一帧 controlBar 刚抬 alpha，还没 measure/layout，
+            //   宽高是 0 —— 旧写法在这里直接 return，[dark] 一次都没打出来，
+            //   "黑帧探针" 永远是"还没按过菜单"，② 就这么一直没证据。
+            uiHandler.post { runCatching { probeWindowLayer("menu t0") } }
             uiHandler.postDelayed({ runCatching { probeWindowLayer("menu t300") } }, 300)
             uiHandler.postDelayed({
                 runCatching {
@@ -2977,10 +3000,14 @@ class PlayActivity : Activity() {
                     "[key] 快进起手 dir=$dir step=$step accum=${seekAccumMs}ms ticks=$seekTicks" +
                         " repeat=${event.repeatCount} 计入=$stepped dur=${durNow()}ms bar=${barShown()}"
                 )
-                // 夹在 [0, dur] 里：原版会开到越界再靠 seekTo 夹，我们提前夹，提示上的时间才不会出现负数
+                // 夹在 [0, dur] 里：原版会开到越界再靠 seekTo 夹，我们提前夹，提示上的时间才不会出现负数。
+                // ★未起播（dur=0）时不能夹：那时 seekBaseMs 恒为 0，夹下界会把 -10000 直接变成 0，
+                //   位移就丢了 —— 现场"进页面按 ← 完全没反应"正是这里把它抹平了。
                 val dur = durNow()
-                if (seekAccumMs < -seekBaseMs) seekAccumMs = -seekBaseMs
-                if (dur > 0L && seekBaseMs + seekAccumMs > dur) seekAccumMs = dur - seekBaseMs
+                if (dur > 0L) {
+                    if (seekAccumMs < -seekBaseMs) seekAccumMs = -seekBaseMs
+                    if (seekBaseMs + seekAccumMs > dur) seekAccumMs = dur - seekBaseMs
+                }
                 showSeekCenter(seekAccumMs)
             }
             KeyEvent.ACTION_UP -> {
@@ -2991,6 +3018,16 @@ class PlayActivity : Activity() {
                     return
                 }
                 seekingByKey = false
+                if (durNow() <= 0L) {
+                    // 还没有时长 = 还没起播，此刻 seekTo 只能跳到 0，画面不会动。
+                    // 把位移留下，起播那一刻叠加到续播点（见 onPlaybackStateChanged）。
+                    pendingSeekAccum += seekAccumMs
+                    MpvDebug.log("[key] 跳推迟 未起播 accum=${seekAccumMs}ms 累计=${pendingSeekAccum}ms")
+                    seekAccumMs = 0L
+                    uiHandler.removeCallbacks(hideSeekCenterRun)
+                    uiHandler.postDelayed(hideSeekCenterRun, 1_200)
+                    return
+                }
                 val target = seekTargetNow()
                 val from = currentPosMs()
                 session.seekTo(target)
