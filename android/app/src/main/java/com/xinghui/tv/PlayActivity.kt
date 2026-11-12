@@ -205,7 +205,7 @@ class PlayActivity : Activity() {
         // ★必须打在 videoHost 赋值之后：以前它写在前面，host 恒为 null，把「画面层是否接上」
         //   这个最该看的信号变成了永远读不出来的假值。
         MpvDebug.log(
-            "[boot] build=tk7 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
+            "[boot] build=tk6 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
                 " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
         )
 
