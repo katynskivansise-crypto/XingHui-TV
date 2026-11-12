@@ -110,21 +110,6 @@ class PlaybackSession(
 
     fun isPaused(): Boolean = !isPlaying()
 
-    /**
-     * 相对当前位置跳转。
-     * 位置一律取内核真实值；内核还没有内容时返回 false，由调用方决定是否提示
-     * （Activity 只在"连媒体项都没有"这种真异常时提示，不再记任何补跳）。
-     */
-    fun seekBy(deltaMs: Long): Boolean {
-        val cur = positionMs()
-        if (!hasContent() && cur <= 0L) return false
-        val dur = durationMs()
-        var target = (cur + deltaMs).coerceAtLeast(0L)
-        if (dur > 0L) target = target.coerceAtMost(dur)
-        seekTo(target)
-        return true
-    }
-
     fun seekTo(ms: Long) {
         val target = ms.coerceAtLeast(0L)
         if (isMpvKernel()) mv?.seekToMs(target) else exo?.seekTo(target)

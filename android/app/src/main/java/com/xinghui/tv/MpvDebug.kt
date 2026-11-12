@@ -27,6 +27,16 @@ object MpvDebug {
 
     private const val MAX = 80
 
+    /**
+     * 按键/输入环境单独存一条更短的轨迹。
+     *   现场最需要的往往不是"最近 80 条里挑那几条按键"，而是"我按了这三下，到底进了哪条分支"。
+     *   主环形缓冲被 [sv2]/[hist]/[ui] 这些周期性行挤满后，按键行经常已经被挤出窗口，
+     *   于是每次都要猜。这里单独留 24 条，/debug 第一屏就是它。
+     */
+    private const val KEY_MAX = 24
+
+    private val keys = LinkedList<String>()
+
     private val lines = LinkedList<String>()
 
     /** 当前状态快照，由 PlayActivity 在 onCreate 时接上 */
@@ -39,6 +49,10 @@ object MpvDebug {
         val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         lines.addLast("$t  $msg")
         while (lines.size > MAX) lines.removeFirst()
+        if (msg.startsWith("[key]") || msg.startsWith("[env]") || msg.startsWith("[trace]")) {
+            keys.addLast("$t  $msg")
+            while (keys.size > KEY_MAX) keys.removeFirst()
+        }
         android.util.Log.i("XingHuiTV", msg)
     }
 
@@ -46,6 +60,14 @@ object MpvDebug {
     fun dump(): String {
         val head = runCatching { snapshot?.invoke() ?: "（未接入）" }.getOrElse { "快照异常：$it" }
         return buildString {
+            appendLine("== 按键轨迹（新→旧，最多 $KEY_MAX 条）==")
+            if (keys.isEmpty()) {
+                appendLine("（本进程还没有按键事件）")
+            } else {
+                val k = keys.descendingIterator()
+                while (k.hasNext()) appendLine(k.next())
+            }
+            appendLine()
             appendLine("== 当前状态 ==")
             appendLine(head)
             appendLine()

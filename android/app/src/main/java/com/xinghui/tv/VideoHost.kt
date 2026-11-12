@@ -1,5 +1,6 @@
 package com.xinghui.tv
 
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import androidx.media3.common.Player
@@ -51,6 +52,109 @@ class VideoHost(
     private var bound: Player? = null
 
     /**
+     * 这块 Surface 现在归谁。
+     *
+     * ★为什么必须有这个状态：EXO 和 mpv 都会往同一块 SurfaceView 上挂 SurfaceHolder.Callback
+     *   （media3 的 setVideoSurfaceView 内部挂一套，MpvPlayer 自己又挂一套），两边都以为自己是主人。
+     *   原项目是靠 PlayerView 上自建的 render 状态机（RENDER_SURFACE / RENDER_NONE / RENDER_TEXTURE）
+     *   保证"同一时刻只有一方拿到渲染权限"，我们一直没有这一层，于是谁都能往上面画。
+     *   Owner 就是补上这一层：任何一方要接管，必须先让当前主人松手。
+     */
+    enum class Owner { NONE, EXO, NATIVE }
+
+    var owner: Owner = Owner.NONE
+        private set
+
+    /** native 侧交回控制权时用的回调（由 MpvPlayer 提供，它负责 detach 与 vo=null） */
+    private var nativeRelease: (() -> Unit)? = null
+
+    /** native 侧拿到 Surface 后要做的事（由 MpvPlayer 提供，它负责 attach 与 vo=gpu） */
+    private var nativeAttach: ((SurfaceHolder) -> Unit)? = null
+
+    /**
+     * EXO 接管画面。
+     * 顺序仍是官方的"先挂新的、再摘旧的"，但要多一步：**native 必须先松手**。
+     * 否则 mpv 还握着这块 surface，EXO 的解码器接上去就是两家同时输出。
+     */
+    fun takeExo(p: Player?) {
+        if (owner == Owner.NATIVE) {
+            runCatching { nativeRelease?.invoke() }
+            nativeRelease = null
+            owner = Owner.NONE
+        }
+        setPlayer(p)
+        if (p != null) owner = Owner.EXO
+    }
+
+    /** native（mpv）接管画面。EXO 必须先 clear 掉，理由同上。 */
+    fun takeNative(attach: (SurfaceHolder) -> Unit, release: () -> Unit): Boolean {
+        if (owner == Owner.EXO) {
+            setPlayer(null)
+            owner = Owner.NONE
+        }
+        nativeAttach = attach
+        nativeRelease = release
+        val h = surfaceView.holder
+        owner = Owner.NATIVE
+        // surface 已经创建过就立刻 attach；没创建过则等 VideoHost 转发的 surfaceCreated
+        if (h.surface?.isValid == true) runCatching { attach(h) }
+        return true
+    }
+
+    /** 让当前主人松手，交回 NONE。换内核前必须调。 */
+    fun releaseOwner() {
+        when (owner) {
+            Owner.EXO -> setPlayer(null)
+            Owner.NATIVE -> runCatching { nativeRelease?.invoke() }
+            Owner.NONE -> Unit
+        }
+        nativeAttach = null
+        nativeRelease = null
+        owner = Owner.NONE
+    }
+
+    /**
+     * 重建这块 Surface。
+     *
+     * ★依据（原项目 PlayerManager.switchPlayer 的注释，原文）：
+     *   "A Surface used by a CPU renderer stays connected after decoder release.
+     *    A different player needs a new Surface before its GPU/codec can connect."
+     *   所以换内核时原项目是强制 resetVideoSurface 的（switchPlayer 里写死传 true），
+     *   具体动作是把 SurfaceView 从容器里摘掉再挂回去，逼出一次 destroyed→created。
+     *   不重建的话，新的 GPU/codec 会挂在一块还带着上一个内核残留的 surface 上。
+     *
+     * 代价是一次 surfaceDestroyed→surfaceCreated，画面会黑一帧 —— 换内核本来就是重操作，
+     * 原项目也接受这个代价。**不要**把它用在呼条、改布局这类轻动作上。
+     */
+    fun recreateSurface() {
+        val parent = surfaceView.parent as? android.view.ViewGroup ?: return
+        val idx = parent.indexOfChild(surfaceView)
+        val lp = surfaceView.layoutParams
+        runCatching {
+            parent.removeView(surfaceView)
+            parent.addView(surfaceView, idx.coerceAtLeast(0), lp)
+        }
+        MpvDebug.log("[surf] 重建 surface idx=$idx owner=$owner")
+    }
+
+    /** VideoHost 是 holder 事件的唯一转发者：谁占着就转给谁 */
+    private val forwarder = object : SurfaceHolder.Callback {
+        override fun surfaceCreated(h: SurfaceHolder) {
+            if (owner == Owner.NATIVE) runCatching { nativeAttach?.invoke(h) }
+        }
+        override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) {
+            if (owner == Owner.NATIVE) runCatching { nativeAttach?.invoke(h) }
+        }
+        override fun surfaceDestroyed(h: SurfaceHolder) {
+            if (owner == Owner.NATIVE) runCatching { nativeRelease?.invoke() }
+        }
+    }
+
+    init {
+        surfaceView.holder.addCallback(forwarder)
+    }
+
+    /**
      * 与 EXO 的唯一接线点。
      *
      * 官方 Player 的约定：setVideoSurfaceView 内部会自己挂 SurfaceHolder 回调，
@@ -60,8 +164,16 @@ class VideoHost(
     fun setPlayer(p: Player?) {
         val old = bound
         if (old === p) return
+        // ★顺序照 media3 官方 PlayerView.switchTargetView 的注释：
+        //   "We attach the new view before detaching the old one because this ordering allows the
+        //    player to swap directly from one surface to another, without transitioning through a
+        //    state where no surface is attached. This is significantly more efficient and achieves
+        //    a more seamless transition when using platform provided video decoders."
+        //   我们以前是反过来的（先 clear 再 set）：中间那一刻没有任何 surface 挂着，
+        //   MediaCodecVideoRenderer 会退回 placeholderSurface（什么都不画），
+        //   在这家 amlogic 的硬解上就是"黑一下"。先挂新的、再摘旧的，就没有这个中间态。
+        if (p != null) runCatching { p.setVideoSurfaceView(surfaceView) }
         if (old != null) runCatching { old.clearVideoSurfaceView(surfaceView) }
         bound = p
-        if (p != null) runCatching { p.setVideoSurfaceView(surfaceView) }
     }
 }

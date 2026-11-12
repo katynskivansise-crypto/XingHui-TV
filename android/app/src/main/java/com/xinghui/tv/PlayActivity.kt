@@ -177,7 +177,7 @@ class PlayActivity : Activity() {
             exoFactory = { null },                        // 实例由 Activity 自己建，建好交给会话
             mpvProvider = { mpv },
             isMpvKernel = { isMpvMode() },
-            bindSurfaceToExo = { p -> videoHost?.setPlayer(p) },
+            bindSurfaceToExo = { p -> videoHost?.takeExo(p) },
             events = object : PlaybackSession.Events {
                 override fun onState(state: PlaybackSession.State) = Unit
                 override fun onError(message: String) = Unit
@@ -297,9 +297,9 @@ class PlayActivity : Activity() {
                 val playingNow = runCatching { player?.isPlaying }.getOrNull()
                 MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} gen=$surfGen " +
                     "kernel=${if (isMpvMode()) "mpv" else "exo"} startGen=$startGen pos=${posNow}ms playing=$playingNow mpvPos=${mpvPos}ms")
-                // ★预热必须放在 surface 真正创建之后：挖洞代价是 SurfaceView 这件事的代价，
-                //   在 surface 还不存在时去改控制条 alpha 等于白付（日志顺序也是 created 在 playUrl 之后）。
-                warmKeyPathAhead()
+                // 这里原本调一个"预热按键冷路径"的函数：读一次 SP、读一次 insets、拼一条日志串。
+                // 它不改变任何状态，只在起播那一拍给主线程多压三件事，而那一拍正是
+                // 第一次按键最容易被挤掉的时刻。已删。
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
                 MpvDebug.log("[sv2] changed ${w}x$hh fmt=$f kernel=${if (isMpvMode()) "mpv" else "exo"}")
@@ -309,11 +309,26 @@ class PlayActivity : Activity() {
             }
         })
         // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
-        // 「第一次按菜单黑几秒、之后完全正常」。这里在起播前用 alpha=0 预演一次显隐，
-        // 把那次重排提前到屏幕上还没有画面的时刻 —— 不留任何视觉痕迹，也不加任何提示。
-        // 起播前这段（地址解析）屏幕本来就是黑的：不亮转圈的话，用户按一下菜单正好赶上这段，
-        // 看到的就是「按菜单把画面按黑了」，而实际是还没出帧。这里从进页面就让"加载中"亮着。
+        // 「第一次按菜单黑几秒、之后完全正常」。
+        // ★这里以前有一段"用 alpha=0 预演一次显隐"的预热，已删：那种预热自己会触发收尾，
+        //   收尾时把用户刚呼出的条也收掉，现场表现就是要按两次。现在起播前只用"加载中"
+        //   把这段时间如实表达出来（不亮转圈的话，用户按菜单正好赶上这段，看到的是"按菜单把画面按黑了"，
+        //   而实际是还没出帧）。
         showPlayProgress("进页面解析")
+        // ★输入环境探针（只打一次，几乎零开销）。
+        //   Android 官方文档明确：开启无障碍/触摸探索后，D-pad 事件不会传给开发者定义的方向键处理器，
+        //   而是被无障碍服务拿走用于移动无障碍焦点 —— 这是"应用收不到方向键、菜单键却照常到达"的一个真实成因。
+        //   touchMode 同理：触摸模式下没有视图持有焦点，第一下按键只会把焦点捡回来。
+        //   这两项只读一次，就足以越过所有猜测。
+        runCatching {
+            val am = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+            MpvDebug.log(
+                "[env] touchMode=${runCatching { window.decorView.isInTouchMode }.getOrNull()}" +
+                    " a11y=${am?.isEnabled} touchExploration=${am?.isTouchExplorationEnabled}" +
+                    " rootFocusable=${rootView?.isFocusable} rootFocusableInTouch=${rootView?.isFocusableInTouchMode}" +
+                    " decorHasFocus=${runCatching { window.decorView.hasFocus() }.getOrNull()}"
+            )
+        }
         MpvDebug.log("[play] 进页面 开始解析/起播 t=${System.currentTimeMillis() % 100000}")
         updateDecodeText()
         updatePlayerText()
@@ -899,7 +914,7 @@ class PlayActivity : Activity() {
      * 结果就是"按了确实有提示、画面一动不动"，用户判定为按键无效。
      * 这里把位移留着，起播那一刻叠加到续播点上再跳。
      */
-    private var pendingSeekAccum: Long = 0
+
 
     /** seek 下发时刻，用于量化"seek 到画面恢复播放"停了多久 */
     private var lastSeekCommitAt = 0L
@@ -915,6 +930,15 @@ class PlayActivity : Activity() {
 
     /** 上次落盘的位置，避免重复写同一进度把 SharedPreferences 打爆 */
     private var lastSavedPos: Long = 0
+
+    /**
+     * ★同集重新起播的位置纪律。
+     *   现场现象：播到 3 分钟退出 → 再进播到 1 分钟（合计 4 分钟）→ 第一次按菜单跳回 3 分钟。
+     *   这个 3 分钟恰好是**上一次会话退出时落盘的续播点**。只要本次会话里再发生一次 playUrl
+     *   （换内核、重建播放器、任何重建路径），旧的 at 计算会回头读磁盘上的 marks，画面被拽回旧点。
+     *   正确语义：同一地址在本会话内再次起播，起点用**当前真实位置**；只有地址变了（换集/换源）才读历史。
+     */
+    private var lastPlayedUrl = ""
 
     private val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
     /** 历史落盘专用单线程：顺序保证与主线程解耦（退场那条仍走同步） */
@@ -974,18 +998,6 @@ class PlayActivity : Activity() {
                     p.seekTo(at)
                     MpvDebug.log("[key] 起播前快进生效 → ${at}ms")
                 }
-                // 起播前按过 ←/→：位移留到了这里，叠加在真实起点上再跳一次
-                if (pendingSeekAccum != 0L) {
-                    val accum = pendingSeekAccum
-                    pendingSeekAccum = 0L
-                    val base = if (pendingSeek > 0) pendingSeek else runCatching { p.currentPosition }.getOrDefault(0L)
-                    val dur = runCatching { p.duration }.getOrDefault(0L)
-                    val t = (base + accum).let { v ->
-                        if (v < 0L) 0L else if (dur > 0L && v > dur) dur else v
-                    }
-                    p.seekTo(t)
-                    MpvDebug.log("[key] 起播前快进累积生效 → ${t}ms base=${base} accum=${accum}ms")
-                }
                 if (pendingSeek <= 0) return
                 val target = pendingSeek
                 pendingSeek = 0
@@ -996,6 +1008,16 @@ class PlayActivity : Activity() {
                 // seek 会让 isPlaying 瞬时变 false（EXO 重建缓冲），那不是"用户暂停"。
                 // 真机里每次 [key] 跳 之前都跟一条 保存[暂停]，纯属自造的无效写盘。
                 if (seekingByKey) return
+                // ★提交 seek 那一刻 seekingByKey 已经置回 false（否则下一次手势起不了手），
+                //   所以上面那句拦不住 seekTo 触发的那一发 false。用提交时间兜住这个窗口：
+                //   现场日志里每按一次 ←/→ 就紧跟一条 [hist] 保存[暂停] bg=true，
+                //   等于每按一下都全量写一遍 200 条历史 —— 卡顿和"按键不灵"的体感就是从这来的。
+                if (!isPlaying && lastSeekCommitAt > 0L &&
+                    android.os.SystemClock.uptimeMillis() - lastSeekCommitAt < 1_500L
+                ) {
+                    MpvDebug.log("[play] seek 引起的瞬时暂停，不落盘")
+                    return
+                }
                 if (isPlaying) {
                     lastSeekCommitAt.takeIf { it > 0L }?.let { t ->
                         val gap = android.os.SystemClock.uptimeMillis() - t
@@ -1072,9 +1094,12 @@ class PlayActivity : Activity() {
             }
         }
         lastSavedPos = pos
+        // ★probe 会把整份历史 JSONArray 重新解析一遍（200 条），而它以前挂在**每次**保存上 ——
+        //   包括每 15 秒的周期保存。落盘本身已经在后台线程了，但这行是同步拼在主线程上的，
+        //   等于每 15 秒白解析一次全量历史。现在只在必需要查的时候（force：退场/onPause/onDestroy）才做。
         MpvDebug.log(
             "[hist] 保存[$reason] pos=$pos key=${historyKey.take(24)} " +
-                HistoryStore(this).probe(historyKey, epUrl) +
+                (if (force) HistoryStore(this).probe(historyKey, epUrl) else "period=true") +
                 (if (force) " sync=true" else " bg=true")
         )
     }
@@ -1115,10 +1140,30 @@ class PlayActivity : Activity() {
         //   显式指定（切内核/重建/换解码器）> 用户起播前按的快进 > 片头标记/历史续播点。
         //   以前是"先写成续播点、再被 pendingJumpMs 改成 0、再补跳"，三次改写导致
         //   "先出第一帧再跳回当前位置"；现在一次定下来，装载时就带着位置。
+        // ★来源必须一起记：以前这行只写"续播点=xxx"，看不出这个值是三个入口里谁定的，
+        //   于是每次"莫名跳回旧位置"都只能猜。现在把来源类别和调用点行号一并写出。
+        val sameEpisodeAgain = url == lastPlayedUrl
+        val atSrc = when {
+            resumeOverride >= 0 -> "强制"
+            pendingJumpMs >= 0 -> "快进"
+            sameEpisodeAgain -> "续接当前"
+            else -> "历史"
+        }
         val at = when {
             resumeOverride >= 0 -> resumeOverride
             pendingJumpMs >= 0 -> pendingJumpMs
+            // ★同集再次起播：用当前真实位置，绝不回头读磁盘上的旧续播点
+            sameEpisodeAgain -> currentPosMs()
             else -> maxOf(openingMs, marks[2])
+        }
+        lastPlayedUrl = url
+        val atFrom = runCatching {
+            Throwable().stackTrace.getOrNull(2)?.let { "${it.fileName}:${it.lineNumber}" }
+        }.getOrNull()
+        val atArg = when {
+            resumeOverride >= 0 -> "resumeOverride=$resumeOverride"
+            pendingJumpMs >= 0 -> "pendingJumpMs=$pendingJumpMs"
+            else -> "hist=${marks[2]}"
         }
         resumeOverride = -1
         pendingJumpMs = -1
@@ -1128,7 +1173,7 @@ class PlayActivity : Activity() {
         // ★这条日志以前打在 at 计算之前，打的是还没赋值的 pendingSeek（永远是 0），
         //   把整条排查线带偏成"续播点没落盘"。现在打在算完之后，并把三个输入一并写出。
         MpvDebug.log(
-            "[play] 起播 gen=$startGen url=${url.take(48)} 续播点=${at}ms " +
+            "[play] 起播 gen=$startGen 来源=$atSrc($atArg) 调用=$atFrom url=${url.take(48)} 续播点=${at}ms " +
                 "(hist=${marks[2]} opening=${openingMs} ending=${endingMs}) " +
                 HistoryStore(this).probe(historyKey, epUrl)
         )
@@ -1534,7 +1579,6 @@ class PlayActivity : Activity() {
 
     /** 起播走 mpv：切显示层 → 建内核 → 下发地址与起始位置 */
     /** 文件还没加载完时用户快进的位置：先记下来，onLoaded 再补跳一次 */
-    private var mpvSeekAfterLoad = -1L
 
     /**
      * 起播前按键意图（两个内核共用同一套）。
@@ -1595,12 +1639,6 @@ class PlayActivity : Activity() {
                 // 那一下正好发生在首帧刚上屏的时刻，会给根布局（含 SurfaceView）再来两次重排，
                 // 而真机回执证明它并没有治住"首次菜单黑"，等于拿播放画面去赌一个未证实的假设。
                 Log.i("XingHuiTV", "[mpv] 已加载 ${activeUrl.take(60)}")
-                // 加载完成前用户按过快进：这时候文件才真正可定位，补跳一次
-                if (mpvSeekAfterLoad >= 0) {
-                    val at = mpvSeekAfterLoad
-                    mpvSeekAfterLoad = -1
-                    mpv?.seekToMs(at)
-                }
                 hidePlayProgress()
                 recordHistory()
                 // 起播这一刻焦点最容易掉回根布局：控制条若还开着，立刻把落点拉回条内，
@@ -2367,6 +2405,9 @@ class PlayActivity : Activity() {
                 lastBarFocusId != R.id.btnOpening && lastBarFocusId != R.id.btnEnding -> lastBarFocusId
             else -> R.id.timeBar
         }
+        // ★呼条前先记下真实位置：呼条这一拍若把播放点顶回旧值（现场"播了 4 分钟、
+        //   第一次按菜单又回到 3 分钟"就是这种），下面的守卫会把它拉回来。
+        val posBeforeBar = if (!wasShown) currentPosMs() else 0L
         // ★呼条前把进度条内部位置对齐真实位置。
         //   DefaultTimeBar 的 scrub 起点取它自己的 position（只在 setPosition 时更新）；
         //   进页面不久就呼条时那份值可能还是 0，焦点一进条、随后一次 ←，就会提交 0
@@ -2386,6 +2427,35 @@ class PlayActivity : Activity() {
             "[bar] 呼出完成 alpha=${controlBar?.alpha} target=$target focusOk=$focusOk" +
                 " nowFocus=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName})"
         )
+        // ★次帧焦点确认。
+        //   androidx/media issue #1828 现场记录过同一件事：在 dispatchKeyEvent 里调 requestFocus()
+        //   **不会当帧落在视图上**，用户要等到"松开按键"才看到焦点真正过去。
+        //   我们呼条也是在按键回调里 requestFocus 的，所以 focusOk=true 只代表"受理了"，
+        //   不代表这一帧焦点已经在条里；下一按若走焦点系统（OK / 条内导航），就会打空。
+        //   这里在下一帧补一次确认：只有在焦点仍为空或仍在根布局时才重试，避免把用户
+        //   已经移进条内的焦点又拽回去。
+        if (!wasShown && MpvDebug.experiment != 1) {
+            val want = target
+            uiHandler.post {
+                val cur = currentFocus
+                if (cur == null || cur === rootView) {
+                    val ok2 = runCatching { findViewById<View>(want)?.requestFocus() == true }.getOrDefault(false)
+                    MpvDebug.log("[bar] 次帧焦点确认 want=$want ok=$ok2 now=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName})")
+                }
+            }
+        }
+        // ★位置守卫：呼条必然带着一次窗口重排，这一拍里任何"按历史续播点重新定位"
+        //   都会把画面顶回旧位置。播了 1 分钟却退回起点、或退回上次的续播点，
+        //   用时间差就能认出来（正常播放只会前进，不会一次倒退 30 秒以上）。
+        if (posBeforeBar > 30_000L) {
+            uiHandler.postDelayed({
+                val now = currentPosMs()
+                if (now > 0L && now < posBeforeBar - 30_000L) {
+                    MpvDebug.log("[bar] 呼条后位置被顶回 pos=$now 原=$posBeforeBar → 复位")
+                    session.seekTo(posBeforeBar)
+                }
+            }, 600)
+        }
         // nextFocus 链只影响**后续**方向键，不影响刚才这次 requestFocus，
         // 所以推到下一帧再算，别压在呼条那一帧上（17 个按钮 × 2 个属性）。
         uiHandler.post { runCatching { setControlNextFocus() } }
@@ -2650,30 +2720,6 @@ class PlayActivity : Activity() {
         if (barShown()) hideControl() else showControl()
     }
 
-    private var keyPathWarmed = false
-
-    /**
-     * 预热"第一次按键"要走的冷路径，**不改变任何 UI**。
-     *
-     * 这三件事在第一次按键（用户习惯上总是先按菜单）那一帧才第一次发生：
-     *   · Settings(this).fullscreenMenuKey —— SharedPreferences 首次 get 可能要等磁盘加载；
-     *   · window.decorView.rootWindowInsets —— API25 第一次读会走一遍 dispatchApplyWindowInsets 全树；
-     *   · mpvDebugLine() —— 第一次构建这串日志要加载一堆类 + 读 JNI 属性。
-     * 全部在主线程同步执行，正好压在"窗口要重新合成"那一帧上。
-     *
-     * 趁画面还没出来（屏幕上只有转圈）把它们各走一遍，代价提前付掉。
-     * 与"展示控制条"无关，所以没有任何视觉副作用。
-     */
-    private fun warmKeyPathAhead() {
-        if (keyPathWarmed) return
-        keyPathWarmed = true
-        uiHandler.post {
-            runCatching { Settings(this).fullscreenMenuKey }
-            runCatching { window.decorView.rootWindowInsets?.systemWindowInsetTop }
-            runCatching { mpvDebugLine() }
-            MpvDebug.log("[warm] 按键冷路径已预热（SP / insets / 日志串）")
-        }
-    }
 
     private fun enableBarFocus(on: Boolean) {
         runCatching {
@@ -2791,10 +2837,23 @@ class PlayActivity : Activity() {
 
 
     /**
-     * 时间轴上的左右键 / OK 交给 DefaultTimeBar 自己处理，但必须挂 OnScrubListener：
-     * 它会在没有监听者的情况下**只消费按键**（内部只挪指示器），既不 seek 也不提示，
-     * 现场表现就是"焦点在进度条上，按左右一点变化都没有"。
-     * 这里把拖动过程接成居中提示、松手时才 seekTo（对齐原版 onSeeking / onSeekEnd）。
+     * 进度条的 scrub 回调。
+     *
+     * ★现在左右键**不再**交给 DefaultTimeBar（见 dispatchKeyEvent 里合并后的分支），
+     *   所以这条只剩触摸拖动会走到。留着是因为它仍然必须挂：DefaultTimeBar 在没有监听者时
+     *   会**只消费输入、不向外报告**（内部只挪指示器），表现就是"拖了没反应"。
+     *
+     * ★DefaultTimeBar 1.3.1 的三个协议坑（源码 libraries/ui/.../DefaultTimeBar.java）：
+     *   1) onKeyDown → scrubIncrementally：`if (duration <= 0) return false`，
+     *      duration 为 0 时左右键**连 scrub 都不启动**，View 层一声不响 —— 起播前按 ← 就是这个。
+     *   2) 按键 scrub 不是立即提交：`postDelayed(stopScrubbingRunnable, STOP_SCRUBBING_TIMEOUT_MS)`
+     *      其中 STOP_SCRUBBING_TIMEOUT_MS = 1000。按一下要等**满 1 秒空闲**才触发 onScrubStop → seek。
+     *      现场"第一次按下去黑约 1 秒才动"就是这一秒；而 seek 又会把 READY 打回 BUFFERING
+     *      （ExoPlayerImpl.seekTo：READY 时 copyWithPlaybackState(STATE_BUFFERING)）→ 于是出现"加载中"。
+     *   3) 起点取的是它自己的 `position` 字段（`previousPosition = scrubbing ? scrubPosition : position`），
+     *      这个字段只由 setPosition() 喂。喂它的只有每秒一次的 ticker 和呼条那一次 ——
+     *      ticker 一旦没跑，position 就停在旧值，按 ← 会从旧值往回跳，表现就是"跳回刚才那个位置"。
+     *   把按键收回 Activity 处理，等于一次绕开这三个坑。
      */
     private fun bindTimeBarScrub() {
         val tb = findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar) ?: return
@@ -2818,6 +2877,12 @@ class PlayActivity : Activity() {
             override fun onScrubStop(timeBar: androidx.media3.ui.TimeBar, position: Long, cancelled: Boolean) {
                 seekingByKey = false
                 if (!cancelled) {
+                    // DefaultTimeBar 的 position 由 setPosition() 喂，内核位置另有来源；
+                    // 两者差得多就说明条的位置是陈旧的（ticker 没跑 / 刚呼条）。留痕以便分流。
+                    val livePos = currentPosMs()
+                    if (livePos > 0L && kotlin.math.abs(position - livePos) > 30_000L) {
+                        MpvDebug.log("[key] ★进度条位置陈旧 条=${position}ms 内核=${livePos}ms 差=${position - livePos}ms")
+                    }
                     MpvDebug.log("[key] 进度条跳转 target=${position}ms dur=${durNow()}ms")
                     session.seekTo(position)
                     seekBaseMs = position
@@ -2852,6 +2917,7 @@ class PlayActivity : Activity() {
         seekBaseMs = currentPosMs()
         seekAccumMs = dir * SEEK_STEP_MS
         showSeekCenter(seekAccumMs)
+        lastSeekCommitAt = android.os.SystemClock.uptimeMillis()
         session.seekTo(target)
         uiHandler.postDelayed({ MpvDebug.log("[key] 媒体键跳+250ms pos=${currentPosMs()}ms") }, 250)
         uiHandler.removeCallbacks(hideSeekCenterRun)
@@ -2940,23 +3006,13 @@ class PlayActivity : Activity() {
                     return
                 }
                 seekingByKey = false
-                // ★判据从「有没有时长」改成「内容是否就绪」。
-                //   m3u8 的 duration 在 media3 里常常整场都是 C.TIME_UNSET，
-                //   PlaybackSession.durationMs() 把它归一化成 0；而 seekTo 对这类流完全有效
-                //   （DefaultTimeBar 的 onScrubStop 一直就是这么跳的）。
-                //   用 dur>0 当判据，等于这类源在「控制条收起」时 ←→ 永远只累加、不落地 ——
-                //   现场「进页面按 ← 没反应，按过一次菜单就好了」就是这条：
-                //   菜单把处理器从 handleSeekKey 换成了 DefaultTimeBar，后者不看 duration。
-                if (!contentReady()) {
-                    // 内容还没 attach，此刻 seekTo 无处可跳。
-                    // 把位移留下，起播那一刻叠加到续播点（见 onPlaybackStateChanged）。
-                    pendingSeekAccum += seekAccumMs
-                    MpvDebug.log("[key] 跳推迟 未起播 accum=${seekAccumMs}ms 累计=${pendingSeekAccum}ms")
-                    seekAccumMs = 0L
-                    uiHandler.removeCallbacks(hideSeekCenterRun)
-                    uiHandler.postDelayed(hideSeekCenterRun, 2_200)
-                    return
-                }
+                // ★这里不再判断「内容就绪」，也不再蓄积 —— 直接 seek，与原版一致。
+                //   原版 VideoActivity.dispatchKeyEvent:5974 的唯一门槛是 service() != null（播放服务已绑定），
+                //   而它的 onSeekEnd → seekTo(time) → PlayerManager.seekTo，全程不看 duration、不看是否起播。
+                //   我们之前加过"未就绪先攒起来、READY 再补跳"：那既让起播前的按键只剩提示，
+                //   又让那笔位移在 READY 时叠加到当时的 currentPosition 上而算错基点（现场"跳回旧点"就是它）。
+                //   media3 的 ExoPlayer.seekTo 在没有 mediaItem 或未 prepare 时只是把目标记下来，
+                //   prepare 完成后自然生效，所以根本不需要我们替它排队。
                 val target = seekTargetNow()
                 val from = currentPosMs()
                 lastSeekCommitAt = android.os.SystemClock.uptimeMillis()
@@ -2984,7 +3040,18 @@ class PlayActivity : Activity() {
      */
 
     /** 时间栏刷新（原版 view_control_seek 的 position / timeBar / duration） */
+    /**
+     * ★进度条刷新 ticker 的句柄。
+     *   以前它是 startProgressTicker() 里的局部对象，谁也拿不到引用，
+     *   于是：每进一次播放页就多注册一个"每秒自我重启"的任务，且 onDestroy 清不掉它。
+     *   uiHandler 是 Handler(getMainLooper())，Message 会把 Handler 连着 Activity 一起留在主线程队列里 ——
+     *   结果是每次进出播放页，主线程就多一个永久每秒跑的 ticker（各自 setDuration/setPosition/两次 setText）。
+     *   进得次数越多，主线程越忙，按键排队越久，体感就是"越用越不灵"。
+     */
+    private var progressTick: Runnable? = null
+
     private fun startProgressTicker() {
+        progressTick?.let { uiHandler.removeCallbacks(it) }
         // 视图引用只取一次：findViewById 每次都要遍历视图树，而这段 Runnable 是每秒一直在跑的
         val bar = findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)
         val posText = findViewById<TextView>(R.id.timePos)
@@ -3019,6 +3086,7 @@ class PlayActivity : Activity() {
                 uiHandler.postDelayed(this, 1000)
             }
         }
+        progressTick = tick
         uiHandler.post(tick)
     }
 
@@ -3070,7 +3138,7 @@ class PlayActivity : Activity() {
                     " ready=${contentReady()} bar=${barShown()} loading=${preStart()} " +
                     "barVis=${controlBar?.visibility} barAlpha=${controlBar?.alpha} " +
                     "focus=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName ?: "null"}) " +
-                    "mpv=${mpv != null} exo=${player != null}"
+                    "touchMode=${runCatching { window.decorView.isInTouchMode }.getOrNull()} mpv=${mpv != null} exo=${player != null}"
             )
         }
         // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
@@ -3178,14 +3246,30 @@ class PlayActivity : Activity() {
             val fid = currentFocus?.id
             // ★条显示、但焦点怎么都拉不进条里时，方向键交给焦点系统 = "按了没反应"。
             //   现场表现正是「只有 OK 有反应、←→ 全废」。这种情况按播放语义处理。
-            if ((isLeftKey(event) || isRightKey(event)) &&
-                currentFocus?.let { !isInside(controlBar!!, it) } != false
-            ) {
-                if (!ensureBarFocus()) {
-                    MpvDebug.log("[key] 条显示但焦点拉不回条内 → 方向键退化为快进/快退 kc=${event.keyCode}")
-                    handleSeekKey(if (isLeftKey(event)) -1L else 1L, event)
+            // ★←→ 从此不再"交焦点系统"。以前条显示时这里 return super，把方向键外包给
+            //   DefaultTimeBar 的 onKeyDown；条收起时又回到 handleSeekKey —— 同一个键两个处理器，
+            //   这就是"进页面按键无效、按一次菜单之后永久正常"的结构来源（菜单只是把处理器换了一个）。
+            //   现在两种情况都由本 Activity 决定：焦点在条内 → 自己调 focusSearch 移焦点；
+            //   焦点不在条内 → 直接快进/快退。绝不 return super，也就不再赌视图层的焦点链是否可用。
+            if (isLeftKey(event) || isRightKey(event)) {
+                val cur = currentFocus
+                val inBar = cur != null && cur.id != 0 && isInsideBar(cur)
+                if (inBar) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        val next = runCatching {
+                            cur!!.focusSearch(if (isLeftKey(event)) View.FOCUS_LEFT else View.FOCUS_RIGHT)
+                        }.getOrNull()
+                        if (next != null && next !== cur) runCatching { next.requestFocus() }
+                        MpvDebug.log(
+                            "[key] 条内焦点移动 ${if (isLeftKey(event)) "←" else "→"} 从=${cur!!.id}" +
+                                " 到=${next?.id} now=${currentFocus?.id}"
+                        )
+                    }
                     return true
                 }
+                MpvDebug.log("[key] 条显示但焦点不在条内 → 快进/快退 kc=${event.keyCode} focus=${cur?.id}")
+                handleSeekKey(if (isLeftKey(event)) -1L else 1L, event)
+                return true
             }
             if ((fid == R.id.btnOpening || fid == R.id.btnEnding) && (isUpKey(event) || isDownKey(event))) {
                 if (event.action == KeyEvent.ACTION_DOWN) {
@@ -3488,7 +3572,14 @@ class PlayActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // ★所有"自我重启"的任务都必须在这里摘掉，否则它们会跨 Activity 生命周期一直跑：
+        //   progressTick 每秒、snapTick 每秒、mpvWatchdog 15 秒，autoHide/hideSeekCenterRun 一次性。
+        //   以前只清了 snapTick / mpvWatchdog / saveRunnable，progressTick 每次进页面都漏一个。
+        progressTick?.let { uiHandler.removeCallbacks(it) }
+        progressTick = null
         uiHandler.removeCallbacks(snapTick)
+        runCatching { uiHandler.removeCallbacks(autoHide) }
+        runCatching { uiHandler.removeCallbacks(hideSeekCenterRun) }
         MpvDebug.snapshot = null
         uiHandler.removeCallbacks(mpvWatchdog)
         saveHandler.removeCallbacks(saveRunnable)
@@ -3500,7 +3591,7 @@ class PlayActivity : Activity() {
         super.onDestroy()
         sniffer?.cancel()
         sniffer = null
-        runCatching { videoHost?.setPlayer(null) }
+        runCatching { videoHost?.releaseOwner() }
         player?.release()
         player = null
         // 播放器已释放，这时候清迅雷任务/分片才安全（文件不删，则 thunder/ 会无限增长）
