@@ -2397,7 +2397,13 @@ class PlayActivity : Activity() {
      * 这里用反射按"一参 → 两参"依次尝试，失败也不影响播放页。
      * 目的只有一个：进页面那一小段时间里窗口没焦点时，遥控键不会整段丢掉。
      */
+    private var localFocusApplied = false
+
     private fun setLocalFocusCompat() {
+        // 只请求一次。setLocalFocus 会让 WindowManager 重新派发焦点事件，
+        // 若在 onWindowFocusChanged 里反复调用，就变成"获焦 → 再请求 → 再获焦"的死循环。
+        if (localFocusApplied) return
+        localFocusApplied = true
         val w = window ?: return
         runCatching {
             val one = w.javaClass.getMethod("setLocalFocus", java.lang.Boolean.TYPE)
@@ -3410,8 +3416,11 @@ class PlayActivity : Activity() {
             (rootView ?: findViewById<View>(android.R.id.content))?.requestFocus()
         }
         if (hasFocus) {
-            setLocalFocusCompat()
-            MpvDebug.log("[win] 窗口拿到焦点 localFocus 已置位 decor=${window.decorView.width}x${window.decorView.height}")
+            // ★这里绝不能再调 setLocalFocus：窗口此刻已经持有焦点，再请求一次会让
+            //   WindowManager 重新派发焦点事件 → 又进 onWindowFocusChanged → 无限循环。
+            //   真机日志里就是 [ui] 窗口焦点 / [win] setLocalFocus 成对刷屏、每帧两条，
+            //   主线程被日志与焦点遍历占满，按键反而更不灵。
+            MpvDebug.log("[win] 窗口拿到焦点 decor=${window.decorView.width}x${window.decorView.height}")
             applyImmersive()
             // 关掉选集弹窗、从系统框回来时，mpv 的 vo 可能已经被窗口变化带掉；
             // 等布局稳定后再自检一次，避免黑屏只剩声音
