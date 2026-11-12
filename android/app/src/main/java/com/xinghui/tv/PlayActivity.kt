@@ -128,11 +128,17 @@ class PlayActivity : Activity() {
         // 如果这里是 cur=-1 且 winFocus=false，就说明"按键无效"是窗口/焦点这一层没接上，
         // 而不是按键分支写错（分支层面 ←→/OK 根本不看焦点）。
         rootView?.post {
-            val rootOk = rootView?.requestFocus() == true
+            // ★守卫：只在"没人持焦"时落点。
+            //   这个 post 会等到首帧才执行；如果用户已经先按了菜单、焦点进了控制条，
+            //   这里无条件 requestFocus 就会把它抢回根容器 —— 真机日志里表现为
+            //   「呼出完成 nowFocus=DefaultTimeBar」→ 一秒后「was=-1(FrameLayout)」，
+            //   然后靠 showControl 里的补救再落回条上。这一抢一补正是首键体感不稳定的来源。
+            val hadFocus = currentFocus
+            val rootOk = if (hadFocus == null) rootView?.requestFocus() == true else true
             val dv = window?.decorView
             if (dv != null && !dv.hasWindowFocus()) runCatching { dv.requestFocus() }
             MpvDebug.log(
-                "[ui] 进页面焦点 rootFocus=$rootOk cur=${currentFocus?.id}" +
+                "[ui] 进页面焦点 rootFocus=$rootOk 原有焦点=${hadFocus?.id} cur=${currentFocus?.id}" +
                     " winFocus=${runCatching { dv?.hasWindowFocus() }.getOrElse { null }}" +
                     " rootFocusable=${rootView?.isFocusable} barVis=${controlBar?.visibility}"
             )
@@ -143,10 +149,6 @@ class PlayActivity : Activity() {
         // ★build 标记 = 本包的身份证。贴 /debug 时看这一行的 build 值就能判断
         //   装上的到底是不是这一版：tk4 = 画面层已脱离 PlayerView。
         //   仍是 tk3 说明包没覆盖到（或没重新编译），此时任何"问题依旧"都不成立。
-        MpvDebug.log(
-            "[boot] build=tk5 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
-                " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
-        )
         // 恢复：对齐原版 VideoActivity（继承 BaseActivity）—— 窗口同样挂壁纸，播放器自身黑底压住。
         // 之前为了压掉「四周白条」临时改成纯黑，属于主动偏离原版，按用户要求恢复。
         // 全屏靠主题的 windowFullscreen + 原版那套 systemUiVisibility（见 applyImmersive），
@@ -199,6 +201,14 @@ class PlayActivity : Activity() {
                 "videoSurface=${findViewById<View>(R.id.videoSurface)?.javaClass?.simpleName} " +
                 "subtitle=${findViewById<View>(R.id.subtitleView)?.javaClass?.simpleName} err=$it")
         }.getOrNull()
+        // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」。
+        // ★必须打在 videoHost 赋值之后：以前它写在前面，host 恒为 null，把「画面层是否接上」
+        //   这个最该看的信号变成了永远读不出来的假值。
+        MpvDebug.log(
+            "[boot] build=tk6 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
+                " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
+        )
+
         enableKeepContent()
         /**
          * keep_content_on_player_reset 不在这里设，保持 media3 默认（false），与点播场景一致。
@@ -1801,7 +1811,11 @@ class PlayActivity : Activity() {
                 android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
         findViewById<View>(R.id.playTitle)?.alpha = 0f
-        MpvDebug.log("[bar] 控制条常驻 VISIBLE + alpha=0（首次绘制与挖洞区域在创建时一次性付掉）")
+        // ★这行文案以前写的是「常驻 VISIBLE + alpha=0」，那是已废弃的自造路径；
+        //   实际实现是 GONE + alpha=1（与官方 PlayerView controller、原版 @id/control 同一个形态）。
+        //   文案必须跟着实现走 —— 日志骗人比没日志更糟。
+        MpvDebug.log("[bar] 控制条初值 vis=${if (controlBar?.visibility == View.VISIBLE) "VISIBLE" else "GONE"} " +
+            "alpha=${controlBar?.alpha} 形态=GONE/VISIBLE（非 alpha 常驻）")
         // ★nextFocus 链必须在页面创建时就建好。
         //   原来它只在 showControl() 里 post 一次，也就是说"第一次按菜单之前"，
         //   actionLayout 里 17 个按钮的 nextFocusLeftId/nextFocusRightId 全是 0 ——
