@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ★单窗口宿主：详情层与播放层是同一个 Activity 里的两个 View 层。
+     只有一块 SurfaceView，从进详情页那一刻起就存在，直到退出 App 都不销毁。
+
+     Z 序（自下而上，SurfaceView 的 surface 天然在窗口 surface 之下，普通 View 一律盖在它上面）：
+        videoFrame   画面容器（AspectRatioFrameLayout，resize_mode=fit）
+        detailLayer  详情层
+        playLayer    播放层（转圈/顶栏/控制条，根背景必须透明，否则会盖住画面）
+
+     三种形态只改 videoFrame 的 LayoutParams：
+        小窗   = 400dp x 225dp，摆在详情页 playerBox 的位置
+        全屏预览（详情页里点小窗）= MATCH_PARENT
+        播放   = MATCH_PARENT，同时 detailLayer GONE、playLayer VISIBLE
+
+     ★为什么必须是一块：电视只有那么多块硬件视频平面，有的型号只有一块。
+       第二块 SurfaceView 去申请一个不存在的平面时拿不到画面，但音频不需要载体，照样出声 ——
+       那就是"小窗只有声音没有画面"。（OwnTV 源码原文，见方案文档） -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/hostRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+
+    <androidx.media3.ui.AspectRatioFrameLayout
+        android:id="@+id/videoFrame"
+        android:layout_width="400dp"
+        android:layout_height="225dp"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="24dp"
+        android:layout_marginTop="24dp"
+        app:resize_mode="fit">
+
+        <SurfaceView
+            android:id="@+id/videoSurface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <androidx.media3.ui.SubtitleView
+            android:id="@+id/subtitleView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </androidx.media3.ui.AspectRatioFrameLayout>
+
+    <FrameLayout
+        android:id="@+id/detailLayer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/transparent" />
+
+    <FrameLayout
+        android:id="@+id/playLayer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/transparent"
+        android:visibility="gone" />
+
+</FrameLayout>
