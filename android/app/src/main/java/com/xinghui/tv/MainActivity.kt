@@ -326,8 +326,10 @@ class MainActivity : Activity() {
         }
         // 原版同一个站点有多个播放源时，某个源播不动会自动切下一个
         player?.let { bindDetailListener(it) }
+        // ★点小窗 = 进全屏播放层（原版 VideoActivity 点视频框即进全屏）。
+        //   不再走 enterInlineFullscreen：那条路铺满的是 playerBox，而画面在宿主层的 videoFrame。
         findDetail<View>(R.id.playerBox).setOnClickListener {
-            if (!inlineFullscreen) enterInlineFullscreen()
+            openPlayPageAt(playingIdx.coerceAtLeast(0))
         }
 
         Thread {
@@ -766,13 +768,12 @@ class MainActivity : Activity() {
             }
             !showLines && key.startsWith("E:") -> {
                 val idx = key.removePrefix("E:").toIntOrNull() ?: return
-                // 对齐原版 shouldEnterFullscreen：点到「正在播的这一集」就进全屏，
-                // 点到别的集才是换集。所以集数上按一次是换集，再按一次是全屏。
-                if (idx == playingIdx) {
-                    enterInlineFullscreen()
-                    return
-                }
-                playInline(idx)
+                // ★点集数 = 直接进全屏播放层（原版 VideoActivity 点集数即进全屏）。
+                //   单 Activity 之后画面在宿主层的 videoFrame，详情页里的 playerBox 只是透明占位，
+                //   既没有 inlinePlayer 也没有第二块 surface。原来那套「小窗里换集 /
+                //   把 playerBox 铺满当全屏」已经没有任何画面可言 —— 铺满 playerBox 只会得到
+                //   「左上一个小画面 + 其余全黑」，也就是这个 bug 的现场。
+                openPlayPageAt(idx)
             }
         }
     }
@@ -963,6 +964,9 @@ class MainActivity : Activity() {
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findDetail<View>(it)?.visibility = View.GONE
         }
+        // ★画面在宿主层，铺满 playerBox 不等于铺满画面 —— 必须同时把 videoFrame 拉全屏，
+        //   否则就是「playerBox 占满屏幕，但画面还是左上 400x225」（本 bug 的原始现场）。
+        runCatching { videoFrameToFull() }
         box.requestFocus()
     }
 
@@ -1037,6 +1041,27 @@ class MainActivity : Activity() {
             putExtra("ep_url", ep.second)
         })
         // 同上：不做 overridePendingTransition(0, 0)，理由见 openPlayPage 里的说明。
+    }
+
+    /** 点集数 / 点小窗：直接进全屏播放层，播第 idx 集（原版点集数即进全屏） */
+    private fun openPlayPageAt(idx: Int) {
+        val v = vod ?: return
+        val line = currentLine ?: return
+        val ep = episodes.getOrNull(idx) ?: line.episodes.getOrNull(idx) ?: return
+        playingIdx = idx
+        runCatching { adapter.setActive("E:$idx") }
+        inlineLeaveFullscreen = inlineFullscreen
+        // 交接给播放层之前先把详情页预览停下来（暂停 + 摘掉画面层，但保留实例）
+        detachInlinePlayback()
+        runCatching { setPreviewVisible(false) }
+        inlineResumeOnReturn = true
+        showPlayLayer(Intent(this, MainActivity::class.java).apply {
+            putExtra("vod_id", v.vodId)
+            putExtra("vod_name", v.vodName)
+            putExtra("vod_pic", v.vodPic)
+            putExtra("flag", line.name)
+            putExtra("ep_url", ep.second)
+        })
     }
 
     override fun onBackPressed() {
