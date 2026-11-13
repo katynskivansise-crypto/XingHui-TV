@@ -237,7 +237,27 @@ class MainActivity : Activity() {
         videoFrameToMini()
         // ② 把画面交回，走 setVideoSurfaceView —— media3 自己接住尺寸变化
         attachPreviewTo(q)
+        // ★引擎可能已经被重置成 IDLE（换源/换集/换内核都会）。IDLE 下调 play() 不会起播，
+        //   表现就是"小窗有 surface 但一直是灰的"。
+        if (q.playbackState == androidx.media3.common.Player.STATE_IDLE) {
+            runCatching { q.prepare() }
+        }
         runCatching { q.play() }
+        // 把判断依据直接打到屏幕上：装一版就能看清是哪一环断的，不用再去翻日志。
+        runCatching {
+            val st = when (q.playbackState) {
+                1 -> "IDLE"; 2 -> "BUFFERING"; 3 -> "READY"; 4 -> "ENDED"; else -> "?" + q.playbackState
+            }
+            android.widget.Toast.makeText(
+                this,
+                "[exit] st=$st playing=${q.isPlaying} " +
+                    "vsize=${q.videoSize.width}x${q.videoSize.height} " +
+                    "tracks=${q.currentTracks.groups.size} " +
+                    "sv=${videoSurface.width}x${videoSurface.height} " +
+                    "surfValid=$surfaceValid ep=${episodes.getOrNull(playingIdx)?.first}",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
         MpvDebug.log(
             "[exit] 交回小窗 frame=${videoFrame.width}x${videoFrame.height} " +
                 "sv=${videoSurface.width}x${videoSurface.height} " +
@@ -262,6 +282,14 @@ class MainActivity : Activity() {
 
         hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)
         detailLayer = findViewHost(R.id.detailLayer)
+        // ★不依赖 XML：布局文件的背景一律在这里强制成透明。
+        //   窗口背景才是壁纸（WallpaperStore 设的 window.setBackgroundDrawable），
+        //   这两层只要有一层不是 transparent，详情页就是纯黑 ——
+        //   而历史上有过"只覆盖 kt 没覆盖 xml"的情况，所以不能把这件事交给 XML 决定。
+        runCatching {
+            hostRoot.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            detailLayer.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        }
         playContainer = findViewHost(R.id.playLayer)
         videoFrame = findViewHost(R.id.videoFrame)
         videoSurface = findViewHost(R.id.videoSurface)
@@ -289,15 +317,21 @@ class MainActivity : Activity() {
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
                 MpvDebug.log("[sv2] changed $w x $ht")
-                // ★小窗↔全屏切换时这块 surface 的 buffer 尺寸变了。
-                //   API 25 的 MediaCodec 不会自己跟着新尺寸重建输出缓冲，不重挂就是
-                //   「声音继续、画面停在旧尺寸/黑」。先 clear 再 set，强制解码器按新尺寸重建。
-                surfaceConsumer?.let { p ->
-                    runCatching {
-                        p.clearVideoSurface()
-                        p.setVideoSurface(h.surface)
-                    }
-                }
+                // ★这是整条链路里我们一直漏掉的一步。
+                //   media3 的 PlayerView 内部有个 ComponentListener，surface 尺寸一变它就调
+                //     player.setVideoSurfaceSize(width, height)
+                //   （原版 PlaybackActivity 里对应的就是 syncVideoSurfaceSize）。
+                //   我们用的是裸 SurfaceView + setVideoSurfaceView，PlayerView 那一层不在了，
+                //   而 setVideoSurfaceView 本身**不会**把尺寸变化转给解码器。
+                //   结果：容器从小窗 400x225 撑到全屏，surface 变了，解码器却还按旧尺寸写帧 ——
+                //   画面停住、声音照常。
+                //   原版 PlaybackActivity.syncVideoSurfaceSize 的默认路径就一句：
+                //     surfaceView.getHolder().setSizeFromLayout();
+                //   它让 surface 的 buffer 尺寸按布局重新算 —— View 尺寸变化只有经过这一步，
+                //   才真正落到 buffer 上。我们 resize 了 videoFrame、view 变了，
+                //   却从没通知 holder，buffer 一直是旧尺寸，解码器继续往旧 buffer 写帧。
+                //   ★不是 setVideoSurfaceSize：那个 API 在 media3 里不存在（编译会直接报错）。
+                runCatching { h.setSizeFromLayout() }
             }
             override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
                 surfaceValid = false
@@ -335,6 +369,20 @@ class MainActivity : Activity() {
         // 注意必须走 WallpaperStore.apply：它才有「用户自设图 > 内置 wallpaper_1」的分支。
         // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
         runCatching { WallpaperStore.apply(this) }
+        // ★布局自检：一次回答三件事 —— 工程里跑的是新布局还是旧布局、壁纸有没有加载、
+        //   画面层当前是什么控件多大。下面这些值如果和仓库里的 XML 对不上，
+        //   就说明装上去的不是这一版（res 没重新编译 / 只覆盖了 kt 没覆盖 xml）。
+        runCatching {
+            MpvDebug.log(
+                "[boot] 布局自检 hostRootBg=${findViewHost<android.view.View>(R.id.hostRoot)?.background?.javaClass?.simpleName} " +
+                    "detailLayerBg=${detailLayer?.background?.javaClass?.simpleName} " +
+                    "frame=${videoFrame.width}x${videoFrame.height} " +
+                    "frameLp=${videoFrame.layoutParams?.width}x${videoFrame.layoutParams?.height} " +
+                    "surface=${videoSurface.javaClass.simpleName} " +
+                    "selfWall=${WallpaperStore.has(this)} " +
+                    "windowBg=${window.decorView.background?.javaClass?.simpleName}"
+            )
+        }
         inlineView = findDetail(R.id.inlinePlayer)
         // ★这一行是「详情页预览到底创建的是 SurfaceView 还是 TextureView」的唯一直接证据。
         //   PlayerView 在 surface_type=surface_view 下 getVideoSurfaceView() 返回内部的 SurfaceView；
