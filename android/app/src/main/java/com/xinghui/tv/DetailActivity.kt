@@ -727,6 +727,7 @@ class DetailActivity : Activity() {
         //   texture_view 已经把"新装包"这一侧从根上去掉了；这一行是给"万一 XML 没覆盖到"留的兜底：
         //   GONE 才是可见性变化，才真正让 surface 销毁。返回时 onResume 会重建预览（playInline 里设回 VISIBLE）。
         runCatching { inlineView.visibility = View.GONE }
+        // ★转场动画保留（曾经想去掉，已撤）。
         // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
         inlineResumeOnReturn = true
         startActivity(Intent(this, PlayActivity::class.java).apply {
@@ -736,6 +737,18 @@ class DetailActivity : Activity() {
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
         })
+        // ★这里**故意不做** overridePendingTransition(0, 0)。
+        //
+        // 上一版做过，而且放错了位置（放在 startActivity 之前，按官方定义属于空操作）。
+        // 现在连「放对位置」也不做了，原因有三：
+        //   1) 转场动画要保留 —— 它不是黑屏的原因，它是**掩盖**黑屏的那层东西。
+        //      播放页窗口出现时 SurfaceView 的 surface 还没有内容（黑），有淡入就是「淡入一段黑」，
+        //      没有动画就是「整屏瞬间黑住」。原版一直是系统默认转场，从没关过。
+        //   2) 腾讯云开发者社区实证：overridePendingTransition(0, 0) 本身就会导致跳转短暂黑屏，
+        //      正确做法是换回真实 anim，或者干脆用系统默认。
+        //   3) 关掉动画还会让新窗口的输入焦点提前到来，这时按键语义还没挂好，
+        //      更容易出现「进去按 ← 没反应」—— 保留动画反而给了首帧和焦点一个缓冲。
+        // 结论：系统默认转场 + DetailActivity 不做任何 overridePendingTransition。
     }
 
     /**
@@ -818,6 +831,7 @@ class DetailActivity : Activity() {
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
         })
+        // 同上：不做 overridePendingTransition(0, 0)，理由见 openPlayPage 里的说明。
     }
 
     override fun onBackPressed() {

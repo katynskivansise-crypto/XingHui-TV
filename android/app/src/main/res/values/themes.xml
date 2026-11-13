@@ -24,7 +24,25 @@
              LAYOUT_STABLE / LAYOUT_HIDE_NAVIGATION / HIDE_NAVIGATION / FULLSCREEN，
              再加上 windowFullscreen=true，内容本来就从 (0,0) 起算。
              原版用它是配合自己的小窗结构；我们是全屏画面，形态不同，不能照搬。 -->
-        <item name="android:windowDisablePreview">true</item>
-        <item name="android:windowAnimationStyle">@null</item>
+        <!-- ★下面两条已撤（11-12 深夜）：它们各自都在「取消转场」。
+             原项目 Theme.WebHTV 里 grep 不到 windowDisablePreview、也 grep 不到 windowAnimationStyle ——
+             也就是说原版播放页一直是**系统默认转场动画**在起作用，从没关过。
+             我们之前把这两条都置了 null：
+               windowDisablePreview=true → 不等候预览，真实窗口立刻出现；
+               windowAnimationStyle=@null → 新窗口瞬间满屏，零动画。
+             两者叠加的结果是：Activity 切换一帧完成，SurfaceView 的 surface 此刻还没有任何内容（黑），
+             于是整屏直接黑住，直到解码器出第一帧 —— 这就是「进去黑约 1 秒」。
+             留着重画动画之后，同一个黑是**淡入**的，和原版观感一致。
+             依据（三条互相独立）：
+               1) media3 官方 surface 文档：SurfaceView 与视图动画在 Android 7.0（API 24）起已正确同步，
+                  「动画中变黑」是 24 **之前**的问题；我们是 API 25，保留动画是安全的。
+               2) 社区实证：SurfaceView 首次出现在窗口时会触发一次私有 IWindowSession.relayout，
+                  那一帧必然被跳过 —— 408 秒帧率采样（最低 36 帧、中位 60、无一秒低于 30）证明
+                  「黑」不是掉帧，正是这次 relayout。
+               3) 腾讯云开发者社区案例：overridePendingTransition(0, 0) 本身就会导致页面跳转短暂黑屏，
+                  正确做法是换回真实 anim 或干脆用系统默认。
+             换句话说：**转场动画不是黑屏的原因，它是掩盖黑屏的那层东西。** -->
+        <!-- <item name="android:windowDisablePreview">true</item> -->
+        <!-- <item name="android:windowAnimationStyle">@null</item> -->
     </style>
 </resources>

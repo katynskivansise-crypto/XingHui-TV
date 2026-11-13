@@ -86,7 +86,7 @@ object ProxyServer {
                         path == "/debug" -> {
                             // 诊断档位：/debug?x=1..4，一次装包即可做 A/B（界面零改动、不弹提示）
                             session.parameters["x"]?.firstOrNull()?.toIntOrNull()?.let { x ->
-                                MpvDebug.experiment = x.coerceIn(0, 7)
+                                MpvDebug.experiment = x.coerceIn(0, 8)
                                 MpvDebug.log("[exp] 档位切换为 ${MpvDebug.experiment}")
                             }
                             newFixedLengthResponse(

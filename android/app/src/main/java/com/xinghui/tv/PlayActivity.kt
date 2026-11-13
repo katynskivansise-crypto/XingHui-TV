@@ -120,6 +120,7 @@ class PlayActivity : Activity() {
         super.onCreate(savedInstanceState)
         tCreate = SystemClock.uptimeMillis()
         setContentView(R.layout.activity_play)
+        MpvDebug.log("[perf] setContentView=${SystemClock.uptimeMillis() - tCreate}ms")
         // 根容器当画面容器用（原版 @id/video 的等价物）：可聚焦，收控制条时焦点回这里
         rootView = runCatching {
             (findViewById<View>(android.R.id.content) as? android.view.ViewGroup)?.getChildAt(0)
@@ -207,7 +208,7 @@ class PlayActivity : Activity() {
         // ★必须打在 videoHost 赋值之后：以前它写在前面，host 恒为 null，把「画面层是否接上」
         //   这个最该看的信号变成了永远读不出来的假值。
         MpvDebug.log(
-            "[boot] build=tk9 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
+            "[boot] build=tk13 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
                 " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
         )
 
@@ -234,6 +235,7 @@ class PlayActivity : Activity() {
         // mpv 内核下不必先建 EXO 实例：T1 只有 2GB 内存，两套解码器并存很吃紧。
         // 切回 EXO 时 rebuildPlayer() 会补建，所以这里可以省。
         if (!isMpvMode()) {
+            val tExo0 = SystemClock.uptimeMillis()
             player = ExoPlayer.Builder(this).build().also { p ->
                 // 对齐原版 Players.java:155：setAudioAttributes(AudioAttributes.DEFAULT, !isPlayWithOthers())
                 // 原版默认 play_with_others=false → 第二参数 true = 请求音频焦点。
@@ -243,6 +245,7 @@ class PlayActivity : Activity() {
             }
             applyCaptionStyle()
             attachPlayerListeners()
+            MpvDebug.log("[perf] ExoPlayer构建=${SystemClock.uptimeMillis() - tExo0}ms")
         } else {
             // mpv 内核：先把原生实例建好，按键（暂停/快进）从第一秒起就有效。
             // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
@@ -274,7 +277,9 @@ class PlayActivity : Activity() {
         applyWindowShapeExperiment()
         // 原版播放页没有返回按钮（VideoActivity 靠系统返回键），这里同样不摆
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
+        val tBar0 = SystemClock.uptimeMillis()
         bindControlBar()
+        MpvDebug.log("[perf] bindControlBar=${SystemClock.uptimeMillis() - tBar0}ms 距onCreate=${SystemClock.uptimeMillis() - tCreate}ms")
         videoHost?.post { setupSharedSurface() }
         uiHandler.postDelayed(snapTick, 1000)
         // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
@@ -788,15 +793,26 @@ class PlayActivity : Activity() {
                 " surfGen=$surfGen"
         )
         runOnUiThread {
+            // ★常驻 VISIBLE + alpha 显隐（不再是 GONE↔VISIBLE）。
+            //
+            // 依据是本轮对 50 份日志做的全量扫描：`[frame]` 探针共 408 秒采样，
+            // 最低一秒 36 帧、中位 60 帧，**没有一秒掉到 30 以下**。
+            // 也就是说「按菜单黑一下」不是掉帧/卡顿 —— 窗口一直在正常绘制。
+            // 那黑只能来自合成层：窗口"有绘制内容区域"发生变化时，
+            // ViewRootImpl 要重算挖洞区域并 setTransparentRegionHint，该窗口层那一帧被跳过。
+            // 这个转圈层原来是 GONE→VISIBLE，正是第二个会改绘制区域的覆盖层
+            //（[panel] 探针里 controlBar size=1920x143，转圈是居中 wrap_content）。
+            // 三层覆盖层（控制条 / 转圈 / 暂停图标）现在统一成常驻 VISIBLE + alpha，
+            // 绘制区域从页面第一帧起就固定，之后任何显隐都只是重绘。
             val v = findViewById<View>(R.id.playProgress)
             v?.alpha = 1f
-            v?.visibility = View.VISIBLE
         }
     }
 
     private fun hidePlayProgress() {
         progressShown = false
-        runOnUiThread { findViewById<View>(R.id.playProgress)?.visibility = View.GONE }
+        // 同上：只降 alpha，不动 visibility（不动窗口绘制区域）
+        runOnUiThread { findViewById<View>(R.id.playProgress)?.alpha = 0f }
     }
 
     /**
@@ -1624,7 +1640,11 @@ class PlayActivity : Activity() {
      * startMpv 只负责 play(url)，按键从第一秒起就有效。
      */
     private fun ensureMpv(surface: android.view.View): MpvPlayer {
-        mpv?.let { return it }
+        mpv?.let { old ->
+            // 复用时也要重新交主权：切内核前 releaseOwner() 把 VideoHost 上的 native 回调清掉了
+            videoHost?.let { vh -> runCatching { old.bindToHost(vh) } }
+            return old
+        }
         val p = MpvPlayer(this, surface).also { p ->
             p.onLoaded = {
                 mpvLoaded = true
@@ -1657,6 +1677,10 @@ class PlayActivity : Activity() {
             p.onDuration = { mpvDur = it }
         }
         mpv = p
+        // ★画面主权交给 VideoHost（方案「六、第 1 步」）。
+        //   在此之前 MpvPlayer 自己往 holder 上注册回调，与 VideoHost.forwarder 并存，
+        //   同一块 Surface 上有两个主人 —— 这是"从 EXO 切 mpv 闪退"的结构性来源之一。
+        videoHost?.let { vh -> runCatching { p.bindToHost(vh) } }
         return p
     }
 
@@ -1708,6 +1732,19 @@ class PlayActivity : Activity() {
         session.releaseExo()
         player = null
         handOver("mpv", "releaseExo 已解绑并释放，下一步 attach 给 mpv")
+        // ★方案「六、第 2 步」：换内核必须换一块干净 Surface。
+        //   依据是原项目 PlayerManager.java:1522-1523 的注释原文：
+        //     "A Surface used by a CPU renderer stays connected after decoder release.
+        //      A different player needs a new Surface before its GPU/codec can connect."
+        //   而 switchPlayer() 里 resetVideoSurface 是**写死 true** 的。
+        //   具体动作就是 recreateSurface()：摘掉再加回，逼出一次 destroyed→created。
+        //   不做这一步，mpv 的 GPU 会挂在"EXO 刚用过、还带着残留"的那块面上 —— 表现就是切过去闪退。
+        //   代价是黑一帧，原项目同样接受（换内核本来就是重操作）。
+        runCatching {
+            videoHost?.releaseOwner()
+            videoHost?.recreateSurface()
+            MpvDebug.log("[kernel] 换到 mpv：releaseOwner + recreateSurface 已执行")
+        }
         // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
         val surface = currentSurface()
         // 共用画面层是唯一前提，拿不到就本页退回 EXO（不能静默不播）
@@ -1801,7 +1838,17 @@ class PlayActivity : Activity() {
         val b = controlBar ?: return false
         // 常驻 VISIBLE 之后，"显示中"只能按 alpha 判（同一个函数在 showControl/hideControl/按键
         // 三处都用，判据必须唯一，否则会出现"看着显示着、代码认为已隐藏"这种劈叉）
-        return b.visibility == View.VISIBLE
+        //
+        // ★这一行就是五天没进展的阻塞点。
+        //   上面这句注释一直写着"按 alpha 判"，实现却是 visibility == VISIBLE。
+        //   控制条一旦改成常驻 VISIBLE，这个判据恒为 true：
+        //     · showControl 里 wasShown=true → 每次呼条都命中幂等分支，条永远不出现
+        //     · hideControl 里 if (!barShown()) return 永远早退，条永远收不起来
+        //   于是"改 alpha"的方案必然失败，只能退回 GONE；退 GONE 就把"第一次呼条黑"
+        //   和"第一下按键无效"两个症状原样留下了。档位 8（常驻 VISIBLE 的 A/B 开关）
+        //   也是在那次失败后一起被删掉的。
+        //   判据改成 alpha 之后，alpha 方案才真正可验证。
+        return b.visibility == View.VISIBLE && b.alpha > 0.5f
     }
     /** 画面容器（根 FrameLayout）：照原版 @id/video 语义，可聚焦，控制条收起时焦点回到它 */
     private var rootView: View? = null
@@ -1843,23 +1890,44 @@ class PlayActivity : Activity() {
         // 子视图照常构建 display list，挖洞区域从第一帧起就包含整条，之后只剩改 alpha（纯重绘）。
         // ★这不是"透明显示一次再收起"那种预热 —— 那种预热要收尾，收尾会把用户那次呼出的条收掉，
         //   之前踩过（要按两次）。这里从头到尾只有一种可见性状态，没有任何收尾动作。
-        // ★回归官方/原版语义：控制条初始 GONE，呼出时 VISIBLE，收起时 GONE。
-        //   之前那套"常驻 VISIBLE + 只用 alpha 显隐"是自造路径：官方 PlayerView 的 controller
-        //   和原版 @id/control 都是 GONE/VISIBLE，全世界播放器都用这一个语义，没有任何一处
-        //   需要为此改窗口形态。我们换成 alpha 之后并没有让现象消失，反而多了一个
-        //   "窗口层永远有一整条带 alpha 的图层"的差异（HWC 图层数变化会让合成回退到 GPU）。
-        controlBar?.visibility = View.GONE
-        controlBar?.alpha = 1f
         runCatching {
             (controlBar as? android.view.ViewGroup)?.descendantFocusability =
                 android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
         findViewById<View>(R.id.playTitle)?.alpha = 0f
-        // ★这行文案以前写的是「常驻 VISIBLE + alpha=0」，那是已废弃的自造路径；
-        //   实际实现是 GONE + alpha=1（与官方 PlayerView controller、原版 @id/control 同一个形态）。
-        //   文案必须跟着实现走 —— 日志骗人比没日志更糟。
+        // ★形态由档位决定，默认走「常驻 VISIBLE + alpha 显隐」，档位 8 保留旧的 GONE 形态做 A/B。
+        //
+        // 曾经撤过一次 alpha 换回 GONE，理由是"全世界播放器都用 GONE/VISIBLE"。那个理由站不住：
+        // 别人的播放器不跑在这块 1920x143 满宽控制条 + SurfaceView 挖洞的窗口上。
+        // 真实现场只有一条：窗口的"有绘制内容区域"一变，ViewRootImpl 就重算挖洞并
+        // setTransparentRegionHint，那一帧视频层被跳过 —— 用户看到的就是黑。
+        // 而"第一次按菜单"正好是这条区域**第一次**变化，所以代价只付一次、退出重进又付一次。
+        //
+        // 为什么默认换成 alpha（这不是新推断，是把之前被 barShown 卡死的方案修好后再验证）：
+        //   GONE 形态下，整条控制条（17 个按钮 + 进度条 + 文本）在硬件加速里不参与 dispatchDraw，
+        //   display list 一次都没构建过。第一次按菜单把它置 VISIBLE 那一帧要一次性建完整棵
+        //   display list，同时窗口层的"有绘制内容区域"从"只有画面层的洞"变成"洞 + 整条"，
+        //   ViewRootImpl 必须重算挖洞区域并 setTransparentRegionHint —— 该窗口层那一帧被跳过，
+        //   用户看到的就是「第一次按菜单黑约 1 秒」。
+        //   常驻 VISIBLE + alpha=0 让这两件事都在页面创建、画面还没出来时一次性付掉，
+        //   之后呼条/收条只剩改 alpha（纯重绘，不动布局、不动挖洞区域）。
+        if (MpvDebug.experiment == 8) {
+            controlBar?.visibility = View.GONE
+            controlBar?.alpha = 1f
+        } else {
+            controlBar?.visibility = View.VISIBLE
+            controlBar?.alpha = 0f
+        }
+        // 三层覆盖层统一初始化：全部 VISIBLE + alpha=0。
+        // 它们都只在"显隐"上变化，不参与布局，alpha=0 时纯透明但仍占着绘制区域 —— 这正是要的：
+        // 窗口的"有绘制内容区域"从第一帧起就是固定的，之后呼条 / 转圈 / 暂停图标出现都只是重绘。
+        runCatching {
+            findViewById<View>(R.id.playProgress)?.let { it.visibility = View.VISIBLE; it.alpha = 0f }
+            findViewById<View>(R.id.playCenter)?.let { it.visibility = View.VISIBLE; it.alpha = 0f }
+        }
         MpvDebug.log("[bar] 控制条初值 vis=${if (controlBar?.visibility == View.VISIBLE) "VISIBLE" else "GONE"} " +
-            "alpha=${controlBar?.alpha} 形态=GONE/VISIBLE（非 alpha 常驻）")
+            "alpha=${controlBar?.alpha} 形态=" +
+            (if (MpvDebug.experiment == 8) "GONE/VISIBLE（档位8：旧形态）" else "常驻VISIBLE/alpha 显隐"))
         // ★nextFocus 链必须在页面创建时就建好。
         //   原来它只在 showControl() 里 post 一次，也就是说"第一次按菜单之前"，
         //   actionLayout 里 17 个按钮的 nextFocusLeftId/nextFocusRightId 全是 0 ——
@@ -2000,6 +2068,12 @@ class PlayActivity : Activity() {
             startMpv(url, activeHeaders, at)
         } else {
             Toast.makeText(this, "已切换到 EXO", Toast.LENGTH_SHORT).show()
+            // 同上：mpv → EXO 也要换一块干净 Surface（原项目 switchPlayer 两个方向都 reset）
+            runCatching {
+                videoHost?.releaseOwner()
+                videoHost?.recreateSurface()
+                MpvDebug.log("[kernel] 换到 EXO：releaseOwner + recreateSurface 已执行")
+            }
             mpv?.release()
             mpv = null
             handOver("exo", "mpv 已 release（同步 destroy），下一步 EXO 接管画面层")
@@ -2404,8 +2478,10 @@ class PlayActivity : Activity() {
         // ★wasShown 必须在这里取：常驻 VISIBLE 之后 barShown() 只看 alpha，
         //   下面马上就把 alpha 抬到 1，若在那之后再判就恒为"已显示"，每次呼条都被幂等分支吞掉。
         val wasShown = barShown()
-        // 呼出 = VISIBLE + 放开焦点进入（否则条内控件不接收焦点）
-        controlBar?.visibility = View.VISIBLE
+        // 呼出 = 放开焦点进入 + alpha 抬到 1（否则条内控件不接收焦点）
+        // 常驻 VISIBLE 下这一步不要再写 visibility：对已经 VISIBLE 的视图置 VISIBLE 是 no-op，
+        // 但留在代码里会让人以为"显隐仍然靠 visibility"，下次重构又改回 GONE。
+        if (controlBar?.visibility != View.VISIBLE) controlBar?.visibility = View.VISIBLE
         controlBar?.alpha = 1f
         findViewById<View>(R.id.playTitle)?.alpha = 1f
         runCatching {
@@ -2551,7 +2627,10 @@ class PlayActivity : Activity() {
                     " barAlpha=${controlBar?.alpha} → root ok=${currentFocus === rootView}"
             )
         }
-        controlBar?.visibility = View.GONE
+        // 默认形态：只降 alpha。GONE 会让窗口层绘制内容区域变化（还要多一轮 measure/layout），
+        // 而这一帧正是"收条黑一下"的来源。档位 8 才是旧的 GONE 形态。
+        if (MpvDebug.experiment == 8) controlBar?.visibility = View.GONE
+        controlBar?.alpha = 0f
         findViewById<View>(R.id.playTitle)?.alpha = 0f
         runCatching {
             (controlBar as? android.view.ViewGroup)?.descendantFocusability =
@@ -2779,14 +2858,15 @@ class PlayActivity : Activity() {
         findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(currentPosMs())
         findViewById<TextView>(R.id.playCenterDur)?.text =
             if (durMs > 0L) fmtTime(durMs) else "--:--"
-        findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
+        // 第三层覆盖层同样常驻 VISIBLE + alpha（见 showPlayProgress 里的依据）
+        findViewById<View>(R.id.playCenter)?.alpha = 1f
     }
 
     /** 恢复播放时收起（对齐原版 onPlay → hideCenter，同时把图标复位回 ic_widget_play） */
     private fun hidePlayCenter() {
         // 对齐原版 hideCenter()：图标复位回 ic_widget_play，再整块收起
         findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(R.drawable.ic_widget_play)
-        findViewById<View>(R.id.playCenter)?.visibility = View.GONE
+        findViewById<View>(R.id.playCenter)?.alpha = 0f
     }
 
     /** OK 键短按：暂停 / 继续（对齐原版 onKeyCenter），EXO / mpv 双内核同语义 */
@@ -2861,13 +2941,13 @@ class PlayActivity : Activity() {
             if (durMs > 0L) fmtTime(target)
             else (if (accum < 0L) "-" else "+") + fmtTime(if (accum < 0L) -accum else accum)
         findViewById<TextView>(R.id.playCenterDur)?.text = if (durMs > 0L) fmtTime(durMs) else "--:--"
-        findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
+        findViewById<View>(R.id.playCenter)?.alpha = 1f  // 覆盖率同其它覆盖层：只改 alpha，不动 visibility
         // 回读：这一行是"按 ←/→ 屏幕上到底有没有东西出现"的唯一证据。
         // 以前没有它，只能从"位置变了"推断按键生效，而用户看的是屏幕 —— 两边永远对不上。
         MpvDebug.log(
             "[ui] 居中提示 显示 " + (if (durMs > 0L) "target=${fmtTime(target)}" else "位移=${if (accum<0) "-" else "+"}${fmtTime(if(accum<0) -accum else accum)}") +
                 " dur=${if (durMs > 0L) fmtTime(durMs) else "--:--"}" +
-                " panelVis=${findViewById<View>(R.id.playCenter)?.visibility} accum=${accum}ms"
+                " panelAlpha=${findViewById<View>(R.id.playCenter)?.alpha} accum=${accum}ms"
         )
     }
 
@@ -2937,7 +3017,7 @@ class PlayActivity : Activity() {
         findViewById<ImageView>(R.id.playCenterIcon)?.setImageResource(R.drawable.ic_widget_forward)
         findViewById<TextView>(R.id.playCenterPos)?.text = fmtTime(target)
         findViewById<TextView>(R.id.playCenterDur)?.text = if (durMs > 0L) fmtTime(durMs) else "--:--"
-        findViewById<View>(R.id.playCenter)?.visibility = View.VISIBLE
+        findViewById<View>(R.id.playCenter)?.alpha = 1f  // 覆盖率同其它覆盖层：只改 alpha，不动 visibility
     }
 
     /** 媒体键（播放/快进/快退）走的一次性跳：只跳一档，不参与方向键的累加状态机 */

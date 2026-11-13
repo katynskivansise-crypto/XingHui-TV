@@ -159,15 +159,47 @@ class MpvPlayer(
         }
         current = this
         liveCount++
+        // ★不再由 MpvPlayer 自己往 holder 上注册回调。
+        //
+        // 原来这里写的是：
+        //     v.holder.addCallback(holderCallback)
+        //     if (v.holder.surface?.isValid == true) onSurfaceCreated(v.holder)
+        // 而 VideoHost 也在同一个 holder 上注册了 forwarder。SurfaceHolder 的 Callback 是**列表**，
+        // 两套回调会同时收到 created / changed / destroyed —— 同一块 Surface 上有两个"主人"，
+        // 谁也说不清现在是哪个内核在画。原项目用一个 render 状态机保证"同一时刻只有一个 render 目标"
+        // （PlayerManager.getRender / attachSurface 的 publishRenderTarget），我们没有。
+        //
+        // 现在把 holder 的主权交回 VideoHost：由它 takeNative(attach, release) 决定何时把事件转给 mpv，
+        // 见 VideoHost.kt 的 owner / forwarder。外部调用方在拿到 MpvPlayer 之后必须调 bindToHost()。
         when (val v = host) {
             is SurfaceView -> {
-                v.holder.addCallback(holderCallback)
-                // 已经被 SurfaceView 自己创建过：手动补一次
-                if (v.holder.surface?.isValid == true) onSurfaceCreated(v.holder)
+                MpvDebug.log("[mpv] 构造完成，holder 主权交由 VideoHost（本实例不再自注册回调）")
             }
             is android.view.TextureView -> watchTexture()
             else -> MpvDebug.log("[mpv] 画面层宿主类型不支持：${v.javaClass.simpleName}")
         }
+    }
+
+    /**
+     * 把这块 Surface 的主权交给 VideoHost，由它统一转发 holder 事件。
+     *
+     * 必须在 MpvPlayer 构造之后、play() 之前调用。重复调用是安全的：
+     * VideoHost.takeNative 会覆盖上一次的回调，不会叠加。
+     */
+    fun bindToHost(host: VideoHost) {
+        host.takeNative(
+            attach = { h -> runCatching { onSurfaceCreated(h) } },
+            release = { runCatching { onSurfaceDestroyedForHost() } },
+        )
+        MpvDebug.log("[mpv] holder 主权已交给 VideoHost，owner=NATIVE")
+    }
+
+    /** VideoHost 转发来的 destroyed：与自家回调同一语义，但不再依赖 holder 上的注册 */
+    private fun onSurfaceDestroyedForHost() {
+        MpvDebug.log("[mpv] VideoHost 转发 surfaceDestroyed inited=$inited")
+        surfaceReady = false
+        attachedSurface = null
+        if (inited) runCatching { core.detachSurface() }
     }
 
     // ---------------------------------------------------------------- 生命周期
@@ -418,16 +450,26 @@ class MpvPlayer(
                 core.setPropertyString("android-surface-size", "${width}x$height")
             }
         }
-        // 10bit 输出：整条链的最后一环是 Surface 的缓冲格式。
-        // 只有系统 >= API26 才有 RGBA_1010102，且必须在这一帧分配之前设好，
-        // 所以放在 attach 之前。拿不到就保持默认 8888，不影响 8bit 路径。
+        // ★这里曾经调 holder.setFormat(RGBA_8888 / RGBA_1010102)，已删除。
+        //
+        // 删除依据是 PlayActivity 里早就定下的两条结论，和这段代码正面冲突：
+        //   PlayActivity.kt「★不在这里 setFormat。SurfaceHolder.setFormat 在 surface 已经创建的情况下
+        //   会让系统重分配 buffer，老 ROM 上等于把这块 surface 重建一次
+        //   （EXO 解码器跟着重启、mpv 要重挂 EGL）」
+        //   PlayActivity.kt「★不再 setFormat(RGBA_8888)。画面层沿用官方默认 PixelFormat」
+        //
+        // 实际危害（这正是「从 EXO 切到 mpv 闪退」的机制）：
+        //   attachSurface 是在 surface **已经创建**之后被 onSurfaceCreated 调进来的，
+        //   这里再 setFormat 等于向 SurfaceFlinger 申请重分配整套 buffer → 老 ROM 上触发一次
+        //   surfaceDestroyed→surfaceCreated；而 mpv 的 EGLSurface 还绑在旧窗口上，
+        //   下一次 render/swap 就写到已经失效的窗口 → 原生崩溃（Java 层看不到栈，表现为直接闪退）。
+        //
+        // 而且在这台机器上它连收益都没有：本机 sdk=25，`SDK_INT >= 26` 恒假，
+        // 分支永远落到 RGBA_8888 —— 纯负优化。
+        // 10bit 若将来要支持，正确的位置是「surface 创建之前」设一次，
+        // 不是每次 attach 都重设一遍（attach 会被 surfaceChanged 反复调用）。
         runCatching {
-            val h = (host as? SurfaceView)?.holder
-            if (h != null) {
-                val fmt = if (android.os.Build.VERSION.SDK_INT >= 26 && XhMpv.available)
-                    android.graphics.PixelFormat.RGBA_1010102 else android.graphics.PixelFormat.RGBA_8888
-                h.setFormat(fmt)
-            }
+            MpvDebug.log("[mpv] attachSurface ${width}x${height} first=$first 像素格式保持系统默认（本版不再 setFormat）")
         }
         surfaceReady = true
         if (playPending && pendingUrl.isNotBlank()) {
@@ -476,7 +518,8 @@ class MpvPlayer(
         pendingUrl = ""
         // 照官方 BaseMPVView.destroy：先摘掉 surface 回调再 destroy，
         // 否则释放后视图的可见性变化还会回调进来，把已经 destroy 的 libmpv 再 init 一遍
-        runCatching { (host as? SurfaceView)?.holder?.removeCallback(holderCallback) }
+        // 已不再自注册 holderCallback（主权在 VideoHost），这里无需移除；
+        // 保留一行解释，避免以后又有人加回去。
         attachedSurface = null
         runCatching { (host as? android.view.TextureView)?.removeCallbacks(textureWatch) }
         runCatching { ownedSurface?.release() }
