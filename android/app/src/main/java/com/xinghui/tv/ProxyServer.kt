@@ -173,7 +173,7 @@ object ProxyServer {
                 val real = extractPushUrl(pushUrl)
                 runCatching {
                     ctx.startActivity(
-                        android.content.Intent(ctx, PlayActivity::class.java)
+                        android.content.Intent(ctx, MainActivity::class.java).putExtra("play_mode", true)
                             .putExtra("direct_url", real)
                             // 原版 start(activity, url) → start(activity, "push_agent", url, url, clear)
                             // id 与 name 都是 url 本身；id 一起带上，历史记录才能被再次点开回放

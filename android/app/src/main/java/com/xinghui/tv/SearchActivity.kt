@@ -70,7 +70,7 @@ class SearchActivity : Activity() {
         // ---- 结果网格（原版跳 CollectActivity，这里用覆盖层，视觉等价） ----
         val list = findViewById<RecyclerView>(R.id.searchList)
         adapter = VideoAdapter(results) { vod ->
-            startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
+            startActivity(Intent(this, MainActivity::class.java).putExtra("vod_id", vod.vodId))
         }
         list.layoutManager = GridLayoutManager(this, 4)
         list.adapter = adapter

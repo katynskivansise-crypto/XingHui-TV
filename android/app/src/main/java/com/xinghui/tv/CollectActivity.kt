@@ -32,7 +32,7 @@ class CollectActivity : Activity() {
         val (cw, ch) = ProductColumn.cell(this, column)
         adapter = LibAdapter(items, { vod ->
             runCatching {
-                startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
+                startActivity(Intent(this, MainActivity::class.java).putExtra("vod_id", vod.vodId))
             }.onFailure { e ->
                 Toast.makeText(this, "打开失败：${e.message}", Toast.LENGTH_LONG).show()
             }

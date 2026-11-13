@@ -40,7 +40,7 @@ class HistoryActivity : Activity() {
                     // 对齐原版 HistoryActivity.onItemClick → VideoActivity.start：
                     // 点历史一律进播放页续播，不因为线路名/集地址缺失就改跳详情页。
                     // 缺失的字段播放页会自己拉详情回落到第一集（fetchAndPlay 里做）。
-                    startActivity(Intent(this, PlayActivity::class.java).apply {
+                    startActivity(Intent(this, MainActivity::class.java).putExtra("play_mode", true).apply {
                         putExtra("vod_id", vod.vodId)
                         putExtra("vod_name", vod.vodName)
                         putExtra("vod_pic", vod.vodPic)

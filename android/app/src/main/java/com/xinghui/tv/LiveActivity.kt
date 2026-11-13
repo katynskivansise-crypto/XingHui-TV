@@ -161,7 +161,7 @@ class LiveActivity : Activity() {
     private fun playChannel(id: String) {
         val name = channels.firstOrNull { it.first == id }?.second ?: id
         currentChannel = name
-        startActivity(Intent(this, PlayActivity::class.java).apply {
+        startActivity(Intent(this, MainActivity::class.java).putExtra("play_mode", true).apply {
             putExtra("vod_id", id)
             putExtra("vod_name", name)
             putExtra("direct_url", id)

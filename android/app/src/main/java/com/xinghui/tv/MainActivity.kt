@@ -1,1213 +1,1266 @@
 package com.xinghui.tv
 
-import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
+import android.graphics.Color
+import android.graphics.drawable.Drawable
+import android.view.KeyEvent
 import android.os.Bundle
-import android.os.Environment
-import android.os.Handler
-import android.os.Looper
+import android.text.method.LinkMovementMethod
 import android.util.Log
 import android.view.View
-import android.widget.LinearLayout
+import android.view.Window
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.xinghui.tv.adapter.LibAdapter
 import org.json.JSONObject
-import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
- * 主界面（TVBox 风格）：顶部标题栏 + 功能按钮，左侧分类，右侧影片网格。
- * 点影片进详情/播放页。播放内核由设置决定（ExoPlayer / mpv）。
+ * 详情页：影片信息 + 内嵌播放器小窗 + 集数网格（对齐原版 VideoActivity 的合一形态）。
+ * 点播放器小窗 → 全屏；点集数 → 换集；点「当前正在播的那集」→ 全屏。
+ */
+/**
+ * 唯一宿主 Activity。
+ *
+ * ★ 为什么详情页和播放页必须同一个窗口：
+ *   1. 新窗口要重新拿 hasWindowFocus（真机实测 199~434ms）。这段窗口期里按键没有接收者，
+ *      所以"从详情页进播放页、不按菜单直接按 ←/→"没有任何记录 —— 事件根本没到。
+ *   2. SurfaceView 在**新窗口**里第一次出现会触发一次 IWindowSession.relayout，那一帧被跳过，
+ *      这就是"第一次按菜单黑约 1 秒"。
+ *   3. 两个 Activity 各一个引擎实例、各一份进度，这就是"按过菜单后返回跳回旧位置"。
+ *
+ * 本类持有：详情层（detailLayer）+ 播放层（playLayer）+ 唯一一块 SurfaceView（videoFrame）。
+ * 三种形态只改 videoFrame 的 LayoutParams，Surface 永不重建 —— 也就是 OwnTV 说的
+ * "promotes the running preview straight to full screen with no reload"。
  */
 class MainActivity : Activity() {
 
-    companion object {
-        /** 兜底订阅地址：旧数据缺 jar/subscribeUrl 时用它自动补齐 */
-        const val DEFAULT_SUB_URL = "https://raw.githubusercontent.com/qist/tvbox/master/jsm.json"
+    private lateinit var hostRoot: android.widget.FrameLayout
+    private lateinit var detailLayer: android.widget.FrameLayout
+    private lateinit var playContainer: android.widget.FrameLayout
+    private lateinit var detailRoot: View
+    private lateinit var videoFrame: androidx.media3.ui.AspectRatioFrameLayout
+    private lateinit var videoSurface: android.view.SurfaceView
+    private lateinit var subtitleView: androidx.media3.ui.SubtitleView
+
+    /** 播放层（懒加载：第一次进播放才 inflate） */
+    private var playLayer: PlayLayer? = null
+    /** 当前占据这块 surface 的 ExoPlayer（预览或播放页），用于 surfaceCreated 后补挂 */
+    private var surfaceConsumer: androidx.media3.exoplayer.ExoPlayer? = null
+    /** SurfaceView 的 surface 是否已有效 */
+    private var surfaceValid = false
+    /** 是否处于播放页形态（播放层在前台） */
+    private var playMode = false
+
+    /** 详情层的节点都在 detailRoot 里，统一从这里找 */
+    private fun <T : View> findDetail(id: Int): T = detailRoot.findViewById(id)
+    private fun <T : View> findViewHost(id: Int): T = this.findViewById<View>(id) as T
+
+
+    private lateinit var store: HistoryStore
+    private var vod: Vod? = null
+    private var currentLine: PlayLine? = null
+
+    /** 内嵌播放器（对齐原版 mBinding.video） */
+    private var player: ExoPlayer? = null
+    private lateinit var inlineView: android.widget.FrameLayout
+    private var inlineFullscreen = false
+    /** 预览是否因为离开页面被我们主动暂停（回来时不自动续播） */
+    private var inlinePausedByLeave = false
+    /** 本次离开是「跳去独立播放页」，回来要把预览续上；按返回退出详情页则不用 */
+    private var inlineResumeOnReturn = false
+    // ★进独立播放页之前，预览当时是「小窗」还是「全屏」。
+    //   跳转前刻意不调用 exitInlineFullscreen()：那会把列表立刻恢复可见、把小窗尺寸还原，
+    //   而页面还没跳走 —— 转场那段时间用户看到的就是「详情页布局 + 小窗一个黑洞」，
+    //   也就是"按菜单后回详情页会先显示详情页"。改成记住形态，返回时再按它还原。
+    private var inlineLeaveFullscreen = false
+    private var inlineUrl: String = ""
+    /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
+    private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
+    /** 进全屏前小窗上的焦点边框（selector_video），退出全屏时原样还原 */
+    private var savedBoxForeground: Drawable? = null
+    /** 当前正在播放的集下标；-1 表示还没起播 */
+    private var playingIdx = -1
+    /** 当前线路的集数数组，供"点当前那集进全屏"判断用 */
+    private var episodes: List<Pair<String, String>> = emptyList()
+    /** 是否倒序（原版「倒序」按钮） */
+    private var epOrder = false
+    /** 当前所在分段（0 表示 1-40 那一段） */
+    private var activeSection = 0
+    /** 原版每段 40 集（1-40 / 41-80 / 81-102） */
+    private val GROUP_SIZE = 40
+    /** 播放器框的 16:9 高度（退出全屏时按这个恢复） */
+    private var boxH = 0
+
+    private val pairs = mutableListOf<Pair<String, String>>() // (key, 显示名)
+    private lateinit var adapter: ListAdapter
+
+    // ================= 宿主：唯一 surface + 层切换 =================
+
+    /** 把这块唯一的 surface 交给某个引擎；surface 还没创建时先记下，created 后自动补挂 */
+    private fun attachSurfaceTo(p: androidx.media3.exoplayer.ExoPlayer) {
+        surfaceConsumer = p
+        // ★只在 surface 已经有效时才挂。未创建时先记在 surfaceConsumer 上，
+        //   由 surfaceCreated 回调补挂 —— 硬塞一个还没创建的 Surface 给 ExoPlayer，
+        //   在旧 ROM 上会抛 / 让解码器建不起来。（这是对照 OwnTV 的规则：
+        //   surface 只在 SurfaceHolder.Callback 的有效期内可用）
+        if (surfaceValid) runCatching { p.setVideoSurface(videoSurface.holder.surface) }
     }
 
-    private lateinit var catList: RecyclerView
-    private lateinit var vodList: RecyclerView
-    private lateinit var vodAdapter: VideoAdapter
+    private fun detachSurfaceFrom() {
+        surfaceConsumer?.let { runCatching { it.clearVideoSurface() } }
+        surfaceConsumer = null
+    }
+
+    private fun previewAttached(): Boolean = surfaceConsumer != null
+
     /**
-     * 首页「更新推荐」适配器。原版 VodFragment:134 用 VodPresenter(this, Style.list())，
-     * 而 Style.list() 的 ratio 为 0 → 实际按 0.75 竖版网格渲染，列数 = 4。
-     * 这里同样走 VideoAdapter，才能真正按 Product.getSpec 算格宽，而不是 item_lib 的 200dp 死值。
+     * 预览显隐。★ 画面本体是宿主那块 SurfaceView，挡在它前面的是海报 detailImage，
+     * 所以"显示预览" = 把海报收起来；"隐藏预览" = 海报回来。
+     * 原来 inlineView 是 PlayerView，它自己就是画面，所以只切它一个就够；现在必须两个一起切，
+     * 否则要么一片黑（海报盖着），要么两幅画面打架。
      */
-    private lateinit var recommendAdapter: VideoAdapter
+    private fun setPreviewVisible(visible: Boolean) {
+        inlineView.visibility = if (visible) View.VISIBLE else View.GONE
+        runCatching {
+            findDetail<View>(R.id.detailImage)?.visibility = if (visible) View.GONE else View.VISIBLE
+        }
+    }
 
-    /** 当前引擎站点 key */
-    private var siteKey: String = ""
+    /** 小窗形态：画面摆回详情页 playerBox 的位置（同一块 surface，只改 LayoutParams） */
+    private fun videoFrameToMini() {
+        val box = runCatching { findDetail<View>(R.id.playerBox) }.getOrNull() ?: return
+        val loc = IntArray(2)
+        box.getLocationInWindow(loc)
+        videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(box.width, box.height).apply {
+            leftMargin = loc[0]
+            topMargin = loc[1]
+        }
+        videoFrame.requestLayout()
+    }
 
-    /** 当前分类翻页状态（对齐原版 CustomScroller：滚到底部自动加载下一页） */
-    private var currentTid: String = ""
-    private var currentPage: Int = 0
-    /** 站点返回的总页数；0 表示站点未告知（视为可一直翻） */
-    private var pageCount: Int = 0
-    private var loadingMore: Boolean = false
-    /** 最近一次"返回空列表"的页码；避免滚到底反复请求同一空页（对齐原版 endLoading 的 page--） */
-    private var lastEmptyPage: Int = 0
-    private var lastSiteKey: String? = null
+    /** 全屏形态 */
+    private fun videoFrameToFull() {
+        videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        videoFrame.requestLayout()
+    }
 
-    private val categories = mutableListOf<Pair<String, String>>() // (type_id, type_name)
-    private val vods = mutableListOf<Vod>()
-    private val recommends = mutableListOf<Vod>() // 首页更新推荐（引擎 home 的 list）
+    /**
+     * 进播放层。★ 只换层，不换窗口、不换 surface。
+     * 这就是 OwnTV 的 "promotes the running preview straight to full screen with no reload"。
+     */
+    fun showPlayLayer(extras: Intent) {
+        val layer = playLayer ?: PlayLayer(this) { exitPlayLayer() }.also { playLayer = it }
+        layer.prepare(extras)
+        layer.bind(playContainer)
+        // 详情预览先把这块 surface 让出来，再交给播放层 —— 同一块，不新建
+        detachSurfaceFrom()
+        runCatching { player?.pause() }
+        playMode = true
+        detailLayer.visibility = View.GONE
+        playContainer.visibility = View.VISIBLE
+        videoFrameToFull()
+        layer.onHostResume()
+    }
+
+    /** 退出播放层：播放层的引擎原样交回详情预览，不 release、不重建 */
+    /**
+     * 把详情页的监听器挂到某个引擎上。★ 退出播放层时播放层会把引擎原样交回来，
+     * 但监听器不会跟着回来 —— 不重新挂，小窗就没有 onVideoSizeChanged，画面比例和分辨率都会停在旧值。
+     */
+    private fun bindDetailListener(p: androidx.media3.exoplayer.ExoPlayer) {
+        p.addListener(object : androidx.media3.common.Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                // 同一个错误可能连发，800ms 内只处理一次，避免疯狂切源
+                val now = System.currentTimeMillis()
+                if (now - lastErrorMs < 800) return
+                lastErrorMs = now
+                Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，走自动换源")
+                handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
+                    reason = "播放器错误 ${error.errorCodeName}", depth = 0)
+            }
+
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                val w = videoSize.width
+                val h = videoSize.height
+                if (w > 0 && h > 0) {
+                    findDetail<TextView>(R.id.vodInfoSize)?.text = "$w x $h"
+                }
+            }
+        })
+    }
+
+    fun exitPlayLayer() {
+        if (!playMode) return
+        playMode = false
+        playLayer?.onHostPause()
+        playContainer.visibility = View.GONE
+        detailLayer.visibility = View.VISIBLE
+        // 等一帧：detailLayer 刚从 GONE 恢复，playerBox 的坐标这时还是旧值
+        videoFrame.post { videoFrameToMini() }
+        // ★播放层的引擎原样交回：不 release、不 prepare，进度就在它身上。
+        //   这里只需要把详情页的监听器重新挂上（播放层的监听器不会跟着回来），再把画面接回去。
+        val p = playLayer?.takePlayer()
+        if (p != null) {
+            player = p
+            bindDetailListener(p)
+            attachSurfaceTo(p)
+            runCatching { p.play() }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (playMode) playLayer?.onHostWindowFocusChanged(hasFocus)
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (playMode) playLayer?.onHostConfigurationChanged(newConfig)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 进程级 Init.context()：迅雷 SDK（XLDownloadManager 构造里直接 context.getFilesDir()）
-        // 与 catvod 的 Path/Prefers 都依赖它。原版在 App.onCreate 里做，本工程没有 Application 类，
-        // 之前只在加载 spider.jar 时设置 → 纯 JSON 订阅下点磁力会 NPE 闪退。这里无条件设一次。
-        runCatching { com.github.catvod.Init.set(applicationContext) }
-            .onFailure { Log.e("XingHuiTV", "[init] Init.set 失败", it) }
-        // 本地服务（csp/js 站 /proxy 播放链路 + /file 本地文件 + assets 兜底）；启动失败不影响主流程
-        runCatching { ProxyServer.startServer(this) }
-            .onFailure { Log.e("XingHuiTV", "[proxy.server] startServer 异常", it) }
-        installCrashReporter()
-        ensureStoragePermission()
-        ensureTvBoxDir()
-        setContentView(R.layout.activity_main)
-        // 壁纸（对齐原版 BaseActivity.refreshWall：只设 window 背景，不额外加 View）
-        // 统一走 WallpaperStore：有自设图用它，没有回退内置 wallpaper_1
+        setContentView(R.layout.activity_host)
+
+        hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)
+        detailLayer = findViewHost(R.id.detailLayer)
+        playContainer = findViewHost(R.id.playLayer)
+        videoFrame = findViewHost(R.id.videoFrame)
+        videoSurface = findViewHost(R.id.videoSurface)
+        subtitleView = findViewHost(R.id.subtitleView)
+
+        detailRoot = layoutInflater.inflate(R.layout.activity_detail_layer, detailLayer, false)
+        detailLayer.addView(detailRoot)
+
+        // ★从历史 / 直播 / 网页推送进来时带 play_mode=true：直接落在播放层。
+        //   单 Activity 之后必须补的入口 —— 以前是 PlayActivity 自己 onCreate 就起播。
+        if (intent?.getBooleanExtra("play_mode", false) == true) {
+            MpvDebug.log("[boot] play_mode 直进播放层")
+            detailLayer.post { runCatching { showPlayLayer(intent!!) } }
+        }
+
+        // 唯一一块 surface 的生死只由宿主掌握：创建/销毁都记一笔，
+        // 之后任何引擎要挂画面都走 surfaceConsumer，不许自己去拿 holder.surface。
+        videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+            override fun surfaceCreated(h: android.view.SurfaceHolder) {
+                surfaceValid = true
+                MpvDebug.log("[sv2] created（唯一一块） ${videoSurface.width}x${videoSurface.height}")
+                surfaceConsumer?.let { p -> runCatching { p.setVideoSurface(h.surface) } }
+            }
+            override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
+                MpvDebug.log("[sv2] changed $w x $ht")
+            }
+            override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
+                surfaceValid = false
+                MpvDebug.log("[sv2] destroyed（唯一一块）")
+            }
+        })
+
+        store = HistoryStore(this)
+        val vodId = intent.getStringExtra("vod_id") ?: ""
+
+        val list = findDetail<RecyclerView>(R.id.detailList)
+        // 集数聚焦用黄字（对齐原版 01[1080P] 的高亮），分类条等其它地方不受影响
+        adapter = ListAdapter(pairs, null, Color.rgb(255, 204, 0)) { key -> onPick(key) }
+        list.layoutManager = LinearLayoutManager(this)
+        list.adapter = adapter
+
+        // 返回按钮按原版去掉（原版 VodActivity 靠系统返回键），布局里也不再声明
+        findDetail<View>(R.id.btnFav).setOnClickListener { toggleFav() }
+        findDetail<View>(R.id.btnDesc).setOnClickListener { showDescDialog() }
+        findDetail<View>(R.id.btnSource).setOnClickListener { switchSource() }
+        // 倒序：整段集数反向排（原版「倒序 →」那个按钮）
+        findDetail<View>(R.id.btnOrder).setOnClickListener {
+            epOrder = !epOrder
+            if (episodes.size > GROUP_SIZE) activeSection = 0
+            rebuildGroups()
+            showGroup(activeSection * GROUP_SIZE)
+            Toast.makeText(this, if (epOrder) "已倒序" else "已正序", Toast.LENGTH_SHORT).show()
+        }
+
+        // 对齐原版 VideoActivity：那里播放器和集数在同一页，点上方视频框即进全屏。
+        // 我们是 DetailActivity + PlayActivity 两页，就在这里补上同样的直达：
+        // 点海报→播第一集，点任意集数→直接全屏播那一集（省掉「先看详情、再点进去」这一步）。
+        // 对齐原版 VideoActivity：视频框和集数在同一页，点框进全屏（onVideo 的语义）
+        // 原版 BaseActivity.refreshWall：壁纸设在 window 层，布局透明透出来。
+        // 注意必须走 WallpaperStore.apply：它才有「用户自设图 > 内置 wallpaper_1」的分支。
+        // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
         runCatching { WallpaperStore.apply(this) }
-
-        // 分类 tab（横向，对齐原版二级页）
-        catList = findViewById<RecyclerView>(R.id.catList).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
-            adapter = ListAdapter(categories) { tid -> onCategory(tid) }
+        inlineView = findDetail(R.id.inlinePlayer)
+        // ★这一行是「详情页预览到底创建的是 SurfaceView 还是 TextureView」的唯一直接证据。
+        //   PlayerView 在 surface_type=surface_view 下 getVideoSurfaceView() 返回内部的 SurfaceView；
+        //   改成 texture_view 后它返回 null。所以 /debug 里这一行打「null」就说明 texture_view 生效了，
+        //   打「SurfaceView」就说明 XML 没被覆盖（装的还是旧包 / 没重新编译）。
+        //   这是「第二块 overlay plane 到底存不存在」的判据，不靠猜。
+        runCatching {
+            MpvDebug.log(
+                "[det] 预览=常驻 SurfaceView（全 app 只有一块，不再有第二块 surface）"
+            )
+        }
+        // 内嵌播放器之前是裸 build()：没有轨道选择参数，没有解码方式，也没有请求头。
+        // 照原版 ExoUtil 补齐 TrackSelector（最高码率 / 字幕语言 / 隧道模式），
+        // 解码方式跟播放页共用同一个值。
+        player = buildInlinePlayer()
+        // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
+        // 比例约 2.6:1，画面只能居中留大黑边（真机上看着就是「缩放不对」）。
+        findDetail<View>(R.id.playerBox)?.let { boxView ->
+            boxView.post {
+                boxH = boxView.width * 9 / 16
+                boxView.layoutParams = boxView.layoutParams.apply { height = boxH }
+            }
+        }
+        // 原版同一个站点有多个播放源时，某个源播不动会自动切下一个
+        player?.let { bindDetailListener(it) }
+        findDetail<View>(R.id.playerBox).setOnClickListener {
+            if (!inlineFullscreen) enterInlineFullscreen()
         }
 
-        // 右侧影片网格
-        vodAdapter = VideoAdapter(vods) { vod ->
-            openVod(vod, "无法打开详情")
-        }
-        vodList = findViewById<RecyclerView>(R.id.vodList).apply {
-            layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
-            adapter = vodAdapter
-            // 对齐原版 CustomScroller：滚到倒数第 3 个就开始预加载下一页
-            addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                    if (dy <= 0) return
-                    val lm = rv.layoutManager as? GridLayoutManager ?: return
-                    val last = lm.findLastVisibleItemPosition()
-                    if (last >= vods.size - 3) maybeLoadMore()
-                }
-            })
-        }
-
-        // 首页更新推荐：对齐原版的多行海报网格（原版整个首页是一个竖向滚动的 VerticalGridView，
-        // 区块竖向堆叠、可以继续往下浏览）。
-        // 形态按 Style.list() → rect 0.75、列数 = uiColumns()，宽度由 VideoAdapter 按 Product.getSpec 计算；
-        // 之前用 LibAdapter + item_lib.xml（200dp 死宽 / 250dp 死高），卡片既不随屏幕也不随列数变化。
-        recommendAdapter = VideoAdapter(recommends, columns = uiColumns()) { vod ->
-            openVod(vod, "无法打开详情")
-        }
-        findViewById<RecyclerView>(R.id.recommendList).apply {
-            layoutManager = GridLayoutManager(this@MainActivity, uiColumns())
-            adapter = recommendAdapter
-        }
-
-        // 左上角站点名：点击弹出站点列表，选中即切换站源并自动刷新（对齐原版）
-        findViewById<TextView>(R.id.title).setOnClickListener {
-            runCatching { showSitePicker() }
-                .onFailure { e -> Toast.makeText(this, "切换站源失败：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-
-        // 点播入口（对齐原版：首页只显示五个入口，点「点播」进二级分类页）
-        findViewById<View>(R.id.btnVod).setOnClickListener {
-            runCatching { openCategoryPage() }
-                .onFailure { e -> Toast.makeText(this, "打开点播失败：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-
-        // 顶部功能按钮（全部 try/catch，失败只提示不崩溃）
-        findViewById<TextView>(R.id.btnSites).setOnClickListener {
-            runCatching { startActivity(Intent(this, SitesActivity::class.java)) }
-                .onFailure { e -> Toast.makeText(this, "无法打开站点管理：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-        findViewById<View>(R.id.btnSearch).setOnClickListener {
-            runCatching { startActivity(Intent(this, SearchActivity::class.java)) }
-                .onFailure { e -> Toast.makeText(this, "无法打开搜索：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-        findViewById<View>(R.id.btnLive).setOnClickListener {
-            runCatching { startActivity(Intent(this, LiveActivity::class.java)) }
-                .onFailure { e -> Toast.makeText(this, "无法打开直播：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-        findViewById<View>(R.id.btnHistory).setOnClickListener {
-            runCatching { startActivity(Intent(this, HistoryActivity::class.java)) }
-                .onFailure { e -> Toast.makeText(this, "无法打开历史：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-        findViewById<View>(R.id.btnCollect).setOnClickListener {
-            runCatching { startActivity(Intent(this, CollectActivity::class.java)) }
-                .onFailure { e -> Toast.makeText(this, "无法打开收藏：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-        findViewById<TextView>(R.id.btnSettings).setOnClickListener {
-            runCatching { startActivity(Intent(this, SettingsActivity::class.java)) }
-                .onFailure { e -> Toast.makeText(this, "无法打开设置：${e.message}", Toast.LENGTH_LONG).show() }
-        }
-
-        // 上次若崩过，启动时先弹一次摘要：避免"上次闪退了，这次进去看不出任何原因"
-        lastCrashSummary().takeIf { it.isNotBlank() }?.let { s ->
-            Toast.makeText(this, s, Toast.LENGTH_LONG).show()
-        }
-        loadQuickHistory()
-        initEngine()
-    }
-
-    /**
-     * 首页「最近观看」横排。原版：HomeFragment:117 在 Setting.isHomeHistory() 为 true 时
-     * 往 ListRow 里加 R.string.home_history（简中 = 最近观看），内容是 History.get() 全量。
-     * 卡片尺寸走 HistoryPresenter.setLayoutSize()，与历史页 HistoryAdapter 完全同一套。
-     */
-    /**
-     * 首页历史横排。原版 HomeFragment:117 会摆一行「最近观看」（R.string.home_history）。
-     * 按用户当前口径改为：首页不摆这一行，只保留顶部「历史」入口进 HistoryActivity。
-     * 观看记录本身照常写入、历史页照常显示。
-     */
-    private fun loadQuickHistory() {
-        findViewById<View>(R.id.quickRow)?.visibility = View.GONE
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // 顶部时钟
-        clockTick.run()
-        // 从任意页面返回时收敛一次，避免上一页的区块残留成拼屏
-        syncPageRows()
-        // 从站点管理返回后，若当前站点变化则重新加载
-        val cur = SubscriptionStore(this).currentKey()
-        if (lastSiteKey != null && cur != lastSiteKey) {
-            initEngine()
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        clockHandler.removeCallbacks(clockTick)
-    }
-
-    private val clockHandler = Handler(Looper.getMainLooper())
-    private val clockTick = object : Runnable {
-        override fun run() {
-            findViewById<TextView>(R.id.clock).text =
-                SimpleDateFormat("HH:mm:ss MM/dd EEE", Locale.SIMPLIFIED_CHINESE).format(Date())
-            clockHandler.postDelayed(this, 1000)
-        }
-    }
-
-    /**
-     * 全链路初始化：
-     * 1) 注册当前站点（主界面浏览/播放用）；
-     * 2) 额外注册全部订阅站点（供聚合搜索 searchAll，失败跳过不影响主界面）；
-     * 3) 用当前站点拉取 home 并展示。
-     */
-    private fun initEngine() {
         Thread {
-            val dir = filesDir.absolutePath
-            copyAssetToFiles("drpy-core-lite.min.js", "$dir/drpy-core-lite.min.js")
-
             val store = SubscriptionStore(this)
-            val current = store.currentSite()
-            lastSiteKey = store.currentKey()
-
-            // 全局 UA / 代理（对齐原项目设置，注入所有 drpy 源）
-            val ua = Settings(this).ua
-
-            // 兜底：旧版界面导入的订阅缺 jar/subscribeUrl（表现为 csp 站空白、drpy 站注册失败），
-            // 启动时自动用默认订阅补齐，无需用户重导
-            // 兜底：jar 缺失 / 非 http 地址 / csp 站点未 attach jar → 强制从订阅重解析并写回。
-            // 旧版界面导入的订阅可能存了相对路径 "./jar/spider.jar"，loadJar 会下载失败 → 所有 csp 站空白，
-            // 只判 isBlank() 会漏掉这种"非空但无效"的脏值，所以这里连同"站点未 attach"一起判。
-            // 进程重启后恢复嗅探规则（rules/ads）：订阅原文已持久化，这里重新喂给 SnifferRules
-            store.subscriptionText().takeIf { it.isNotBlank() }?.let {
-                ParseSources.load(it)
-                SnifferRules.load(it)
-                Log.e("XingHuiTV", "[rules] 启动恢复完成")
-            }
-            val cspSites = store.sites().filter { it.isCsp() }
-            val jarBad = store.jar().let { it.isBlank() || !it.startsWith("http") }
-            val siteJarBad = cspSites.any { it.jar.isBlank() || !it.jar.startsWith("http") }
-            if (cspSites.isNotEmpty() && (jarBad || siteJarBad)) {
-                Log.e("XingHuiTV", "[兜底] 触发 jarBad=$jarBad siteJarBad=$siteJarBad jar=${store.jar().take(70)}")
-                try {
-                    val baseUrl = store.subscribeUrl().ifBlank { DEFAULT_SUB_URL }
-                    val text = JsonFetcher.get(baseUrl)
-                    if (!text.isNullOrBlank()) {
-                        val jarRaw = SubscriptionParser.parseJar(text)
-                        val jarFull = SubscriptionParser.jarUrl(jarRaw, baseUrl)
-                        if (jarFull.isNotBlank() && jarFull.startsWith("http")) {
-                            store.setJar(jarFull)
-                            if (store.subscribeUrl().isBlank()) store.setSubscribeUrl(baseUrl)
-                            store.attachJar(jarFull) // 对齐原项目：jar 写进每个 csp 站点
-                            Log.e("XingHuiTV", "[兜底] 已自动补齐 jar=$jarFull subUrl=${store.subscribeUrl()}")
-                        } else {
-                            Log.e("XingHuiTV", "[兜底] spider 无法解析为 URL：raw=$jarRaw base=$baseUrl")
-                        }
-                    } else {
-                        Log.e("XingHuiTV", "[兜底] 订阅下载失败 baseUrl=$baseUrl")
-                    }
-                } catch (e: Exception) {
-                    Log.e("XingHuiTV", "[兜底] 自动补齐异常", e)
-                }
-            }
-
-            // csp_ 源准备：订阅里只要有 csp_ 站点，就先下载并加载 spider.jar（站点自带 jar 优先）
-            val cspJar = store.jar().ifBlank { store.sites().firstOrNull { it.isCsp() }?.jar ?: "" }
-            if (store.sites().any { it.isCsp() } && cspJar.isNotBlank()) {
-                CspLoader.prepare(this, cspJar)
-            } else {
-                Log.e("XingHuiTV", "[csp] 跳过 prepare：有csp站=${store.sites().any { it.isCsp() }} jar=$cspJar")
-            }
-
-            // 1) 当前站点：注册并作为主界面浏览源（不做任何自建内容回退）
-            val registered = mutableListOf<String>()
-            if (current == null) {
-                Log.e("XingHuiTV", "[home] 无可用站点，停止拉取（不回退内置内容）")
-                runOnUiThread {
-                    showEmpty("还没有可用站点，请导入订阅源")
-                    Toast.makeText(this, "请先在「站点」中导入订阅源", Toast.LENGTH_LONG).show()
-                    findViewById<TextView>(R.id.title).text =
-                        getString(R.string.app_name) + " · 未配置站点"
-                }
+            // 无当前站点：直接退出，不回退任何内置内容
+            val key = store.currentKey() ?: ""
+            if (key.isBlank()) {
+                runOnUiThread { Toast.makeText(this, "未配置站点，请先在站点管理中导入订阅源", Toast.LENGTH_LONG).show() }
                 return@Thread
             }
-            val homeKey = current.key
-            if (registerSite(current, current.key, dir, ua)) {
-                registered.add(homeKey)
+            val site = store.sites().firstOrNull { it.key == key }
+            val detail = if (site?.isCsp() == true) {
+                CspLoader.detail(this, site, vodId)
             } else {
-                Log.e("XingHuiTV", "[init] 站点注册失败 key=$homeKey，继续直连尝试（csp 站无需注册）")
+                val params = JSONObject().put("ids", vodId).toString()
+                Engine.execute("detail", key, params)
             }
-            siteKey = homeKey
-
-            // 2) 立即拉当前站点首页并上屏：先让用户看到内容，不被后面的批量注册阻塞
-            val home = if (current?.isCsp() == true) {
-                CspLoader.home(this, current)
-            } else {
-                Engine.execute("home", homeKey, "")
+            val first = Vod.parseList(detail).firstOrNull()
+            runOnUiThread {
+                if (first == null) {
+                    Toast.makeText(this, "未获取到详情数据", Toast.LENGTH_LONG).show()
+                    finish()
+                    return@runOnUiThread
+                }
+                vod = first
+                renderLines()
             }
-            Log.e("XingHuiTV", "[home] homeKey=$homeKey 返回前800: ${home.take(800)}")
-            runOnUiThread { parseHome(home) }
-
-            // 3) 首屏已经上屏后，再补注册其余站点（聚合搜索用；逐个容错）
-            // drpy 源每站都要下载一次规则脚本，并把整份 drpy2.min.js（109KB）作为 JNI 参数传进引擎；
-            // 157 站全量预注册会让电视耗时与内存尖峰过大（实测跑到约 30 站进程即被杀，或首屏等待 30 秒以上）。
-            // 这里只补注册轻量 json/api 源，drpy 源留到搜索页真正需要时再懒注册。
-            for (site in store.sites()) {
-                if (site.key == homeKey || registered.contains(site.key)) continue
-                if (site.isDrpy() || site.ext.startsWith("http")) continue
-                if (registerSite(site, site.key, dir, ua)) registered.add(site.key)
-            }
-
-            // 4) 网络自检：用与 spider 相同的 compat 客户端探测各网盘「取 token」接口。
-            //    百度能弹二维码是因为它纯静态拼 URL、零请求；夸克/迅雷/光鸭/阿里都要先取 token，
-            //    失败会被 spider 自己 catch 吞掉，界面无任何痕迹。这里把结果直接弹出来，
-            //    让故障从「不弹」变成「第几步、什么原因」。
-            val probe = runCatching { CspLoader.netProbe() }.getOrElse { "自检异常：${it.message}" }
-            Log.e("XingHuiTV", "[netprobe] 汇总 $probe")
-            runOnUiThread { Toast.makeText(this, "网络自检：$probe", Toast.LENGTH_LONG).show() }
         }.start()
     }
 
-    /** drpy2.min.js 全文缓存：同一订阅下所有 drpy 源共用一份，只下载一次 */
-    private var drpyEngineCache: String? = null
+    /** 显示影片信息 + 线路列表 */
+    /**
+     * 字幕样式 —— 原版 ExoUtil.applySubtitleStyle() 的等价实现。
+     *   预设：白字 + 黑描边 + 透明底
+     *   系统：跟随系统「字幕样式」（CaptioningManager.getUserStyle()）
+     * 同时按原版设 setApplyEmbeddedStyles(!system)：选预设用字幕自带样式，选系统用系统样式覆盖。
+     */
 
-    /** 取 drpy 引擎脚本：首次下载，之后复用；下载失败回退内置 assets */
-    private fun engineScript(engineUrl: String): String {
-        drpyEngineCache?.let { return it }
-        val downloaded = JsonFetcher.get(engineUrl)
-        val text = if (downloaded.isNullOrBlank()) readAsset("drpy2.min.js") else downloaded
-        drpyEngineCache = text
-        return text
+    /**
+     * 内嵌预览播放器的唯一构建点。
+     * 抽出来是为了「进播放页释放、返回重建」这条路径不用把参数再抄一遍。
+     */
+    private fun buildInlinePlayer(): androidx.media3.exoplayer.ExoPlayer {
+        val p = ExoPlayer.Builder(this)
+            .apply {
+                val rf = if (Settings(this@MainActivity).decodeMode == 0)
+                    SoftRenderersFactory(this@MainActivity)
+                else
+                    androidx.media3.exoplayer.DefaultRenderersFactory(this@MainActivity)
+                setRenderersFactory(rf.setEnableDecoderFallback(true))
+                // 与播放页同源，对齐原版 ExoUtil.buildLoadControl()：new DefaultLoadControl()。
+                // 之前按 exoBufferSec 把缓冲砍到 5s/10s 是负优化，已回滚（默认 50s）。
+                setLoadControl(androidx.media3.exoplayer.DefaultLoadControl())
+                val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@MainActivity)
+                ts.setParameters(
+                    ts.buildUponParameters()
+                        .setPreferredTextLanguage(java.util.Locale.getDefault().getISO3Language())
+                        .setForceHighestSupportedBitrate(true)
+                        .setTunnelingEnabled(Settings(this@MainActivity).tunnelMode == 1)
+                )
+                setTrackSelector(ts)
+                // 内嵌播放器之前是裸 build()：没有超时、没有跨协议重定向。
+                val timeoutMs = Settings(this@MainActivity).networkTimeoutSec.coerceIn(5, 120) * 1000
+                val http = DefaultHttpDataSource.Factory()
+                    .setConnectTimeoutMs(timeoutMs)
+                    .setReadTimeoutMs(timeoutMs)
+                    .setAllowCrossProtocolRedirects(true)
+                // 同播放页：包一层 DefaultDataSource（原版 MediaSourceFactory:90），
+                // 本地路径不必再依赖 UrlConvert 转写
+                setMediaSourceFactory(
+                    DefaultMediaSourceFactory(
+                        androidx.media3.datasource.DefaultDataSource.Factory(this@MainActivity, http)
+                    )
+                )
+            }
+            .build().also {
+                // 官方 Players.java:158：HDMI / 蓝牙音频断开时自动暂停
+                it.setHandleAudioBecomingNoisy(true)
+                // 内嵌预览同样请求音频焦点：进播放页时播放页抢焦点，这一路会自动 LOSS → 暂停，
+                // 不再依赖手动 pauseInlinePlayback 兜底（原版 Players.java:155 同一句）。
+                it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
+                attachSurfaceTo(it)
+            }
+        return p
     }
 
-    /** 注册单个站点到引擎；返回是否成功。不改变全局当前站 key。 */
-    private fun registerSite(site: Site, key: String, dir: String, ua: String): Boolean {
-        // csp_ 源是 spider.jar 内 Java 类，由壳侧 CspLoader 执行，不注册引擎
-        if (site.isCsp()) return true
-        val params = JSONObject().put("dir", dir)
-        if (ua.isNotBlank()) params.put("ua", ua)
-        return try {
-            when {
-                // JS 规则源（对齐原项目 BaseLoader：api 含 .js 即 js 源）。
-                // api 一般是 drpy2.min.js 引擎，ext 是规则脚本；相对路径基于订阅 URL 解析，引擎下载失败回退内置
-                site.isDrpy() -> {
-                    val base = SubscriptionStore(this).subscribeUrl()
-                    val engineUrl = SubscriptionParser.jarUrl(site.api, base)
-                    val ruleUrl = SubscriptionParser.jarUrl(site.ext, base)
-                    val ruleText = JsonFetcher.get(ruleUrl)
-                    if (ruleText.isNullOrBlank()) return false
-                    params.put("rule", ruleText)
-                    params.put("engine", engineScript(engineUrl))
-                    // 站点级 header（如"新闪雷/茶杯狐"配置了 UA，对齐原项目 getHeaders）
-                    try {
-                        val h = JSONObject(site.siteJson).optJSONObject("header")
-                        if (h != null && h.length() > 0) params.put("header", h.toString())
-                    } catch (_: Exception) {}
-                }
-                site.ext.startsWith("http") -> {
-                    val ruleText = JsonFetcher.get(site.ext)
-                    if (ruleText.isNullOrBlank()) return false
-                    params.put("rule", ruleText)
-                    params.put("engine", readAsset("drpy2.min.js"))
-                }
-                site.siteJson.isNotBlank() -> params.put("site_json", site.siteJson)
-                else -> {
-                    Log.e("XingHuiTV", "[init] key=$key 类型无法识别（api=${site.api}），跳过（不回退内置规则）")
-                    return false
+    private fun applyCaptionStyle() {
+        val sv = subtitleView
+        val system = Settings(this).captionMode == 1
+        val style = if (system) {
+            val cm = getSystemService(CAPTIONING_SERVICE) as? android.view.accessibility.CaptioningManager
+            if (cm != null) androidx.media3.ui.CaptionStyleCompat.createFromCaptionStyle(cm.userStyle)
+            else androidx.media3.ui.CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK, null)
+        } else {
+            androidx.media3.ui.CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK, null)
+        }
+        sv.setStyle(style)
+        sv.setApplyEmbeddedStyles(!system)
+        sv.setApplyEmbeddedFontSizes(false)
+    }
+
+    private fun renderLines() {
+        val v = vod ?: return
+        showLines = true
+        currentLine = null
+
+        findDetail<TextView>(R.id.detailName).text = v.vodName
+        // 对齐原版信息行：「站源: xxx   年份: xxx   地区: xxx」，标签与值分段，
+        // 之前用「 · 」拼成一行，读不出哪段是什么。
+        val siteName = SubscriptionStore(this).currentSite()?.name.orEmpty()
+        val info = buildString {
+            if (siteName.isNotBlank()) append("站源：").append(siteName)
+            if (v.vodYear.isNotBlank()) { if (isNotEmpty()) append("    "); append("年份：").append(v.vodYear) }
+            if (v.vodArea.isNotBlank()) { if (isNotEmpty()) append("    "); append("地区：").append(v.vodArea) }
+            if (v.vodRemarks.isNotBlank() && v.vodRemarks != v.vodYear) {
+                if (isNotEmpty()) append("    "); append("更新：").append(v.vodRemarks)
+            }
+        }
+        findDetail<TextView>(R.id.detailInfo).text = info.ifBlank { "暂无信息" }
+        findDetail<TextView>(R.id.detailDesc).text = v.vodContent.ifBlank { "暂无简介" }
+        if (Settings(this).showPoster) {
+            AsyncImageLoader.load(findDetail(R.id.detailImage), v.vodPic)
+        }
+        applyFavState(store.isFavorite(v.vodId))
+
+        pairs.clear()
+        val lines = v.parseLines()
+        if (lines.isEmpty()) {
+            showLines = true
+            pairs.add("none" to "无播放线路")
+            buildFlags(emptyList())
+            findDetail<RecyclerView>(R.id.detailList).layoutManager = LinearLayoutManager(this)
+            adapter.notifyDataSetChanged()
+            return
+        }
+        // 对齐原版：进详情页直接展开第一条线路的集数网格，焦点落在第一集，
+        // 按确认即起播。原版没有「先选线路、再选集数」这一层，多条线路用「换源」切换。
+        currentLine = lines.first()
+        showLines = false
+        buildFlags(lines)
+        renderEpisodes(lines.first())
+        findDetail<RecyclerView>(R.id.detailList)?.let { rv ->
+            rv.post { rv.requestFocus() }
+        }
+        // 对齐原版：VideoActivity 打开即 onRefresh 起播当前集，不是等用户点。
+        // 迅雷单条要先等展开结果，展开完再起播。
+        val autoOnly = episodes.singleOrNull()
+        if (autoOnly != null && ThunderPlay.match(autoOnly.second)) {
+            autoPlayAfterExpand = true
+        } else {
+            autoPlayFromHistory()
+        }
+    }
+
+    /** 详情报自动起播：优先上次看到的那一集，没有记录就第 1 集 */
+    private fun autoPlayFromHistory() {
+        if (autoStarted) return
+        autoStarted = true
+        val v0 = vod
+        val hKey = HistoryStore.keyOf(v0?.vodId.orEmpty(), v0?.vodName.orEmpty(), episodes.getOrNull(playingIdx)?.second)
+        val last = runCatching { HistoryStore(this).lastEpUrl(hKey) }.getOrDefault("")
+        val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == last }
+            .takeIf { it >= 0 } ?: 0
+        Log.e("XingHuiTV", "[detail] 自动起播 idx=$idx 共${episodes.size}集")
+        playInline(idx, auto = true)
+    }
+
+    /** 显示当前线路的集数列表 */
+    private fun renderEpisodes(line: PlayLine) {
+        episodeSeq++          // 切线路/重渲染即作废上一轮异步展开
+        episodes = line.episodes
+        // 原版这一行是线路 tab（超级无敌4K / 高清4K / …），选中项标黄
+        markActiveFlag(line.name)
+        applyEpisodeGrid()
+        rebuildGroups()
+        showGroup(0)
+        // 迅雷体系：磁力/ed2k/thunder/种子在详情阶段就展开成文件列表
+        // （对齐原版 player/Source.parse → Thunder.Parser.call）。
+        // 种子解析要等元信息，可能要几秒，所以放后台线程，回来后替换集数列表。
+        val only = episodes.singleOrNull()
+        if (only != null && ThunderPlay.match(only.second)) {
+            ThunderPlay.ensureInit(this)
+            expandThunder(only.second)
+        }
+    }
+
+    /** 异步展开磁力/种子；返回空列表（无做种等）时保留原样，点进去由播放页直接解析 */
+    private fun expandThunder(url: String) {
+        Log.e("XingHuiTV", "[detail] 迅雷体系，开始展开 ${url.take(70)}")
+        val seq = episodeSeq
+        Thread {
+            val list = runCatching { ThunderPlay.expand(url) }.getOrDefault(emptyList())
+            if (list.isEmpty()) {
+                Log.e("XingHuiTV", "[detail] 展开无结果，保持单条")
+                return@Thread
+            }
+            runOnUiThread {
+                // 用户可能已经切到别的线路/退出，序号不匹配就不覆盖
+                if (seq != episodeSeq || isFinishing) return@runOnUiThread
+                Log.e("XingHuiTV", "[detail] 展开完成，共 ${list.size} 个文件")
+                episodes = list
+                applyEpisodeGrid()
+                rebuildGroups()
+                showGroup(0)
+                if (autoPlayAfterExpand) {
+                    autoPlayAfterExpand = false
+                    autoStarted = true
+                    playInline(0, auto = true)
                 }
             }
-            val initRes = Engine.execute("init", key, params.toString())
-            Log.e("XingHuiTV", "[init] key=$key 返回前500: ${initRes.take(500)}")
-            initRes.contains("\"code\":0")
-        } catch (e: Exception) {
-            Log.e("XingHuiTV", "[init] key=$key 异常", e)
-            false
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** 每次渲染线路自增，用于丢弃过期的异步展开结果 */
+    private var episodeSeq = 0
+
+    /** 详情页自动起播只做一次（换线路/换源由各自逻辑负责） */
+    private var autoStarted = false
+
+    /** 迅雷单条：等磁力/种子展开完成后再起播 */
+    private var autoPlayAfterExpand = false
+
+    /**
+     * 集数网格：列数与行高都照原版 VideoActivity.setEpisodeAdapter 的算法
+     * （VideoActivity.java 686-712 行实读）：
+     *   numColumns 默认 10，按「集数名称最大长度」逐档降到 1/2/3/4/6/8；
+     *   行高固定 44dp，列间隙 8dp（原版 colWidth = (屏宽-48dp-(cols-1)*8dp)/cols）。
+     * 之前是硬编码 GridLayoutManager(this, 4)，且空格子靠 padding 12dp 撑，所以格距显得很大。
+     */
+    private fun applyEpisodeGrid() {
+        val rv = findDetail<RecyclerView>(R.id.detailList)
+        val len = episodes.maxOfOrNull { it.first.length } ?: 0
+        val cols = when {
+            len > 40 -> 1
+            len > 30 -> 2
+            len > 15 -> 3
+            len > 10 -> 4
+            len > 6 -> 6
+            len > 4 -> 8
+            else -> 10
+        }
+        // 集数区高度是 match_parent，横向单行会把每个格子撑满整屏高，所以这里只做网格。
+        // 列数按名称长度自适应（原版 setEpisodeAdapter 的算法），不需要用户再选「选集样式」。
+        rv.layoutManager = GridLayoutManager(this, cols)
+        if (rv.itemDecorationCount == 0) {
+            // 列间隙 8dp：左右各 4dp，相邻两格加起来正好 8dp（对齐原版 colWidth 的扣减方式）
+            rv.addItemDecoration(object : RecyclerView.ItemDecoration() {
+                override fun getItemOffsets(
+                    outRect: android.graphics.Rect, view: View,
+                    parent: RecyclerView, state: RecyclerView.State
+                ) {
+                    // 原版 VideoActivity.setEpisodeView(): setHorizontalSpacing(8dp) + setVerticalSpacing(8dp)
+                    // 相邻两格各摊一半，正好 8dp
+                    val half = dp(4)
+                    outRect.left = half
+                    outRect.right = half
+                    outRect.top = half
+                    outRect.bottom = half
+                }
+            })
+        }
+    }
+
+    /** 播放器框内起播浮层（原版 view_widget_vod 的 info），3 秒后自动收起 */
+    private fun showVodInfo(title: String) {
+        val info = findDetail<View>(R.id.vodInfo) ?: return
+        val name = findDetail<TextView>(R.id.vodInfoTitle) ?: return
+        name.text = if (currentLine != null) "${currentLine!!.name} · $title" else title
+        info.visibility = View.VISIBLE
+        info.postDelayed({ info.visibility = View.GONE }, 3000)
+    }
+
+    /** 填充播放源 tab：原版 flag 行就是同一站点的全部播放源（超级无敌4K / 高清4K / …） */
+    private fun buildFlags(lines: List<PlayLine>) {
+        val box = findDetail<android.widget.LinearLayout>(R.id.flagItems) ?: return
+        box.removeAllViews()
+        val row = findDetail<View>(R.id.flagRow)
+        if (lines.isEmpty()) {
+            row?.visibility = View.GONE
+            return
+        }
+        row?.visibility = View.VISIBLE
+        lines.forEach { line ->
+            val tv = TextView(this).apply {
+                text = line.name
+                textSize = 16f
+                // 原版 flag 行每项之间 8dp（CustomHorizontalGridView.setHorizontalSpacing(8)）
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                isFocusable = true
+                isClickable = true
+                background = getDrawable(R.drawable.selector_item)
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = dp(8) }
+                setOnClickListener { switchToLine(line) }
+            }
+            box.addView(tv)
+        }
+        markActiveFlag(currentLine?.name.orEmpty())
+    }
+
+    /** 选中的源标黄（原版 setFlagActivated 的观感） */
+    private fun markActiveFlag(name: String) {
+        val box = findDetail<android.widget.LinearLayout>(R.id.flagItems) ?: return
+        for (i in 0 until box.childCount) {
+            val tv = box.getChildAt(i) as? TextView ?: continue
+            tv.setTextColor(if (tv.text.toString() == name) 0xFFFFCC00.toInt() else 0xFFFFFFFF.toInt())
+        }
+    }
+
+    /** 切到指定源，保持当前集号接着播 */
+    private fun switchToLine(line: PlayLine) {
+        if (line.name == currentLine?.name) return
+        currentLine = line
+        val keep = playingIdx
+        renderEpisodes(line)
+        if (keep >= 0) playInline(keep.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
+    }
+
+    /**
+     * 起播失败统一入口（对齐原版 VideoActivity.startFlow → checkFlag）：
+     * 原版任何失败都走这里 —— 先 checkParse 轮解析源，再 checkFlag 逐条往后换线路，
+     * 走到最后一条才 checkSearch 跨站。
+     *
+     * 我们之前只在 onPlayerError 里换源，而「解析返回空 url」「内核不支持该源」这两种
+     * 失败发生在起播之前，根本触发不到 onPlayerError，所以自动换源永远不生效、只能手动点。
+     */
+    private var lastErrorMs = 0L
+    private fun handlePlayFailure(idx: Int, auto: Boolean, reason: String, depth: Int) {
+        val v = vod ?: return
+        val lines = v.parseLines()
+        Log.e("XingHuiTV", "[detail] 起播失败 depth=$depth：$reason（当前 ${(currentLine?.name ?: "?")}，共 ${lines.size} 条线路）")
+        val cur = lines.indexOfFirst { it.name == currentLine?.name }.let { if (it < 0) 0 else it }
+        if (cur < lines.size - 1 && depth < lines.size) {
+            val next = lines[cur + 1]
+            // 对齐原版 Notify.show(getString(R.string.play_switch_flag, flag.getFlag()))
+            Toast.makeText(this, "正在切换到「${next.name}」", Toast.LENGTH_SHORT).show()
+            currentLine = next
+            renderEpisodes(next)
+            val i = idx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+            playInline(i, auto = auto, depth = depth + 1)
+            return
+        }
+        // 走完最后一条线路：原版继续 checkSearch 跨站搜索，本工程暂不做跨站
+        Log.e("XingHuiTV", "[detail] 全部 ${lines.size} 条线路均失败")
+        if (auto) {
+            Toast.makeText(this, "所有线路都播放失败，可手动换源", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "内嵌全部线路失败，转播放页", Toast.LENGTH_SHORT).show()
+            openPlayPage(idx)
         }
     }
 
     /**
-     * 界面大小 → 网格列数，对齐原版 Product.getColumn：
-     *   getColumn() = Math.abs(Setting.getSize() - 7)
-     *   Setting.getSize() 默认 2（档位 0..6），所以默认是 5 列，档位越大列越少。
-     * 之前这里写的是 0→6 / 1→5 / 2→4 / 其余→3，整体比原版少一列 ——
-     * 表现为卡片比原版大一圈、每行少一张，越往后偏差越大。
+     * 重建分段按钮：原版按 40 集一段（1-40 / 41-80 / 81-102）。
+     * 注意：原版即使只有 6 集也照样显示「倒序 → 1-6」（整行存在，只是只有一个段按钮），
+     * 只有单集时才没意义。之前写成 episodes.size <= GROUP_SIZE 就整行 GONE，
+     * 导致 3 集的影片连「倒序」都没有。
      */
+    private fun rebuildGroups() {
+        val box = findDetail<android.widget.LinearLayout>(R.id.groupItems)
+        box.removeAllViews()
+        val row = findDetail<View>(R.id.groupRow)
+        if (episodes.size <= 1) {
+            row?.visibility = View.GONE
+            return
+        }
+        row?.visibility = View.VISIBLE
+        val sections = ((episodes.size + GROUP_SIZE - 1) / GROUP_SIZE)
+        // 倒序时后缀小的段排在前面，和原版「倒序」的语义一致
+        val list = if (epOrder) (sections - 1 downTo 0) else (0 until sections)
+        for (s in list) {
+            val start = s * GROUP_SIZE
+            val end = minOf(start + GROUP_SIZE, episodes.size)
+            val label = "${start + 1}-$end"
+            val btn = TextView(this).apply {
+                text = label
+                textSize = 15f
+                setTextColor(if (s == activeSection) 0xFFFFCC00.toInt() else 0xFFFFFFFF.toInt())
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                isFocusable = true
+                isClickable = true
+                background = getDrawable(R.drawable.selector_tv_btn)
+                setOnClickListener {
+                    activeSection = s
+                    rebuildGroups()
+                    showGroup(s * GROUP_SIZE)
+                    (it as TextView).requestFocus()
+                }
+            }
+            box.addView(btn)
+        }
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 只展示 [start, start+GROUP_SIZE) 这一段集数；倒序时在该段内反向排列 */
+    private fun showGroup(start: Int) {
+        pairs.clear()
+        if (episodes.isEmpty()) {
+            pairs.add("none" to "无集数")
+            adapter.notifyDataSetChanged()
+            return
+        }
+        val from = start.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+        val to = minOf(from + GROUP_SIZE, episodes.size)
+        if (epOrder) {
+            for (i in to - 1 downTo from) pairs.add("E:$i" to episodes[i].first)
+        } else {
+            for (i in from until to) pairs.add("E:$i" to episodes[i].first)
+        }
+        adapter.notifyDataSetChanged()
+        adapter.setActive(if (playingIdx >= 0) "E:$playingIdx" else null)
+    }
+
+    private var showLines = true
+
+    private fun onPick(key: String) {
+        val v = vod ?: return
+        when {
+            showLines && key.startsWith("L:") -> {
+                val idx = key.removePrefix("L:").toIntOrNull() ?: return
+                val line = v.parseLines().getOrNull(idx) ?: return
+                currentLine = line
+                showLines = false
+                renderEpisodes(line)
+            }
+            !showLines && key.startsWith("E:") -> {
+                val idx = key.removePrefix("E:").toIntOrNull() ?: return
+                // 对齐原版 shouldEnterFullscreen：点到「正在播的这一集」就进全屏，
+                // 点到别的集才是换集。所以集数上按一次是换集，再按一次是全屏。
+                if (idx == playingIdx) {
+                    enterInlineFullscreen()
+                    return
+                }
+                playInline(idx)
+            }
+        }
+    }
+
+    /** 换源：在当前影片的各条播放线路之间轮换（对齐原版 onChange → 重新取播放地址） */
+    private fun switchSource() {
+        val v = vod ?: return
+        val lines = v.parseLines()
+        if (lines.size <= 1) {
+            Toast.makeText(this, "该影片只有 ${lines.size} 个线路，无处可换", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cur = lines.indexOfFirst { it.name == currentLine?.name }.let { if (it < 0) 0 else it }
+        val next = lines[(cur + 1) % lines.size]
+        currentLine = next
+        renderEpisodes(next)
+        Toast.makeText(this, "已换源：${next.name}", Toast.LENGTH_SHORT).show()
+        // 正在播就接着播同一集号的另一线路，否则只切换集数列表
+        if (playingIdx >= 0) playInline(playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
+    }
+
+    /** 当前线路的第 idx 集（对齐原版 setEpisodeActivated → onRefresh） */
+    private fun playInline(idx: Int, auto: Boolean = false, depth: Int = 0, quiet: Boolean = false) {
+        val v = vod ?: return
+        val line = currentLine ?: v.parseLines().firstOrNull() ?: return
+        // 集数列表以「当前展示的 episodes」为准：磁力/种子被 expandThunder 展开后，
+        // line.episodes 还是原始未展开的那份，用它会取错集或越界（点了不播）。
+        val ep = episodes.getOrNull(idx)
+            ?: line.episodes.getOrNull(idx)
+            ?: run { Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}"); return }
+        playingIdx = idx
+        // 集数格里标出"当前这一集"（原版 setEpisodeActivated）
+        adapter.setActive("E:$idx")
+        setPreviewVisible(true)
+        findDetail<View>(R.id.detailImage)?.visibility = View.GONE
+        showVodInfo(ep.first)
+        // 「准备播放 X」这句是自造的，原版没有；返回列表重建时还会再弹一次，更没必要
+        if (!quiet) Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
+        // 续播：原版 VideoActivity 打开即 setPosition(Math.max(opening, history.position))。
+        // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
+        // 换集就是从 0 开始，不会出现点第 3 集跳到第 1 集进度的情况。
+        val resumeMs = runCatching {
+            HistoryStore(this).marks(HistoryStore.keyOf(v.vodId, v.vodName, ep.second), ep.second)[2]
+        }.getOrDefault(0L)
+        // 对齐原版 VideoActivity:1269 —— 起播之前就把 History 建好，不看解析成败。
+        // 放在解析之后写的话，解析慢、解析失败、看两眼就退出，三种情况都不留记录。
+        runCatching {
+            HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)
+        }
+        Thread {
+            var url = ""
+            var err = ""
+            runCatching {
+                val store = SubscriptionStore(this)
+                val site = store.sites().firstOrNull { it.key == store.currentKey() }
+                if (site == null) { err = "无当前站点"; return@runCatching }
+                val play = if (site.isCsp()) {
+                    CspLoader.player(this, site, line.name, ep.second.ifBlank { v.vodId })
+                } else {
+                    val params = JSONObject().put("flag", line.name)
+                        .put("id", ep.second.ifBlank { v.vodId }).toString()
+                    Engine.execute("player", store.currentKey() ?: "", params)
+                }
+                url = extractPlayUrl(play)
+                if (url.isBlank()) err = "解析返回空 url"
+            }.onFailure { err = it.message ?: it.javaClass.simpleName }
+            runOnUiThread {
+                if (url.isBlank()) {
+                    // 解析失败也走自动换源（原版 startFlow 就是解析失败和播放失败同一个入口）
+                    handlePlayFailure(idx, auto, "解析失败：$err", depth)
+                    return@runOnUiThread
+                }
+                // ExoPlayer 缺扩展模块时会抛 IllegalStateException（No suitable media source factory），
+                // 以前没兜住，换到 m3u8 源就直接闪退回主页。这里失败就转独立播放页走完整链路。
+                inlineUrl = url
+                val ok = runCatching {
+                    player?.setMediaItem(MediaItem.Builder().setUri(url).build())
+                    player?.prepare()
+                    if (resumeMs > 1000) player?.seekTo(resumeMs)
+                    player?.play()
+                    true
+                }.getOrElse { e ->
+                    Log.e("XingHuiTV", "[detail] 内嵌播放源不被支持 $url", e)
+                    false
+                }
+                if (!ok) {
+                    handlePlayFailure(idx, auto, "内核不支持该地址（$url）", depth)
+                }
+            }
+        }.start()
+    }
+
+    /** 从 playerContent 的 JSON 里取第一个可播地址（url 可能是字符串/扁平数组/对象） */
+    private fun extractPlayUrl(play: String): String {
+        if (play.isBlank()) return ""
+        runCatching {
+            val obj = JSONObject(play)
+            return when (val u = obj.opt("url")) {
+                is String -> u
+                is org.json.JSONArray -> {
+                    // 每两个一组：名称, 地址（与原版 Result.parse 一致）
+                    var i = 0
+                    while (i + 1 < u.length()) {
+                        val addr = u.optString(i + 1, "")
+                        if (addr.startsWith("http")) return addr
+                        i += 2
+                    }
+                    ""
+                }
+                is JSONObject -> {
+                    val vals = u.optJSONArray("values") ?: return ""
+                    for (i in 0 until vals.length()) {
+                        val addr = vals.optJSONObject(i)?.optString("v", "").orEmpty()
+                        if (addr.startsWith("http")) return addr
+                    }
+                    ""
+                }
+                else -> ""
+            }
+        }
+        return ""
+    }
+
+    /** 转独立播放页（完整链路兜底） */
+    private fun openPlayPage(idx: Int) {
+        val v = vod ?: return
+        val line = currentLine ?: return
+        val ep = line.episodes.getOrNull(idx) ?: return
+        // 先把预览那一路停掉，再起播放页：两边同时出声就是「两个不同的声音」
+        detachInlinePlayback()
+        // ★再把预览从窗口里摘掉。
+        //   官方 Surface types 文档："The lifecycle of a SurfaceView's surface is tied to **view visibility**"
+        //   —— 只 release player 不动 View 的时候，这块 SurfaceView 仍然 VISIBLE，
+        //   它的 surface 就一直挂在 SurfaceFlinger 的 overlay plane 上，跟播放页那块抢。
+        //   texture_view 已经把"新装包"这一侧从根上去掉了；这一行是给"万一 XML 没覆盖到"留的兜底：
+        //   GONE 才是可见性变化，才真正让 surface 销毁。返回时 onResume 会重建预览（playInline 里设回 VISIBLE）。
+        // ★记住离开时的形态，返回时按它还原（见 onResume）。
+        //   这里**不调 exitInlineFullscreen()**：它会让列表在跳转前就冒出来。
+        inlineLeaveFullscreen = inlineFullscreen
+        runCatching { setPreviewVisible(false) }
+        // ★转场动画保留（曾经想去掉，已撤）。
+        // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
+        inlineResumeOnReturn = true
+        showPlayLayer(Intent(this, MainActivity::class.java).apply {
+            putExtra("vod_id", v.vodId)
+            putExtra("vod_name", v.vodName)
+            putExtra("vod_pic", v.vodPic)
+            putExtra("flag", line.name)
+            putExtra("ep_url", ep.second)
+        })
+        // ★这里**故意不做** overridePendingTransition(0, 0)。
+        //
+        // 上一版做过，而且放错了位置（放在 startActivity 之前，按官方定义属于空操作）。
+        // 现在连「放对位置」也不做了，原因有三：
+        //   1) 转场动画要保留 —— 它不是黑屏的原因，它是**掩盖**黑屏的那层东西。
+        //      播放页窗口出现时 SurfaceView 的 surface 还没有内容（黑），有淡入就是「淡入一段黑」，
+        //      没有动画就是「整屏瞬间黑住」。原版一直是系统默认转场，从没关过。
+        //   2) 腾讯云开发者社区实证：overridePendingTransition(0, 0) 本身就会导致跳转短暂黑屏，
+        //      正确做法是换回真实 anim，或者干脆用系统默认。
+        //   3) 关掉动画还会让新窗口的输入焦点提前到来，这时按键语义还没挂好，
+        //      更容易出现「进去按 ← 没反应」—— 保留动画反而给了首帧和焦点一个缓冲。
+        // 结论：系统默认转场 + DetailActivity 不做任何 overridePendingTransition。
+    }
+
     /**
-     * 首页菜单键（对齐原版 HomeActivity:508-519 的 dispatchKeyEvent）：
-     *   KeyUtil.isMenuKey = ACTION_UP && KEYCODE_MENU
-     * 原版有九档可调（选项弹窗/切站源/切线路/直播/历史/搜索/推送/收藏/设置），
-     * 我们只保留一个固定行为：进设置页面。可调项与 Settings.homeMenuKey 字段都已移除。
+     * 进全屏：播放器铺满整页，其余区域隐藏（对齐原版 enterFullscreen）。
+     * ★ 这里必须用 RelativeLayout.LayoutParams：playerBox 的父容器是 activity_detail 的根 RelativeLayout，
+     *   之前赋的是 LinearLayout.LayoutParams，运行时被父容器强转成 RelativeLayout 的参数 →
+     *   ClassCastException: LinearLayout$LayoutParams cannot be cast to RelativeLayout$LayoutParams，
+     *   表现就是「点方框或点集数，一全屏就闪退回首页」。
      */
-    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
-        if (event.action == android.view.KeyEvent.ACTION_UP &&
-            event.keyCode == android.view.KeyEvent.KEYCODE_MENU
-        ) {
-            // 固定行为：首页按菜单键 → 设置页面。
-            // 「首页菜单键」这个可调项已经整个拿掉了（Settings.homeMenuKey 字段一并删除），
-            // 不再读配置、也不再有 0/2/6 之类空档 —— 只有这一个默认行为。
-            startActivity(android.content.Intent(this, SettingsActivity::class.java))
+    private fun enterInlineFullscreen() {
+        if (inlineFullscreen) return
+        inlineFullscreen = true
+        setPreviewVisible(true)
+        val box = findDetail<FrameLayout>(R.id.playerBox)
+        savedBoxParams = box.layoutParams
+        // 对齐原版 VideoActivity.enterFullscreen():853 —— mBinding.video.setForeground(null)。
+        // 小窗挂的 selector_video 聚焦时画的是 shape_video_focused（1.5dp 纯白描边），
+        // 全屏时不去掉，四周就留一整圈白线，也就是一直在说的「四周白条」。
+        savedBoxForeground = box.foreground
+        box.foreground = null
+        box.layoutParams = android.widget.RelativeLayout.LayoutParams(
+            android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
+            android.widget.RelativeLayout.LayoutParams.MATCH_PARENT
+        )
+        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
+            findDetail<View>(it)?.visibility = View.GONE
+        }
+        box.requestFocus()
+    }
+
+    /** 退出全屏：恢复小窗与其它区域（原版退出全屏走返回键，这里同样） */
+    private fun exitInlineFullscreen() {
+        if (!inlineFullscreen) return
+        inlineFullscreen = false
+        val box = findDetail<FrameLayout>(R.id.playerBox)
+        // 还原进全屏时保存的那份参数（类型与父容器天然匹配，不做任何强转）
+        savedBoxParams?.let { box.layoutParams = it }
+        // 对齐原版 exitFullscreen():866 —— setForeground(selector_video) 还原小窗焦点边框
+        box.foreground = savedBoxForeground ?: runCatching {
+            getDrawable(R.drawable.selector_video)
+        }.getOrNull()
+        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+            R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
+            findDetail<View>(it)?.visibility = View.VISIBLE
+        }
+        // ★预览本身也必须恢复 VISIBLE —— 这一行之前漏了。
+        //
+        // 症状：详情页全屏预览里按菜单 → 转独立播放页 → 返回详情页后小窗**只有声音没有画面**。
+        // 链条：openPlayPageFromCurrent() 里摘掉预览（inlineView = GONE）却没有退出全屏，
+        //       于是 inlineFullscreen 仍为 true；返回时 onResume 的执行顺序是
+        //         ① if (!inlineFullscreen) inlineView = VISIBLE   ← 被跳过
+        //         ② if (inlineFullscreen) exitInlineFullscreen()   ← 只恢复了 9 个文字/列表视图，
+        //            从来没恢复 inlineView 本身
+        //       inlineView 一直是 GONE → PlayerView 内部那块 texture_view 的 surface 被销毁
+        //       （media3 官方：SurfaceView 的 surface 生命周期绑 view visibility；
+        //         PlayerView.setVisibility 会连带设内部 surface view，ExoPlayer#3160）
+        //       → 解码器照常在跑、声音照常在出，画面没有承载层。
+        runCatching { setPreviewVisible(true) }
+        findDetail<View>(R.id.detailList).requestFocus()
+    }
+
+    /**
+     * 菜单键（原版 VideoActivity.dispatchKeyEvent:1686-1687 只在全屏时分流）。
+     * 详情页内嵌播放器没有原版那套控制条 UI，所以菜单键直接把当前集转独立播放页
+     * PlayActivity —— 那才是原版 VideoActivity 的形态，控制条、选集、选轨全都在。
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val menu = event.keyCode == KeyEvent.KEYCODE_MENU
+        if (inlineFullscreen && menu) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                openPlayPageFromCurrent()
+            }
             return true
         }
         return super.dispatchKeyEvent(event)
     }
 
-    private fun uiColumns(): Int = (7 - Settings(this).uiSize).coerceAtLeast(1)
-
-    /**
-     * 横版再减一列，对齐 Product.getColumn(Style)：
-     *   return style.isLand() ? getColumn() - 1 : getColumn();
-     *   isLand() = isRect() && getRatio() > 1.0f
-     * 横版海报更宽，同屏放不下原来那么多列。
-     */
-    private fun uiColumnsFor(type: String, ratio: Float): Int {
-        val base = uiColumns()
-        val land = type.equals("rect", true) && ratio > 1.0f
-        return if (land) (base - 1).coerceAtLeast(1) else base
+    /** 把当前正在播的这一集原样交给独立播放页 */
+    private fun openPlayPageFromCurrent() {
+        val v = vod ?: return
+        val line = currentLine ?: return
+        val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
+        // ★记住离开时的形态（这里一定是全屏 —— 只有全屏时菜单键才会走到这个函数）。
+        //   原来在这里调 exitInlineFullscreen()：它会立刻把 9 个列表/文字视图恢复可见、
+        //   把小窗尺寸还原，而 startActivity 还没执行 —— 转场期间用户看到的就是
+        //   「详情页布局 + 小窗黑洞」，也就是"按菜单后回详情页会先显示详情页，再重新加载画面"。
+        //   改成只记住形态，返回时由 onResume 按形态还原。
+        inlineLeaveFullscreen = true
+        // 交接给播放页之前先把预览停下来（暂停 + 摘掉画面层，但保留实例）
+        detachInlinePlayback()
+        // 摘掉预览（全屏那条路这里是 1920x1080 的整屏 overlay，代价最大）
+        runCatching { setPreviewVisible(false) }
+        inlineResumeOnReturn = true
+        showPlayLayer(Intent(this, MainActivity::class.java).apply {
+            putExtra("vod_id", v.vodId)
+            putExtra("vod_name", v.vodName)
+            putExtra("vod_pic", v.vodPic)
+            putExtra("flag", line.name)
+            putExtra("ep_url", ep.second)
+        })
+        // 同上：不做 overridePendingTransition(0, 0)，理由见 openPlayPage 里的说明。
     }
 
-    /**
-     * 按站点 Style 应用卡片形态（对齐原版 bean/Style + Product.getSpec）。
-     * - list：整行一条横卡（体育/网盘/听书站），spanCount 强制 1
-     * - rect/oval：网格，海报高 = 格宽 / ratio（默认 rect 0.75 竖版、oval 1.0 正方）
-     */
-    private fun applyCardStyle(site: Site) {
-        val isList = site.isListStyle()
-        // 站点 styleRatio 缺省时按 rect 0.75 走（Style.getRatio 的兜底），
-        // 这样横版站点能正确触发"减一列"。
-        val rawRatio = if (site.styleRatio > 0f) site.styleRatio else 0.75f
-        val cols = if (isList) 1 else uiColumnsFor(if (site.styleType.isBlank()) "rect" else site.styleType, rawRatio)
-        runCatching {
-            vodAdapter.setStyle(site.styleType, site.styleRatio, cols)
-            (findViewById<RecyclerView>(R.id.vodList)?.layoutManager as? GridLayoutManager)?.spanCount = cols
-        }.onFailure { Log.e("XingHuiTV", "[style] 套用形态失败", it) }
-        Log.e("XingHuiTV", "[style] ${site.name} type=${site.styleType.ifBlank { "rect" }} " +
-            "ratio=${site.styleRatio} cols=$cols")
-    }
-
-    /**
-     * 单页形态覆盖，对齐原版：
-     *   VodFragment: Style style = result.getStyle(getStyle());
-     *   Result.getStyle → getList().get(0).getStyle(style)
-     *   Vod.getStyle  → 影片自带 style，否则 Style.get(land, circle, ratio)，再否则用站点 style
-     * 也就是「首条影片的形态决定整页」。land==1 → rect(默认 1.33)，circle==1 → oval(默认 1.0)，
-     * 都为 0 时原版 Style.get 返回 null、继续沿用站点形态，这里同样不动。
-     */
-    private fun applyPageStyle(first: Vod?) {
-        if (first == null) return
-        val type = when {
-            first.land == 1 -> "rect"
-            first.circle == 1 -> "oval"
-            else -> return   // 回落站点形态，不改
-        }
-        val ratio = when {
-            first.ratio > 0f -> first.ratio.coerceIn(0.1f, 4f)
-            first.land == 1 -> 1.33f
-            else -> 1.0f
-        }
-        runCatching {
-            val cols = uiColumnsFor(type, ratio)
-            vodAdapter.setStyle(type, ratio, cols)
-            (vodList.layoutManager as? GridLayoutManager)?.spanCount = cols
-            Log.e("XingHuiTV", "[style] 影片级覆盖 ${first.vodName} type=$type ratio=$ratio cols=$cols")
-        }.onFailure { Log.e("XingHuiTV", "[style] 影片级覆盖失败", it) }
-    }
-
-    /** 左上角站点名点击：弹出站点列表，选中即切换站源并自动刷新（对齐原版） */
-    private fun showSitePicker() {
-        val store = SubscriptionStore(this)
-        val sites = store.sites()
-        if (sites.isEmpty()) {
-            Toast.makeText(this, "没有可用站点，请先到「站点」导入订阅", Toast.LENGTH_LONG).show()
-            return
-        }
-        val cur = store.currentKey()
-        val labels = sites.map { s ->
-            val tag = when {
-                s.isCsp() -> "csp"
-                s.isDrpy() -> "js"
-                else -> "采集"
-            }
-            (if (s.key == cur) "● " else "   ") + s.name + "  [" + tag + "]"
-        }
-        AlertDialog.Builder(this)
-            .setTitle("切换站源")
-            .setItems(labels.toTypedArray()) { _, which ->
-                val s = sites[which]
-                store.setCurrent(s.key)
-                switchToSite(s)
-            }
-            .setNegativeButton("管理站点") { _, _ ->
-                runCatching { startActivity(Intent(this, SitesActivity::class.java)) }
-            }
-            .show()
-    }
-
-    /**
-     * 切换站点（对齐原版 HomeActivity.setSite）：
-     * 原版仅 VodConfig.setHome(item) 持久化当前站 + homeContent() 重新拉首页，
-     * 不重新 init 全部站点。此处同样只注册该站（如未注册）并拉取它的 home。
-     */
-    private fun switchToSite(site: Site) {
-        categories.clear()
-        vods.clear()
-        recommends.clear()
-        (catList.adapter as ListAdapter).notifyDataSetChanged()
-        vodAdapter.notifyDataSetChanged()
-        (findViewById<RecyclerView>(R.id.recommendList).adapter as? VideoAdapter)?.notifyDataSetChanged()
-        findViewById<View>(R.id.mainBody)?.visibility = View.GONE
-        findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
-        findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
-        syncPageRows()
-        findViewById<TextView>(R.id.title).text = getString(R.string.app_name) + " · " + site.name
-        showEmpty("")
-        siteKey = site.key
-        Toast.makeText(this, "已切换到「${site.name}」，正在刷新…", Toast.LENGTH_SHORT).show()
-
-        Thread {
-            try {
-                val dir = filesDir.absolutePath
-                // csp_ 源由 CspLoader 执行（实例已缓存），其余站重新注册该站即可
-                if (!site.isCsp()) {
-                    registerSite(site, site.key, dir, Settings(this).ua)
-                }
-                val home = if (site.isCsp()) {
-                    CspLoader.home(this, site)
-                } else {
-                    Engine.execute("home", site.key, "{}")
-                }
-                Log.e("XingHuiTV", "[switch] homeKey=${site.key} 返回前800: ${home.take(800)}")
-                runOnUiThread { parseHome(home) }
-            } catch (e: Exception) {
-                Log.e("XingHuiTV", "[switch] 切换站点失败 key=${site.key}", e)
-                runOnUiThread { showEmpty("切换失败：${e.message}") }
-            }
-        }.start()
-    }
-
-    /** 进入点播二级页：横向分类 tab + 影片网格（首页入口隐藏） */
-    private fun openCategoryPage() {
-        findViewById<View>(R.id.entryRow)?.visibility = View.GONE
-        findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
-        findViewById<View>(R.id.quickRow)?.visibility = View.GONE
-        findViewById<View>(R.id.mainBody)?.visibility = View.VISIBLE
-        syncPageRows()
-        if (categories.isEmpty()) {
-            showEmpty("未获取到分类列表（首页接口未返回 class 字段）\n按返回键回首页，看首页显示的失败原因")
-            return
-        }
-        if (vods.isEmpty()) categories.firstOrNull()?.let { onCategory(it.first) }
-        catList.requestFocus()
-    }
-
-    /** 返回一级首页：五个入口 + 更新推荐 */
-    private fun backToHome() {
-        findViewById<View>(R.id.mainBody)?.visibility = View.GONE
-        findViewById<View>(R.id.entryRow)?.visibility = View.VISIBLE
-        findViewById<View>(R.id.recommendRow)?.visibility =
-            if (recommends.isNotEmpty()) View.VISIBLE else View.GONE
-        syncPageRows()
-        loadQuickHistory() // 恢复首页历史行（历史/设置可能已变化）
-        findViewById<View>(R.id.btnVod)?.requestFocus()
-    }
-
-    /** 空状态提示（空串则隐藏） */
-    /**
-     * 影片卡片点击分派 —— 严格按原版 VodFragment.onItemClick 的优先级：
-     *   1) isAction → 调 spider.action()，把返回内容当提示展示（配置类站点的功能入口）
-     *   2) isFolder → 是下一级分类，不是影片；二级导航未实现，给出明确提示而不是打开空白详情
-     *   3) 其余     → 正常打开详情
-     * 不做这三段判断时，配置·中心的"检查更新/导出配置"会被当影片打开详情页，永远空白。
-     */
-    private fun openVod(vod: Vod, failTip: String) {
-        if (vod.isAction()) {
-            runCspAction(vod)
-            return
-        }
-        if (vod.isFolder()) {
-            Toast.makeText(this, "「${vod.vodName}」是分类目录（二级导航暂未实现），不是影片", Toast.LENGTH_LONG).show()
-            return
-        }
-        runCatching {
-            startActivity(Intent(this, DetailActivity::class.java).putExtra("vod_id", vod.vodId))
-        }.onFailure { e ->
-            Toast.makeText(this, "$failTip：${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    /** 执行站点 action 并展示结果（多数 action 返回 {"list":[...]} 或纯文本提示） */
-    private fun runCspAction(vod: Vod) {
-        val site = runCatching {
-            SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
-        }.getOrNull()
-        if (site == null || !site.isCsp()) {
-            Toast.makeText(this, "该功能仅 csp 站点支持（api=${site?.api.orEmpty()}）", Toast.LENGTH_LONG).show()
-            return
-        }
-        Thread {
-            // spider 的 action 会把真正的写入动作再丢进它自己的线程池（见 installCrashReporter 注释），
-            // 这里保护的是当前这条线程本身：反射路径上的 Error（NoSuchMethodError 等）一旦逃逸也是闪退。
-            val raw = runCatching { CspLoader.action(this, site, vod.action) }
-                .getOrElse { e ->
-                    JSONObject().put("code", -1)
-                        .put("msg", "action 异常：${e.javaClass.simpleName}: ${e.message}")
-                        .toString()
-                }
-            runOnUiThread {
-                runCatching {
-                    val o = runCatching { JSONObject(raw) }.getOrNull()
-                    val list = o?.optJSONArray("list")
-                    if (list != null && list.length() > 0) {
-                        // action 返回了影片列表（少数站点用它做"更多"），直接铺到首页推荐区
-                        val parsed = Vod.parseList(raw)
-                        recommends.clear()
-                        recommends.addAll(parsed)
-                        recommendAdapter.notifyDataSetChanged()
-                        showHomeHint("${vod.vodName}：返回 ${parsed.size} 条")
-                    } else {
-                        val msg = o?.optString("msg").orEmpty().ifBlank { raw.take(200) }
-                        // Config.action 恒返回空串（真正写入在它的异步 Runnable 里完成），
-                        // 空返回值不代表失败，给一句明确的"已提交"，比一片空白可读得多。
-                        showHomeHint(if (msg.isBlank()) "${vod.vodName}：已提交（该动作在站点内部异步执行）" else "${vod.vodName}\n$msg")
-                    }
-                }.onFailure { e ->
-                    showHomeHint("${vod.vodName}：结果显示失败 ${e.javaClass.simpleName}: ${e.message}")
-                }
-            }
-        }.start()
-    }
-
-    /**
-     * 页面态收敛（治拼屏）：
-     * 之前 entryRow / quickRow / recommendRow / mainBody 四个区块各自由不同代码路径 setVisibility，
-     * 任一路径漏掉一项就会「首页入口行 + 二级页/配置页」叠在同一屏上（截图里搜索/收藏/历史压着卡片）。
-     * 这里统一以 mainBody 是否为 VISIBLE 作为唯一真值，其它三块全部反着设。
-     */
-    private fun syncPageRows() {
-        val inMain = findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE
-        // contentPager 里只有两页：homeContent（首页）/ mainBody（分类页）。
-        // mainBody 自身无背景（透明），所以必须把 homeContent 整页藏掉，
-        // 否则下层推荐网格会透上来 —— 这正是之前「卡片压在海报上」的真因。
-        findViewById<View>(R.id.homeContent)?.visibility = if (inMain) View.GONE else View.VISIBLE
-        findViewById<View>(R.id.entryRow)?.visibility = if (inMain) View.GONE else View.VISIBLE
-        if (inMain) {
-            findViewById<View>(R.id.quickRow)?.visibility = View.GONE
-            findViewById<View>(R.id.recommendRow)?.visibility = View.GONE
-        } else {
-            findViewById<View>(R.id.quickRow)?.visibility =
-                if (quickListEmpty()) View.GONE else View.VISIBLE
-            findViewById<View>(R.id.recommendRow)?.visibility =
-                if (recommends.isEmpty()) View.GONE else View.VISIBLE
-        }
-    }
-
-    private fun quickListEmpty(): Boolean =
-        (findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.quickList)?.adapter?.itemCount ?: 0) == 0
-
-    private fun showEmpty(msg: String) {
-        // 每次刷新提示都顺带收敛一次，因为异步解析/回包可能晚于页面切换
-        findViewById<View>(R.id.mainBody)?.post { syncPageRows() }
-        findViewById<TextView>(R.id.tvEmpty)?.apply {
-            text = msg
-            visibility = if (msg.isEmpty()) View.GONE else View.VISIBLE
-        }
-    }
-
-    @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        if (findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE) {
-            backToHome()
+        if (playMode) { exitPlayLayer(); return }
+        // 全屏时返回键先退全屏，不直接退出页面（对齐原版 mKeyDown 的返回语义）
+        if (inlineFullscreen) {
+            exitInlineFullscreen()
             return
         }
         super.onBackPressed()
     }
 
-    private fun onCategory(tid: String) {
-        // 切分类先刷新该分类的筛选栏，再把用户已选条件带进请求（原版 FilterDialog → extend）
-        renderFilters(tid)
-        // 切分类 = 回到第 1 页并清空旧列表（原版 VodFragment.mPages.reset）
-        currentTid = tid
-        currentPage = 0
-        pageCount = 0
-        loadingMore = false
-        lastEmptyPage = 0
-        vods.clear()
-        vodAdapter.notifyDataSetChanged()
-        // 清列表时必须同步清掉「影片 N 条」和上一站/上一分类留下的空态提示。
-        // 否则 vods 已经清成 0 条，界面还挂着旧的「影片 48 条」+ 旧提示，
-        // 看起来像"有 48 条但一条都不显示"，实际是 0 条。
-        findViewById<TextView>(R.id.labelVod).text = "影片 0 条"
-        showEmpty("")
-        loadCategoryPage(tid, 1, append = false)
+    /** 把内嵌播放器当前进度写回历史（原版 updateHistory 里 setPosition 那条） */
+    private fun saveInlinePosition() {
+        val v = vod ?: return
+        val ep = episodes.getOrNull(playingIdx) ?: return
+        val pos = runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
+        if (pos > 1000) runCatching {
+            HistoryStore(this).setPosition(HistoryStore.keyOf(v.vodId, v.vodName, ep.second), ep.second, pos)
+        }
+        Log.i("XingHuiTV", "[detail] 保存进度 ${pos}ms ep=${ep.first}")
     }
 
     /**
-     * 拉取分类页第 page 页。
-     * append=false 覆盖列表（切分类/切筛选），append=true 追加（滚到底翻页）。
-     */
-    private fun loadCategoryPage(tid: String, page: Int, append: Boolean) {
-        if (loadingMore) return
-        loadingMore = true
-        val extend = HashMap(selectedFilters[tid].orEmpty())
-        Log.e("XingHuiTV", "[category] tid=$tid pg=$page append=$append extend=$extend")
-        Thread {
-            var json = ""
-            var err: String? = null
-            try {
-                val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
-                json = if (site?.isCsp() == true) {
-                    CspLoader.category(this, site, tid, page.toString(), extend)
-                } else {
-                    // 非 csp（type=1 直连 / js+drpy）也要把筛选值传下去。
-                    // 原版 SiteViewModel:110 是 params.put("f", gson(extend))，只对 type==1；
-                    // js 站则走 spider.categoryContent(tid, pg, filter, extend) 直接带 extend。
-                    // 之前这里只放 tid/pg，导致 34 个 js 站 + 14 个 type=1 站的筛选栏点了完全没反应。
-                    // 引擎侧会剔除 tid/pg 这类控制参数，只把真正的筛选项当 extend。
-                    val params = JSONObject()
-                    extend.forEach { (k, v) -> params.put(k, v) }
-                    params.put("tid", tid).put("pg", page.toString())
-                    Engine.execute("category", siteKey, params.toString())
-                }
-            } catch (e: Exception) {
-                err = e.message
-                Log.e("XingHuiTV", "[category] 请求失败 tid=$tid pg=$page", e)
-            }
-            runOnUiThread {
-                loadingMore = false
-                if (err != null) {
-                    if (!append) showEmpty("加载失败：$err")
-                    return@runOnUiThread
-                }
-                currentPage = page
-                parseCategory(json, append)
-            }
-        }.start()
-    }
-
-    /** 滚到接近底部时加载下一页（对齐原版 CustomScroller.onLoadMore） */
-    private fun maybeLoadMore() {
-        if (loadingMore) return
-        if (currentTid.isBlank() || vods.isEmpty()) return
-        // 原版 setEnable：page < pageCount || pageCount == 0 时才允许继续翻
-        if (pageCount > 0 && currentPage >= pageCount) return
-        // 上一页已经确认为空，就别再请求它（原版 endLoading 里的 page-- 就是这个意思）
-        if (currentPage + 1 == lastEmptyPage && lastEmptyPage > 1) return
-        loadCategoryPage(currentTid, currentPage + 1, append = true)
-    }
-
-    // ---------- 分类筛选（对齐原版 Result.filters / FilterDialog） ----------
-
-    private data class FilterGroup(
-        val key: String,
-        val name: String,
-        val values: List<Pair<String, String>>,  // (显示名, 传给站点的值)
-        val init: String = "",                   // 原版 Filter.init：该组的默认选中值
-        // 原版 Class.getExtend 的判断是 filter.getInit() != null，
-        // 这和"init 的值是空字符串"是两回事：有 init 但值为空串，同样要 put 进 extend。
-        val hasInit: Boolean = false
-    )
-
-    private val filtersByType = mutableMapOf<String, List<FilterGroup>>()
-    private val selectedFilters = mutableMapOf<String, MutableMap<String, String>>()
-
-    private fun px(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-
-    /** 解析 homeContent 的 filters 字段；没有就清空（不同站点结构差异很大，全部 runCatching 兜住） */
-    private fun parseFilters(root: JSONObject) {
-        filtersByType.clear()
-        selectedFilters.clear()
-        val fo = runCatching { root.optJSONObject("filters") }.getOrNull() ?: return
-        for (tid in fo.keys()) {
-            val arr = fo.optJSONArray(tid) ?: continue
-            val groups = (0 until arr.length()).mapNotNull { i ->
-                val f = arr.optJSONObject(i) ?: return@mapNotNull null
-                val key = f.optString("key")
-                if (key.isBlank()) return@mapNotNull null
-                val vals = f.optJSONArray("value")?.let { va ->
-                    (0 until va.length()).mapNotNull { j ->
-                        va.optJSONObject(j)?.let { v -> v.optString("n") to v.optString("v") }
-                    }
-                } ?: emptyList()
-                FilterGroup(key, f.optString("name").ifBlank { key }, vals,
-                    f.optString("init"), f.has("init"))
-            }
-            if (groups.isNotEmpty()) {
-                filtersByType[tid] = groups
-                val sel = selectedFilters.getOrPut(tid) { mutableMapOf() }
-                // 1) 先恢复用户上次在该分类选过的条件（原版从 SharedPreferences 读回 activated 状态）
-                restoreFilterSelection(tid, groups, sel)
-                // 2) 没恢复到的组，再用 init 默认值补（对齐原版 Class.getExtend）
-                //    原版是无条件 extend.put(key, init)：只要该组有 init 字段就写进去，
-                //    哪怕 init 是空字符串。空串和"没有这个 key"对站点是两种不同的参数组合，
-                //    所以这里不能因为 init 为空就跳过，否则 extend 会缺键。
-                groups.forEach { g ->
-                    if (sel[g.key] == null && g.hasInit) sel.putIfAbsent(g.key, g.init)
-                }
-            }
-        }
-        Log.e("XingHuiTV", "[filters] 解析到 ${filtersByType.size} 个分类的筛选项，" +
-            "预置默认值 ${selectedFilters.values.sumOf { it.size }} 个")
-    }
-
-    /** 二级页顶部筛选栏：每个筛选组一个按钮，显示当前选中值 */
-    private fun renderFilters(tid: String) {
-        val row = findViewById<View>(R.id.filterRow) ?: return
-        val list = findViewById<LinearLayout>(R.id.filterList) ?: return
-        val groups = filtersByType[tid]
-        if (groups.isNullOrEmpty()) {
-            row.visibility = View.GONE
-            return
-        }
-        row.visibility = View.VISIBLE
-        list.removeAllViews()
-        val sel = selectedFilters.getOrPut(tid) { mutableMapOf() }
-        groups.forEach { g ->
-            val cur = sel[g.key].orEmpty()
-            val label = g.values.firstOrNull { it.second == cur }?.first ?: g.name
-            val btn = TextView(this).apply {
-                text = label
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 15f
-                setPadding(px(14), px(6), px(14), px(6))
-                background = getDrawable(R.drawable.selector_tv_btn)
-                isFocusable = true
-                setOnClickListener { showFilterDialog(tid, g) }
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { marginEnd = px(10) }
-            }
-            list.addView(btn)
-        }
-    }
-
-    /** 点筛选组 → 弹出取值列表（TV 遥控器可直接上下选）；选中后重新请求该分类 */
-    private fun showFilterDialog(tid: String, g: FilterGroup) {
-        if (g.values.isEmpty()) return
-        val labels = g.values.map { it.first.ifBlank { it.second }.ifBlank { "默认" } }
-        AlertDialog.Builder(this)
-            .setTitle(g.name)
-            .setItems(labels.toTypedArray()) { _, which ->
-                val v = g.values[which].second
-                val m = selectedFilters.getOrPut(tid) { mutableMapOf() }
-                // 对齐原版 VodFragment.setClick：选中才 put，取消要 remove。
-                // 原版靠 Value.setActivated 的切换语义实现"取消"（再点一次变 false → mExtends.remove），
-                // 而"全部"这类项的值通常就是空串。无条件 put 会让 extend 里出现 key=""，
-                // 站点收到空参数可能直接返回空列表 —— 这就是筛选后"影片 0 条"的来源之一。
-                if (v.isBlank()) m.remove(g.key) else m[g.key] = v
-                saveFilterSelection(tid, m)
-                renderFilters(tid)
-                onCategory(tid)
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    // ---------- 筛选条件持久化（对齐原版 Prefers "filter_<站key>_<分类tid>"） ----------
-    // 原版 HomeActivity:216 / VodActivity:56 把 homeContent 返回的 filters（含 activated 标记）
-    // 整个序列化进 SharedPreferences，下次进同一分类直接读回来，用户的选择不会丢。
-    private fun filterPrefKey(tid: String): String = "filter_${siteKey}_$tid"
-
-    private fun saveFilterSelection(tid: String, sel: Map<String, String>) {
-        runCatching {
-            val o = JSONObject()
-            sel.forEach { (k, v) -> if (v.isNotBlank()) o.put(k, v) }
-            getSharedPreferences("xinghui_filters", MODE_PRIVATE)
-                .edit().putString(filterPrefKey(tid), o.toString()).apply()
-        }
-    }
-
-    /** 恢复上次的选择；只保留当前 values 里确实存在的值（站点改版后旧值会失效） */
-    private fun restoreFilterSelection(tid: String, groups: List<FilterGroup>, sel: MutableMap<String, String>) {
-        runCatching {
-            val raw = getSharedPreferences("xinghui_filters", MODE_PRIVATE)
-                .getString(filterPrefKey(tid), null) ?: return
-            val o = JSONObject(raw)
-            groups.forEach { g ->
-                val v = o.optString(g.key, "")
-                if (v.isNotBlank() && g.values.any { it.second == v }) sel[g.key] = v
-            }
-        }
-    }
-
-    private fun parseHome(json: String) {
-        categories.clear()
-        vods.clear()
-        recommends.clear()
-        // 切站/刷新首页 = 翻页状态归零（原版换源后 VodFragment.mPages 清空）
-        currentTid = ""
-        currentPage = 0
-        pageCount = 0
-        loadingMore = false
-
-        // 卡片形态跟随站点 Style（订阅里 51/157 站带 style）：
-        // 体育/网盘/听书站 type=list 要整行横条，影视站 ratio=1.33、教育站 1.618 要压扁海报。
-        // 放在 parseHome 入口统一执行，首屏与切站都会走到这里。
-        runCatching {
-            SubscriptionStore(this@MainActivity).currentSite()?.let { applyCardStyle(it) }
-        }.onFailure { Log.e("XingHuiTV", "[style] 应用卡片形态失败", it) }
-
-        // 首页 JSON 为空/不可解析时，不再留黑屏：直接显示原因（用户截图即可定位）
-        val root = runCatching { JSONObject(json) }.getOrNull()
-        if (root == null) {
-            val reason = if (json.isBlank()) "站点未返回首页数据（返回为空）"
-            else "站点返回无法解析：${json.take(100)}"
-            Log.e("XingHuiTV", "[parseHome] $reason")
-            refreshLists()
-            updateTitle()
-            showHomeHint("$reason\n请点「点播」浏览分类，或点右上角「站点」切换站源")
-            return
-        }
-
-        // class / list 分开解析：任一字段缺失都不再拖垮另一个（原实现同块解析，class 抛异常会连带推荐行全丢）
-        runCatching {
-            root.optJSONArray("class")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val c = arr.optJSONObject(i) ?: continue
-                    // 对齐原版 Class.java 的 @SerializedName(value="type_id", alternate="id")
-                    // —— 兼容的是 id / name，不是驼峰 typeId/typeName
-                    val id = c.optString("type_id").ifBlank { c.optString("id") }
-                    val name = c.optString("type_name").ifBlank { c.optString("name") }
-                    if (id.isNotBlank()) categories.add(id to name)
-                }
-            }
-        }.onFailure { Log.e("XingHuiTV", "[parseHome] class 字段解析失败 json前200: ${json.take(200)}", it) }
-
-        // 分类白名单，对齐原版 HomeActivity:185：
-        //   for (String cate : site.getCategories())
-        //       for (Class item : result.getTypes())
-        //           if (Trans.s2t(cate).equals(item.getTypeName())) items.add(item);
-        // 订阅里 8/157 站带 categories（多是直连采集站，接口会返回全站分类），
-        // 不过滤就会多出一排站点本身不返回内容的分类 tab，点进去全空。
-        runCatching {
-            val site = SubscriptionStore(this).sites().firstOrNull { it.key == siteKey }
-            if (site != null && site.categories().isNotEmpty()) {
-                val filtered = site.filterCategories(categories)
-                Log.e("XingHuiTV", "[parseHome] 分类白名单 ${site.categories().size} 项，" +
-                    "原 ${categories.size} 个 → 保留 ${filtered.size} 个")
-                categories.clear()
-                categories.addAll(filtered)
-            }
-        }
-
-        // 分类筛选（对齐原版 Result.filters：{type_id: [{key,name,value:[{n,v}]}]}）
-        parseFilters(root)
-
-        runCatching { recommends.addAll(Vod.parseList(json)) }
-            .onFailure { Log.e("XingHuiTV", "[parseHome] list 字段解析失败 json前200: ${json.take(200)}", it) }
-
-        refreshLists()
-        updateTitle()
-
-        if (recommends.isNotEmpty()) {
-            // 只有首页态才点亮推荐区：分类页里 mainBody 才是主体。
-            // 这里无条件 VISIBLE 会在「进点播 → 返回 → 首页在后台刷新完成」时
-            // 把推荐区和列表区同时打开，屏幕上就是上半屏首页推荐 + 下半屏分类列表拼一起。
-            val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
-            findViewById<View>(R.id.recommendRow)?.visibility =
-                if (onHome) View.VISIBLE else View.GONE
-            findViewById<TextView>(R.id.recommendLabel).text = "更新推荐 · 共 ${recommends.size} 部"
-        } else {
-            // 首页无推荐时的可读提示（区分「站点没给推荐」与「接口没通」）
-            val msg = root.optString("msg", "")
-            val jar = SubscriptionStore(this).jar()
-            val siteJar = SubscriptionStore(this).currentSite()?.jar ?: ""
-            val jarState = when {
-                jar.isBlank() -> "jar=空"
-                !jar.startsWith("http") -> "jar=非URL(${jar.take(50)})"
-                else -> "jar=${jar.substringAfterLast('/').take(40)}"
-            }
-            showHomeHint(
-                (if (msg.isNotBlank()) "站点提示：$msg" else "本站未提供首页推荐（分类 ${categories.size} 个）")
-                    + "\n$jarState / site.jar=" + (if (siteJar.isBlank()) "空" else siteJar.take(40))
-                    + "\n请点「点播」浏览分类" +
-                    (if (categories.isEmpty()) "；若点播也空，点右上角「站点」换源" else "")
-            )
-        }
-
-        // 仅当已在点播二级页时才预载首个分类（首页不预载，避免无谓请求）
-        if (findViewById<View>(R.id.mainBody)?.visibility == View.VISIBLE) {
-            categories.firstOrNull()?.let { onCategory(it.first) }
-        }
-    }
-
-    /** 首页提示行：复用 recommendRow/Label 位置，避免内容区纯黑无任何可读信息 */
-    /**
-     * 申请存储权限。
+     * 预览播放器只有一路出声：离开本页、或转去独立播放页之前必须先停。
      *
-     * 配置·中心的三类功能落点不同：
-     *   网盘线程 / GO 代理版本 → <filesDir>/Pizazz/config.json，私有目录，无权限也能写；
-     *   Cookie / Token          → /sdcard/TVBox 下的 quark_cookie.txt 等文本文件，
-     *                             spider 用 getExternalStorageDirectory() 拼路径。
-     * 缺 WRITE_EXTERNAL_STORAGE 时，输入框照常弹出、也照常提示保存成功，
-     * 但写文件那一步拿到的是 EACCES —— 结果就是"设置过了，实际一个字没写"。
-     * targetSdk 34 在 API 25 上同样走运行时权限，必须显式请求。
-     */
-    private fun ensureStoragePermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        val need = arrayOf(
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        )
-        if (need.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) return
-        runCatching { requestPermissions(need, 0x101) }
-            .onFailure { Log.e("XingHuiTV", "[perm] 存储权限申请失败", it) }
-    }
-
-    /**
-     * Cookie 的实际落点是 /sdcard/TVBox/<名字>.txt（spider 用 getExternalStorageDirectory() 拼），
-     * 目录不存在时它那侧写文件直接失败。宿主先把目录建好，省得第一次设置就写不进去。
-     */
-    @Suppress("DEPRECATION")
-    private fun ensureTvBoxDir() {
-        runCatching {
-            val d = File(Environment.getExternalStorageDirectory(), "TVBox")
-            if (!d.exists() && !d.mkdirs()) {
-                Log.e("XingHuiTV", "[perm] TVBox 目录创建失败（多半是还没授权存储权限）")
-            }
-        }.onFailure { Log.e("XingHuiTV", "[perm] 建 TVBox 目录异常", it) }
-    }
-
-    /**
-     * 崩溃现场留痕 + spider 后台线程异常兜底。
+     * 真机上表现为「播放有时会有两个不同的声音」—— 原因就是这里：
+     * 详情页内嵌预览是我们自己加的（原版 VodActivity 里没有任何播放器，只有列表和详情），
+     * 跳去 PlayActivity 时本页只是走到 onPause，之前只保存进度、没有 pause，
+     * 预览那一路音频继续在响，和新起的播放页叠在一起，所以「有时」（预览正在播时才会）。
      *
-     * 两件事必须分开看：
-     *  1) 盒子上没有 logcat 时，"点一下就闪退"等于零信息：进程被 ART 直接杀掉，
-     *     任何 Toast / 界面提示都来不及显示。所以先把线程名 + 完整堆栈落到 filesDir/crash.log。
-     *  2) csp_Config 这类站点的卡片 action 是异步的：Config.action 只有 12 个指令字，
-     *     真正的写入动作被包成 Runnable 丢进 spider 自己的 ExecutorService（Init.execute）。
-     *     那个线程不受宿主任何 try/catch 保护，一旦抛异常就是整进程闪退。
-     *     这里识别"栈里有 com.github.catvod 帧"的线程，记录后吞掉，让进程活下来，
-     *     并把失败原因贴到界面上 —— 否则用户只会看到"点了没反应然后退回桌面"。
+     * mpv 内核不申请音频焦点，EXO 内核离开焦点也不一定立刻停，
+     * 所以不能指望系统帮忙，必须自己停。
      */
-    private fun installCrashReporter() {
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            val trace = runCatching {
-                val sw = StringWriter()
-                e.printStackTrace(PrintWriter(sw))
-                sw.toString()
-            }.getOrDefault("")
+    /**
+     * 进播放页前直接释放内嵌预览。
+     * 只 pause 不 release 时，详情页这一路 ExoPlayer（含解码器、缓冲）会和播放页那一路同时活着，
+     * 2GB 的盒子上等于两套解码器常驻；这也是「两个声音」的结构性来源之一。
+     * 返回时用 buildInlinePlayer() + inlineUrl 就地重建，不再重新解析接口。
+     */
+    /**
+     * 进播放页前的收尾：暂停预览、把画面层摘掉，但**保留** ExoPlayer 实例。
+     *
+     * 为什么不再 release：
+     *   release 之后返回只能 buildInlinePlayer() 重建 + prepare()，
+     *   重建必然走 IDLE → BUFFERING → READY，小窗要转一次圈 —— 用户看到的就是
+     *   "回来了但又要重新加载画面"。保留实例后它一直是 READY，返回时
+     *   seekTo + play 即可，画面几乎立刻就在。
+     * 代价只是一个**暂停态**的 ExoPlayer 在播放页期间活着（不是第二路在播，
+     * 不会有两个声音、也不占解码带宽）；onDestroy 里已有 player?.release() 兜底。
+     * 若播放页期间进程被回收导致实例没了，onResume 里的 `player ?: buildInlinePlayer()`
+     * 会自动退回原来的重建路径。
+     */
+    private fun detachInlinePlayback() {
+        runCatching {
+            player?.let { if (it.isPlaying) it.pause() }
+            detachSurfaceFrom()
+            Log.i("XingHuiTV", "[detail] 离开页面，预览已暂停并摘掉画面（实例保留，返回可续上）")
+        }
+    }
+
+    private fun releaseInlinePlayback() {
+        runCatching {
+            detachSurfaceFrom()
+            player?.release()
+            player = null
+            Log.i("XingHuiTV", "[detail] 离开页面，预览播放器已释放")
+        }
+    }
+
+    private fun pauseInlinePlayback() {
+        runCatching {
+            val p = player ?: return@runCatching
+            if (p.isPlaying || p.playWhenReady) {
+                inlinePausedByLeave = true
+                p.pause()
+                Log.i("XingHuiTV", "[detail] 离开页面，预览播放器已暂停")
+            }
+        }
+    }
+
+    override fun onPause() {
+        if (playMode) playLayer?.onHostPause()
+
+        // 退到后台、按返回、切播放页，都先落一次进度；否则只有正常看完才记得住
+        saveInlinePosition()
+        // 同时停声：只落进度不停播放，离开页面后音频会继续在后台响
+        pauseInlinePlayback()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        if (playMode) playLayer?.onHostResume()
+
+        super.onResume()
+        // 分两种「回来」：
+        //   1. 从我们自己的播放页返回 → 预览要继续播（否则小窗停在离开时那一帧，
+        //      看着像卡住/退回第一屏）；这是本页自己发起的跳转，续播是预期行为
+        //   2. 从别处回来（首页回来、系统弹窗回来）→ 保持原样，不自动出声
+        if (inlineResumeOnReturn) {
+            inlineResumeOnReturn = false
+            if (inlineLeaveFullscreen) {
+                // 离开时是全屏预览 → 回到全屏预览。
+                // 跳转前刻意没动布局，9 个视图还是 GONE、playerBox 还是全屏参数，
+                // 所以这里只要把画面层恢复可见并把焦点还给 playerBox，不需要再叠一次全屏。
+                inlineLeaveFullscreen = false
+                runCatching {
+                    setPreviewVisible(true)
+                    findDetail<FrameLayout>(R.id.playerBox)?.requestFocus()
+                }
+            } else {
+                // 离开时是小窗 → 回到小窗。
+                // 跳转前 was GONE（见 openPlayPage 的说明），回来先恢复可见，
+                // 否则重建预览时画面在窗外、小窗是黑的
+                runCatching { setPreviewVisible(true) }
+                // ★从播放页回来先把「全屏预览」复位。
+                //   进播放页的两条路（小窗全屏 enterInlineFullscreen、转独立播放页 openPlayPage）
+                //   都会把 inlineFullscreen 置为 true 并**一直保留**，而它只在详情页自己的返回键里
+                //   才会复位。于是从播放页按返回时，看到的是「铺满整页的预览」，还得再按一次返回
+                //   才回到详情页 —— 这就是"要按两次"的结构性来源（原版没有内嵌预览，没有这个状态）。
+                if (inlineFullscreen) runCatching { exitInlineFullscreen() }
+            }
+            // ★画面层要在这里就挂回去：下面「换过集」那条分支会直接 playInline() 后 return，
+            //   走不到后面重建段的挂载。实例被保留时它是 READY，挂上就能出画面。
             runCatching {
-                File(filesDir, "crash.log").writeText(
-                    "time=" + SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()) + "\n" +
-                        "thread=" + t.name + "\n" + trace
-                )
+                val p0 = player
+                if (p0 != null && !previewAttached()) attachSurfaceTo(p0)
             }
-            Log.e("XingHuiTV", "[crash] thread=${t.name}", e)
-
-            // 这条异常是 spider 内部线程抛的：宿主既改不了它的字节码，也包不住它的线程，
-            // 吞掉是唯一能让进程不倒的办法；原因回吐到界面上，不静默。
-            val fromSpider = e.stackTrace.any {
-                it.className.startsWith("com.github.catvod")
-            } || e.cause?.stackTrace?.any { it.className.startsWith("com.github.catvod") } == true
-            if (fromSpider) {
-                val msg = e.javaClass.simpleName + ": " + e.message
-                Handler(Looper.getMainLooper()).post {
-                    runCatching {
-                        Toast.makeText(
-                            this,
-                            "站点内部线程异常（已拦截，未闪退）\n$msg",
-                            Toast.LENGTH_LONG
-                        ).show()
+            // 在独立播放页里换过集：集号以历史里最后记下的那一集为准。
+            // 不这样做，返回后小窗会退回离开前那一集 —— 就是「选了第 3 集，退回来又变第 1 集」。
+            val v0 = vod
+            if (v0 != null) {
+                val key0 = HistoryStore.keyOf(v0.vodId, v0.vodName, episodes.getOrNull(playingIdx)?.second)
+                val lastEp = runCatching { HistoryStore(this).lastEpUrl(key0) }.getOrDefault("")
+                if (lastEp.isNotBlank()) {
+                    val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == lastEp }
+                    if (idx >= 0 && idx != playingIdx) {
+                        Log.i("XingHuiTV", "[detail] 播放页换集过：${playingIdx} → $idx，按该集重建预览")
+                        playInline(idx, quiet = true)
+                        // 这条分支直接 return，不经过下面的续播段，焦点要在这里补一次，
+                        // 否则同样会落到"没有任何视图持有焦点"的样子。
+                        findDetail<View>(R.id.detailList)?.requestFocus()
+                        return
                     }
                 }
-                return@setDefaultUncaughtExceptionHandler
             }
-            prev?.uncaughtException(t, e)
-        }
-    }
-
-    /** 上次崩溃摘要（无则空串）。只取异常类型行 + 第一处业务栈帧，避免整屏堆栈盖住界面 */
-    private fun lastCrashSummary(): String {
-        val f = File(filesDir, "crash.log")
-        if (!f.exists()) return ""
-        val lines = runCatching { f.readLines() }.getOrDefault(emptyList())
-        if (lines.isEmpty()) return ""
-        val typeLine = lines.firstOrNull {
-            it.startsWith("java.") || it.startsWith("kotlin.") ||
-                it.contains("Exception") || it.contains("Error")
-        } ?: return ""
-        val frame = lines.firstOrNull {
-            val s = it.trimStart()
-            s.startsWith("at com.xinghui") || s.startsWith("at com.github.catvod")
-        }?.trim()
-        return "上次崩溃：" + typeLine.trim() + (frame?.let { "\n  $it" } ?: "")
-    }
-
-    private fun showHomeHint(text: String) {
-        // 同 parseHome：分类页态不点亮首页提示区，否则会和列表区叠在一起
-        val onHome = findViewById<View>(R.id.mainBody)?.visibility != View.VISIBLE
-        findViewById<View>(R.id.recommendRow)?.visibility = if (onHome) View.VISIBLE else View.GONE
-        findViewById<TextView>(R.id.recommendLabel)?.text = text
-    }
-
-    private fun refreshLists() {
-        (catList.adapter as ListAdapter?)?.notifyDataSetChanged()
-        vodAdapter.notifyDataSetChanged()
-        (findViewById<RecyclerView>(R.id.recommendList)?.adapter as? VideoAdapter)?.notifyDataSetChanged()
-    }
-
-    private fun updateTitle() {
-        val siteName = SubscriptionStore(this).currentSite()?.name ?: "未配置站点"
-        // 对齐原版 activity_home.xml：顶栏标题就是当前站点名（原版显示「瓜子·影视」）。
-        // 之前把 app 名拼在前面（「星汇 TV · 苹果·APP」），长度翻倍把顶栏撑得很宽，
-        // 与红圈标出的原版比例对不上；品牌由左侧 logo 承担。
-        findViewById<TextView>(R.id.title).text = siteName
-    }
-
-    /**
-     * 把海报加载结果直接写在「影片 N 条」那一行后面，截图就能判断，不用连 adb。
-     *
-     * 判据：
-     *   封面0          → 站点没给 vod_pic，加载器再改也没用，要回去查字段映射
-     *   封面N · 图0/N  → URL 有但一张都没下来，后面跟的首条失败原因说明卡在哪一步
-     *   图N/N          → 正常
-     */
-    private fun updatePosterDiag() {
-        runCatching {
-            val label = findViewById<TextView>(R.id.labelVod) ?: return
-            val withPic = vods.count { it.vodPic.isNotBlank() }
-            val sb = StringBuilder()
-            sb.append("影片 ${vods.size} 条 ｜ 封面$withPic · 图")
-            sb.append("${AsyncImageLoader.okCount}/${vods.size}")
-            if (AsyncImageLoader.failCount > 0) sb.append(" 失败${AsyncImageLoader.failCount}")
-            val reason = AsyncImageLoader.lastFailReason
-            if (reason.isNotBlank()) sb.append(" ｜ ${reason.take(50)}")
-            label.text = sb.toString()
-            Log.e("XingHuiTV", "[poster] 封面=$withPic/${vods.size} ok=${AsyncImageLoader.okCount} " +
-                "fail=${AsyncImageLoader.failCount} empty=${AsyncImageLoader.emptyCount} 首因=$reason")
-        }
-    }
-
-    private fun parseCategory(json: String, append: Boolean = false) {
-        if (!append) {
-            vods.clear()
-            // 每页重新计数，否则诊断里的数字会跨页累加，看不出这一页的真实情况
-            AsyncImageLoader.resetDiag()
-        }
-        val parsed = runCatching { Vod.parseList(json) }
-            .onFailure { e -> Log.e("XingHuiTV", "[parseCategory] 解析失败 json前300: ${json.take(300)}", e) }
-            .getOrElse { emptyList() }
-        vods.addAll(parsed)
-        // 总页数（原版 Result.pagecount → CustomScroller.setEnable：page < pageCount || pageCount == 0）
-        runCatching { pageCount = JSONObject(json).optInt("pagecount", 0) }.getOrNull()
-        // 海报诊断：把首条原始 key 与所有图像类字段的值打出来。
-        // 分类页海报空白而标题/角标正常时，看这两行即可判断是"字段名没兜住"还是"站点确实没给图"。
-        runCatching {
-            val first = org.json.JSONObject(json).optJSONArray("list")?.optJSONObject(0)
-            if (first != null) {
-                val keys = first.keys().asSequence().toList()
-                Log.e("XingHuiTV", "[parseCategory] 首条 keys=$keys")
-                val imgKeys = keys.filter { k ->
-                    k.contains("pic", true) || k.contains("img", true) ||
-                        k.contains("cover", true) || k.contains("image", true) || k.contains("poster", true)
+            runCatching {
+                // 进播放页时预览已释放，这里就地重建（参数与首次完全一致）
+                val p = player ?: buildInlinePlayer().also { player = it; applyCaptionStyle() }
+                // ★跳转时摘掉了画面层（inlineView.player = null），回来要重新挂上。
+                //   实例若被保留，此刻它是 READY，不需要 prepare，也就不会转圈。
+                runCatching { if (!previewAttached()) attachSurfaceTo(p) }
+                if (p.playbackState == androidx.media3.common.Player.STATE_IDLE) {
+                    if (inlineUrl.isNotBlank()) {
+                        p.setMediaItem(MediaItem.Builder().setUri(inlineUrl).build())
+                    }
+                    p.prepare()
                 }
-                Log.e("XingHuiTV", "[parseCategory] 图像类字段 => " +
-                    imgKeys.joinToString(", ") { k -> "$k='${first.optString(k).take(80)}'" })
+                // 对齐原版 updateHistory:1278-1290：
+                //   同一集才续播（换集本来就回 0），位置取 max(片头, 历史进度)。
+                // 之前只 play() 不定位，小窗一旦进过 IDLE 就从 0 播 —— 真机上就是「先回到片头」。
+                val v = vod
+                val ep = episodes.getOrNull(playingIdx)?.second
+                if (v != null && !ep.isNullOrBlank()) {
+                    val key = HistoryStore.keyOf(v.vodId, v.vodName, ep)
+                    val store = HistoryStore(this)
+                    // 一次读出片头与本集进度（原来分别解析两遍历史 JSON）
+                    val m = store.marks(key, ep)
+                    val at = maxOf(m[0], m[2])
+                    if (at > 0) runCatching { p.seekTo(at) }
+                    Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播 at=${at}ms")
+                } else {
+                    Log.i("XingHuiTV", "[detail] 从播放页返回，预览续播 at=0ms")
+                }
+                p.play()
+                // 回到本页后焦点要落到集数列表上：SurfaceView 重建期间焦点常常是空的，
+                // 真机表现就是「黑一下，得再按一次才好使」。这里主动收一次焦点。
+                findDetail<View>(R.id.detailList)?.requestFocus()
             }
-            Log.e("XingHuiTV", "[parseCategory] 本页 ${parsed.size} 条，累计 ${vods.size} 条，" +
-                "有封面 ${vods.count { it.vodPic.isNotBlank() }} 条，pg=$currentPage pagecount=$pageCount")
         }
-        if (append && parsed.isNotEmpty()) {
-            // 追加时只刷新新增区间，避免整表重绘导致焦点跳动
-            vodAdapter.notifyItemRangeInserted(vods.size - parsed.size, parsed.size)
-        } else {
-            vodAdapter.notifyDataSetChanged()
-        }
-        // 对齐原版 CustomScroller.endLoading：
-        //   if (result.getList().isEmpty()) page--;
-        // 目的是记住"这一页是空的"，别在滚到底时反复请求同一空页。
-        if (append && parsed.isEmpty()) lastEmptyPage = currentPage
-        // 首条影片的形态决定整页（原版 VodFragment: result.getStyle(getStyle())）。
-        // 只在首页（非追加）时应用，避免翻页过程中反复改列数导致焦点跳动。
-        if (!append && parsed.isNotEmpty()) applyPageStyle(parsed.first())
-        findViewById<TextView>(R.id.labelVod).text = "影片 ${vods.size} 条"
-        // 海报诊断上屏。TV 上抓 logcat 麻烦，海报空白时最要紧的是分清两类失败：
-        //   vod_pic 本来是空的（数据侧，改加载器没用）
-        //   vod_pic 有值但一张没下来（加载侧，UA/防盗链/代理/解码）
-        // 延迟两秒再刷新，是因为图片下载在后台线程池里异步完成，立刻取只能全 0。
-        findViewById<TextView>(R.id.labelVod)?.postDelayed({ updatePosterDiag() }, 2500)
-        // 空列表时把接口原始返回摘要直接显示在页面上。TV 上抓 logcat 麻烦，截图就能定位：
-        //   code=-1 + msg=csp 未就绪     → jar/init 的问题，msg 里有 jar 路径
-        //   code=-1 + msg=...返回空      → spider 该接口没给内容，msg 里有反射异常 / ext / 网络诊断
-        //   list.len=0 code=0            → 接口正常但该分类确实为空（网盘/配置类站点的正常表现）
-        //   raw=...                      → 返回体连 JSON 都不是
-        if (vods.isEmpty()) {
-            val diag = runCatching {
-                val o = JSONObject(json)
-                val n = o.optJSONArray("list")?.length() ?: -1
-                val code = o.optInt("code", 0)
-                val msg = o.optString("msg")
-                // 放宽到 200 字：诊断里要能放下 invoke 异常、init 原因和网络诊断，截 60 会丢关键信息
-                "list.len=$n code=$code" + (if (msg.isNotBlank()) "\nmsg=${msg.take(200)}" else "")
-            }.getOrDefault("raw=${json.take(80).ifBlank { "（空字符串）" }}")
-            // 实测结论：若 invoke=无异常却始终为空，绝大多数是该站点 ext 里配置的上游源已失效
-            // （荐片 csp_JianPian 配的两个磁力站：一个 HTTP 000 拒连，一个返回 {"code":0,"data":""}）
-            showEmpty("该分类暂无内容（接口返回空）\n$diag\n\n若上面 invoke=无异常，多为该站点配置的上游源已失效，不是解析问题")
-        } else {
-            showEmpty("")
-        }
+        inlinePausedByLeave = false
     }
 
-    private fun readAsset(name: String): String =
-        assets.open(name).bufferedReader().use { it.readText() }
+    override fun onDestroy() {
+        if (playMode) runCatching { playLayer?.onHostDestroy() }
 
-    private fun copyAssetToFiles(name: String, dest: String) {
-        val out = File(dest)
-        if (out.exists()) return
-        assets.open(name).use { input ->
-            out.outputStream().use { output -> input.copyTo(output) }
-        }
+        saveInlinePosition()
+        player?.release()
+        player = null
+        super.onDestroy()
+    }
+
+    /** 简介全文弹窗（支持点击链接），对应原项目 DescDialog */
+    private fun showDescDialog() {
+        val v = vod ?: return
+        val dlg = Dialog(this)
+        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val tv = TextView(this)
+        tv.text = v.vodContent.ifBlank { "暂无简介" }
+        tv.setTextColor(Color.WHITE)
+        tv.textSize = 15f
+        tv.setLineSpacing(4f, 1f)
+        tv.setPadding(48, 40, 48, 40)
+        tv.movementMethod = LinkMovementMethod.getInstance()
+        dlg.setContentView(tv)
+        dlg.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dlg.show()
+    }
+
+    private fun toggleFav() {
+        val v = vod ?: return
+        val fav = store.toggleFavorite(v.vodId, v.vodName, v.vodPic, v.vodRemarks)
+        applyFavState(fav)
+        Toast.makeText(this, if (fav) "已收藏" else "已取消收藏", Toast.LENGTH_SHORT).show()
+    }
+
+    /** 收藏态：文字固定「收藏」，靠图标切换（原版 keep 就是 off/on 两个矢量，实心星表示已收藏） */
+    private fun applyFavState(fav: Boolean) {
+        val btn = findDetail<TextView>(R.id.btnFav) ?: return
+        btn.text = "收藏"
+        btn.setCompoundDrawablesWithIntrinsicBounds(
+            if (fav) R.drawable.ic_detail_keep_on else R.drawable.ic_detail_keep_off,
+            0, 0, 0
+        )
+        btn.compoundDrawablePadding = (6 * resources.displayMetrics.density).toInt()
     }
 }
