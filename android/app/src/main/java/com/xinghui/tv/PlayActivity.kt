@@ -208,7 +208,7 @@ class PlayActivity : Activity() {
         // ★必须打在 videoHost 赋值之后：以前它写在前面，host 恒为 null，把「画面层是否接上」
         //   这个最该看的信号变成了永远读不出来的假值。
         MpvDebug.log(
-            "[boot] build=tk13 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
+            "[boot] build=tk15 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
                 " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
         )
 
@@ -2299,12 +2299,16 @@ class PlayActivity : Activity() {
     /** 调试快照文本：只在 /debug 页面上出现，播放页 UI 不变 */
     private fun mpvDebugLine(): String {
         val m = mpv
+        // ★方向键到达计数（永不被裁剪）。若这里全是 0，说明事件根本没到 Activity。
+        val dpadCnt = "左=$cntLeft 右=$cntRight OK=$cntCenter 菜单=$cntMenu 上下=$cntDpadOther" +
+            (if (lastDpadInfo.isNotBlank()) " | 末次方向键: $lastDpadInfo" else "")
         val surfaceVis = runCatching {
             val sv = currentSurface()
             "${sv?.width}x${sv?.height} vis=${sv?.visibility} valid=${(sv as? android.view.SurfaceView)?.holder?.surface?.isValid ?: (sv != null)}"
         }.getOrNull()
         return "mpv=${m != null} 存活实例=${MpvPlayer.liveCount} 设置内核=${Settings(this).playerKernel} " +
             "isMpvMode=${isMpvMode()} surfaceReady=${m?.surfaceReadyNow()} paused=${m?.isPausedActual()} " +
+            "【方向键】$dpadCnt " +
             "mpvSink=$surfaceVis playView=${videoHost?.visibility} exo=${player != null} " +
             "controlBar=${controlBar?.visibility} vo=${m?.voNow()} pos=${snapPosMs}ms dur=${snapDurMs}ms " +
             "playing=${snapPlaying} " +
@@ -3235,7 +3239,52 @@ class PlayActivity : Activity() {
     private fun isLeftKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT
     private fun isRightKey(e: KeyEvent): Boolean = e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
 
+    // ★进页面后"第一下按 ←/→ 没反应"的原始计数（不受 MpvDebug 环形缓冲裁剪影响）。
+    //   现场反馈：多次从详情页进去、不按菜单直接按 ←/→，日志里一条记录都没有。
+    //   两种可能：(a) 事件真的没到 Activity；(b) 到了但被后续 200 条事件挤出了环形缓冲。
+    //   这两个数字写进 /debug 的「当前状态」行，永不被裁剪，一次就能区分。
+    private var cntLeft = 0
+    private var cntRight = 0
+    private var cntCenter = 0
+    private var cntMenu = 0
+    private var cntDpadOther = 0
+    // 最近一次方向键到达时的关键上下文（也写进快照）
+    private var lastDpadInfo = ""
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // ★★ 计数放在所有分支之前，且不看 action / repeatCount：
+        //   只要这个方法被调用，就一定计数。用来区分"事件没到"与"到了被日志裁剪"。
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) cntLeft++
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) cntRight++
+            }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) cntCenter++
+            }
+            KeyEvent.KEYCODE_MENU -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) cntMenu++
+            }
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) cntDpadOther++
+            }
+        }
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            event.keyCode in intArrayOf(
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER
+            )
+        ) {
+            // 方向键单独记一条，含"这次到底就绪没有 / 窗口有没有焦点 / 焦点在谁身上"。
+            // 这条不受 [key] 轨迹的条数上限影响（轨迹上限已从 24 提到 64）。
+            lastDpadInfo = "kc=${event.keyCode} winFocus=${runCatching { window.decorView.hasWindowFocus() }.getOrElse { null }}" +
+                " ready=${contentReady()} windowReady=${runCatching { windowReady() }.getOrElse { null }}" +
+                " bar=${barShown()} focus=${currentFocus?.id}(${currentFocus?.javaClass?.simpleName ?: "null"})" +
+                " sv=${runCatching { (currentSurface() as? android.view.SurfaceView)?.holder?.surface?.isValid }.getOrElse { null }}"
+            MpvDebug.log("[key] 方向键到达 $lastDpadInfo")
+        }
         // 按键体检：收到了什么键、当时焦点在哪、控制条显不显示、内容就绪没有。
         // 现场判断「按了没反应」究竟是没收到键、还是收到了但状态分支走错，只靠这一行。
         if (event.action == KeyEvent.ACTION_UP && event.repeatCount == 0) {

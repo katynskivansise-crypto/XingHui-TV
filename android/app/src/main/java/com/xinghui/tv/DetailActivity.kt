@@ -726,6 +726,8 @@ class DetailActivity : Activity() {
         //   它的 surface 就一直挂在 SurfaceFlinger 的 overlay plane 上，跟播放页那块抢。
         //   texture_view 已经把"新装包"这一侧从根上去掉了；这一行是给"万一 XML 没覆盖到"留的兜底：
         //   GONE 才是可见性变化，才真正让 surface 销毁。返回时 onResume 会重建预览（playInline 里设回 VISIBLE）。
+        // ★同理先退出全屏，否则从"全屏预览"点播放键进播放页后，返回时同样会只剩声音。
+        runCatching { exitInlineFullscreen() }
         runCatching { inlineView.visibility = View.GONE }
         // ★转场动画保留（曾经想去掉，已撤）。
         // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
@@ -795,6 +797,19 @@ class DetailActivity : Activity() {
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findViewById<View>(it)?.visibility = View.VISIBLE
         }
+        // ★预览本身也必须恢复 VISIBLE —— 这一行之前漏了。
+        //
+        // 症状：详情页全屏预览里按菜单 → 转独立播放页 → 返回详情页后小窗**只有声音没有画面**。
+        // 链条：openPlayPageFromCurrent() 里摘掉预览（inlineView = GONE）却没有退出全屏，
+        //       于是 inlineFullscreen 仍为 true；返回时 onResume 的执行顺序是
+        //         ① if (!inlineFullscreen) inlineView = VISIBLE   ← 被跳过
+        //         ② if (inlineFullscreen) exitInlineFullscreen()   ← 只恢复了 9 个文字/列表视图，
+        //            从来没恢复 inlineView 本身
+        //       inlineView 一直是 GONE → PlayerView 内部那块 texture_view 的 surface 被销毁
+        //       （media3 官方：SurfaceView 的 surface 生命周期绑 view visibility；
+        //         PlayerView.setVisibility 会连带设内部 surface view，ExoPlayer#3160）
+        //       → 解码器照常在跑、声音照常在出，画面没有承载层。
+        runCatching { inlineView.visibility = View.VISIBLE }
         findViewById<View>(R.id.detailList).requestFocus()
     }
 
@@ -819,6 +834,10 @@ class DetailActivity : Activity() {
         val v = vod ?: return
         val line = currentLine ?: return
         val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
+        // ★先退出全屏，再交接。原来漏了这一步：
+        //   摘掉预览却没有复位 inlineFullscreen，返回时 ① 被跳过、② 只恢复文字视图，
+        //   inlineView 一直 GONE → 小窗只有声音没画面。
+        runCatching { exitInlineFullscreen() }
         // 同上：交接给播放页之前先停掉预览
         releaseInlinePlayback()
         // 同上：摘掉预览（全屏那条路这里是 1920x1080 的整屏 overlay，代价最大）

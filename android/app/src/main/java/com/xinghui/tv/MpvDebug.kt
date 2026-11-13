@@ -25,7 +25,7 @@ object MpvDebug {
     @Volatile
     var experiment: Int = 0
 
-    private const val MAX = 80
+    private const val MAX = 200
 
     /**
      * 按键/输入环境单独存一条更短的轨迹。
@@ -33,7 +33,7 @@ object MpvDebug {
      *   主环形缓冲被 [sv2]/[hist]/[ui] 这些周期性行挤满后，按键行经常已经被挤出窗口，
      *   于是每次都要猜。这里单独留 24 条，/debug 第一屏就是它。
      */
-    private const val KEY_MAX = 24
+    private const val KEY_MAX = 64
 
     private val keys = LinkedList<String>()
 
