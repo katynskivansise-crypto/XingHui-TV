@@ -74,7 +74,8 @@ class MainActivity : Activity() {
 
     /** 内嵌播放器（对齐原版 mBinding.video） */
     private var player: ExoPlayer? = null
-    private lateinit var inlineView: android.widget.FrameLayout
+    /** 详情页小窗的占位框（透明）。画面本体一直是 host 层那块 videoFrame。 */
+    private lateinit var inlineView: android.view.View
     private var inlineFullscreen = false
     /** 预览是否因为离开页面被我们主动暂停（回来时不自动续播） */
     private var inlinePausedByLeave = false
@@ -109,17 +110,24 @@ class MainActivity : Activity() {
     // ================= 宿主：唯一 surface + 层切换 =================
 
     /** 把这块唯一的 surface 交给某个引擎；surface 还没创建时先记下，created 后自动补挂 */
-    private fun attachSurfaceTo(p: androidx.media3.exoplayer.ExoPlayer) {
+    /**
+     * 把详情页的小窗画面交给某个引擎 —— 走 TextureView。
+     * ★这里不再碰 videoSurface.holder.surface：那块 SurfaceView 只服务全屏播放页，
+     *   详情页期间它被不透明的 detailLayer 盖住，尺寸一次都不改。
+     *   历史教训：以前小窗也用那块 SurfaceView，靠改 LayoutParams 缩放，
+     *   surface 的 buffer 尺寸跟着变，API 25 的 MediaCodec 不重建输出 → 有声音没画面。
+     */
+    private fun attachPreviewTo(p: androidx.media3.exoplayer.ExoPlayer) {
         surfaceConsumer = p
-        // ★只在 surface 已经有效时才挂。未创建时先记在 surfaceConsumer 上，
-        //   由 surfaceCreated 回调补挂 —— 硬塞一个还没创建的 Surface 给 ExoPlayer，
-        //   在旧 ROM 上会抛 / 让解码器建不起来。（这是对照 OwnTV 的规则：
-        //   surface 只在 SurfaceHolder.Callback 的有效期内可用）
-        if (surfaceValid) runCatching { p.setVideoSurface(videoSurface.holder.surface) }
+        // ★必须是 setVideoSurfaceView(View)，不能是 setVideoSurface(裸 Surface)。
+        //   media3 只有在拿到一个 View 时才会挂 SurfaceHolder.Callback，并在 surfaceChanged
+        //   里自己调用 setVideoSurfaceSize —— 解码器就是靠这一次通知重建输出。
+        //   给裸 Surface 的话没有任何人监听尺寸变化，容器从小窗撑到全屏时画面就停住了。
+        runCatching { p.setVideoSurfaceView(videoSurface) }
     }
 
     private fun detachSurfaceFrom() {
-        surfaceConsumer?.let { runCatching { it.clearVideoSurface() } }
+        surfaceConsumer?.let { runCatching { it.clearVideoSurfaceView(videoSurface) } }
         surfaceConsumer = null
     }
 
@@ -138,14 +146,21 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 小窗形态：画面摆回详情页 playerBox 的位置（同一块 surface，只改 LayoutParams） */
+    /**
+     * 小窗形态：画面摆回详情页 playerBox 的位置（同一块 surface，只改 LayoutParams）。
+     * 与原版一致 —— VideoActivity 就是把 mBinding.video 的 LayoutParams 在
+     * 400x225 与 MATCH_PARENT 之间来回换，画面本身一直没动过。
+     */
     private fun videoFrameToMini() {
-        val box = runCatching { findDetail<View>(R.id.playerBox) }.getOrNull() ?: return
-        val loc = IntArray(2)
-        box.getLocationInWindow(loc)
-        videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(box.width, box.height).apply {
-            leftMargin = loc[0]
-            topMargin = loc[1]
+        val px = resources.displayMetrics.density
+        videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(
+            (400 * px).toInt(),
+            (225 * px).toInt()
+        ).apply {
+            gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            // 与原版布局一致（activity_video.xml 的 video 容器带 layout_margin=24dp）
+            val m = (24 * px).toInt()
+            setMargins(m, m, 0, 0)
         }
         videoFrame.requestLayout()
     }
@@ -173,6 +188,8 @@ class MainActivity : Activity() {
         playMode = true
         detailLayer.visibility = View.GONE
         playContainer.visibility = View.VISIBLE
+        // 画面层一直是 VISIBLE：小窗形态下它只有 400x225，剩下的区域露出窗口壁纸；
+        // 只有它变成 MATCH_PARENT 时才占满全屏。所以壁纸从不被挡住。
         videoFrameToFull()
         layer.onHostResume()
     }
@@ -210,41 +227,23 @@ class MainActivity : Activity() {
         playLayer?.onHostPause()
         playContainer.visibility = View.GONE
         detailLayer.visibility = View.VISIBLE
-        // ★播放层的引擎原样交回：不 release、不 prepare，进度就在它身上。
-        //   监听器不会跟着回来，要重挂（否则 onVideoSizeChanged 不再更新）。
+        // 播放层的引擎原样交回：不 release、不 prepare、不 seek。
         val p = playLayer?.takePlayer()
         if (p != null) player = p
         val q = p ?: player
         if (q == null) return
         bindDetailListener(q)
-        surfaceConsumer = q
-        // ★三段式，缺一段就是「有声音没画面」：
-        //   ① 第一帧只改 LayoutParams —— playerBox 刚从 GONE 恢复，坐标这时还是旧值；
-        //   ② 第二帧 surface 才按小窗尺寸重新分配 buffer，此时必须先把引擎从旧 buffer 上摘下来；
-        //   ③ 第三帧再挂回去，让 MediaCodec 按新尺寸重建输出。
-        //   原来只做①就立刻 attach：挂的是全屏尺寸的旧 buffer，缩回小窗后解码器不再往新
-        //   buffer 写帧，于是声音继续、画面停住。
-        videoFrame.post {
-            videoFrameToMini()
-            videoFrame.post {
-                runCatching { q.clearVideoSurface() }
-                videoFrame.post {
-                    if (surfaceValid) {
-                        runCatching { q.setVideoSurface(videoSurface.holder.surface) }
-                    }
-                    runCatching { q.play() }
-                    MpvDebug.log(
-                        "[exit] 交回画面 p=${p != null} svValid=$surfaceValid " +
-                            "surfaceValid=${runCatching { videoSurface.holder.surface.isValid }.getOrNull()} " +
-                            "sv=${videoSurface.width}x${videoSurface.height} " +
-                            "frame=${videoFrame.width}x${videoFrame.height} " +
-                            "vsize=${q.videoSize.width}x${q.videoSize.height} " +
-                            "state=${q.playbackState} playing=${q.isPlaying} " +
-                            "consumer=${surfaceConsumer?.javaClass?.simpleName}"
-                    )
-                }
-            }
-        }
+        // ① 容器先缩回小窗（原版 mFrameParams 那一步）
+        videoFrameToMini()
+        // ② 把画面交回，走 setVideoSurfaceView —— media3 自己接住尺寸变化
+        attachPreviewTo(q)
+        runCatching { q.play() }
+        MpvDebug.log(
+            "[exit] 交回小窗 frame=${videoFrame.width}x${videoFrame.height} " +
+                "sv=${videoSurface.width}x${videoSurface.height} " +
+                "vsize=${q.videoSize.width}x${q.videoSize.height} " +
+                "state=${q.playbackState} playing=${q.isPlaying} surfaceValid=$surfaceValid"
+        )
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -283,8 +282,10 @@ class MainActivity : Activity() {
         videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
                 surfaceValid = true
-                MpvDebug.log("[sv2] created（唯一一块） ${videoSurface.width}x${videoSurface.height}")
-                surfaceConsumer?.let { p -> runCatching { p.setVideoSurface(h.surface) } }
+                MpvDebug.log("[sv2] created（全屏播放页专用） ${videoSurface.width}x${videoSurface.height}")
+                // ★只在播放页把 surface 交出去。详情页期间这块 SurfaceView 是 GONE 的，
+                //   它一旦重新出现不应该抢走详情页小窗（小窗走 TextureView）。
+                if (playMode) surfaceConsumer?.let { p -> runCatching { p.setVideoSurface(h.surface) } }
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
                 MpvDebug.log("[sv2] changed $w x $ht")
@@ -444,7 +445,7 @@ class MainActivity : Activity() {
                 // 内嵌预览同样请求音频焦点：进播放页时播放页抢焦点，这一路会自动 LOSS → 暂停，
                 // 不再依赖手动 pauseInlinePlayback 兜底（原版 Players.java:155 同一句）。
                 it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
-                attachSurfaceTo(it)
+                attachPreviewTo(it)
             }
         return p
     }
@@ -1237,7 +1238,7 @@ class MainActivity : Activity() {
             //   走不到后面重建段的挂载。实例被保留时它是 READY，挂上就能出画面。
             runCatching {
                 val p0 = player
-                if (p0 != null && !previewAttached()) attachSurfaceTo(p0)
+                if (p0 != null && !previewAttached()) attachPreviewTo(p0)
             }
             // 在独立播放页里换过集：集号以历史里最后记下的那一集为准。
             // 不这样做，返回后小窗会退回离开前那一集 —— 就是「选了第 3 集，退回来又变第 1 集」。
@@ -1262,7 +1263,7 @@ class MainActivity : Activity() {
                 val p = player ?: buildInlinePlayer().also { player = it; applyCaptionStyle() }
                 // ★跳转时摘掉了画面层（inlineView.player = null），回来要重新挂上。
                 //   实例若被保留，此刻它是 READY，不需要 prepare，也就不会转圈。
-                runCatching { if (!previewAttached()) attachSurfaceTo(p) }
+                runCatching { if (!previewAttached()) attachPreviewTo(p) }
                 if (p.playbackState == androidx.media3.common.Player.STATE_IDLE) {
                     if (inlineUrl.isNotBlank()) {
                         p.setMediaItem(MediaItem.Builder().setUri(inlineUrl).build())

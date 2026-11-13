@@ -24,6 +24,13 @@
     android:focusable="true"
     android:focusableInTouchMode="true">
 
+    <!-- ★画面层就是原版的 mBinding.video：小窗 400x225，全屏时把容器撑到 MATCH_PARENT。
+         切换方式与原版一致（VideoActivity.java 1511-1523）：
+           mBinding.video.setLayoutParams(new LayoutParams(MATCH_PARENT, MATCH_PARENT));
+         关键不在容器，而在于把它交给引擎的方式必须是 setVideoSurfaceView(View) ——
+         这样 media3 才会挂 SurfaceHolder.Callback、在 surface 尺寸变化时自己调 setVideoSurfaceSize。
+         我们之前用的是 setVideoSurface(holder.surface)，裸 Surface 没有这个监听，
+         尺寸一变解码器就不知道 → 画面停住、声音还在。 -->
     <androidx.media3.ui.AspectRatioFrameLayout
         android:id="@+id/videoFrame"
         android:layout_width="400dp"

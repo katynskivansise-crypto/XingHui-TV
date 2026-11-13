@@ -51,9 +51,9 @@
                  "不与另一个 surface 抢合成" 正好就是这里的需求。
              所以分工是：**会共存的一方（详情页）用 texture_view，独占全屏的一方（播放页）保持 surface_view**，
              不能反过来 —— TV 上只有 SurfaceView 才能按屏幕全分辨率输出，播放页改 texture 会掉清晰度。 -->
-        <!-- ★小窗画面的位置参照。画面本体是 activity_main.xml 里那块唯一 SurfaceView，
-             宿主按本框的位置把它摆过去。本框必须透明，否则会挡住画面
-             （历史上"只有声音没有画面"就是这里盖了一层不透明的东西）。 -->
+        <!-- ★纯占位，不是画面。画面本体是 host 层那块 videoFrame（与小窗位置对齐，
+             全屏时整个撑开）。这里保持透明，否则会盖住画面 ——
+             历史上"只有声音没有画面"就有一半是这里盖了不透明的东西。 -->
         <FrameLayout
             android:id="@+id/inlinePlayer"
             android:layout_width="match_parent"
