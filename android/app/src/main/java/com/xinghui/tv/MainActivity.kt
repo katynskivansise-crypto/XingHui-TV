@@ -210,16 +210,40 @@ class MainActivity : Activity() {
         playLayer?.onHostPause()
         playContainer.visibility = View.GONE
         detailLayer.visibility = View.VISIBLE
-        // 等一帧：detailLayer 刚从 GONE 恢复，playerBox 的坐标这时还是旧值
-        videoFrame.post { videoFrameToMini() }
         // ★播放层的引擎原样交回：不 release、不 prepare，进度就在它身上。
-        //   这里只需要把详情页的监听器重新挂上（播放层的监听器不会跟着回来），再把画面接回去。
+        //   监听器不会跟着回来，要重挂（否则 onVideoSizeChanged 不再更新）。
         val p = playLayer?.takePlayer()
-        if (p != null) {
-            player = p
-            bindDetailListener(p)
-            attachSurfaceTo(p)
-            runCatching { p.play() }
+        if (p != null) player = p
+        val q = p ?: player
+        if (q == null) return
+        bindDetailListener(q)
+        surfaceConsumer = q
+        // ★三段式，缺一段就是「有声音没画面」：
+        //   ① 第一帧只改 LayoutParams —— playerBox 刚从 GONE 恢复，坐标这时还是旧值；
+        //   ② 第二帧 surface 才按小窗尺寸重新分配 buffer，此时必须先把引擎从旧 buffer 上摘下来；
+        //   ③ 第三帧再挂回去，让 MediaCodec 按新尺寸重建输出。
+        //   原来只做①就立刻 attach：挂的是全屏尺寸的旧 buffer，缩回小窗后解码器不再往新
+        //   buffer 写帧，于是声音继续、画面停住。
+        videoFrame.post {
+            videoFrameToMini()
+            videoFrame.post {
+                runCatching { q.clearVideoSurface() }
+                videoFrame.post {
+                    if (surfaceValid) {
+                        runCatching { q.setVideoSurface(videoSurface.holder.surface) }
+                    }
+                    runCatching { q.play() }
+                    MpvDebug.log(
+                        "[exit] 交回画面 p=${p != null} svValid=$surfaceValid " +
+                            "surfaceValid=${runCatching { videoSurface.holder.surface.isValid }.getOrNull()} " +
+                            "sv=${videoSurface.width}x${videoSurface.height} " +
+                            "frame=${videoFrame.width}x${videoFrame.height} " +
+                            "vsize=${q.videoSize.width}x${q.videoSize.height} " +
+                            "state=${q.playbackState} playing=${q.isPlaying} " +
+                            "consumer=${surfaceConsumer?.javaClass?.simpleName}"
+                    )
+                }
+            }
         }
     }
 
