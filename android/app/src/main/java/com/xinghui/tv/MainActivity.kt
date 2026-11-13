@@ -264,6 +264,15 @@ class MainActivity : Activity() {
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
                 MpvDebug.log("[sv2] changed $w x $ht")
+                // ★小窗↔全屏切换时这块 surface 的 buffer 尺寸变了。
+                //   API 25 的 MediaCodec 不会自己跟着新尺寸重建输出缓冲，不重挂就是
+                //   「声音继续、画面停在旧尺寸/黑」。先 clear 再 set，强制解码器按新尺寸重建。
+                surfaceConsumer?.let { p ->
+                    runCatching {
+                        p.clearVideoSurface()
+                        p.setVideoSurface(h.surface)
+                    }
+                }
             }
             override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
                 surfaceValid = false
@@ -1007,6 +1016,12 @@ class MainActivity : Activity() {
      * PlayActivity —— 那才是原版 VideoActivity 的形态，控制条、选集、选轨全都在。
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // ★★ 播放层优先：onHostKeyEvent 就是原来 PlayActivity.dispatchKeyEvent 的全套语义。
+        //   之前这里**从来没转发过**，进播放层后所有按键都落到 super，于是「除了返回键全无效」。
+        if (playMode) {
+            val handled = runCatching { playLayer?.onHostKeyEvent(event) ?: false }.getOrDefault(false)
+            if (handled) return true
+        }
         val menu = event.keyCode == KeyEvent.KEYCODE_MENU
         if (inlineFullscreen && menu) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
@@ -1015,6 +1030,16 @@ class MainActivity : Activity() {
             return true
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    // ★补 onKeyUp：这台盒子的菜单键（kc=82）只发 ACTION_UP 不发 DOWN，
+    //   fastForwarding 之类的收尾只在 onKeyUp 里，不接这条就等于长按永远收不回来。
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (playMode) {
+            val handled = runCatching { playLayer?.onHostKeyUp(keyCode, event) ?: false }.getOrDefault(false)
+            if (handled) return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     /** 把当前正在播的这一集原样交给独立播放页 */
