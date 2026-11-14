@@ -41,10 +41,25 @@
         android:background="@android:color/black"
         app:resize_mode="fit">
 
-        <SurfaceView
-            android:id="@+id/videoSurface"
+        <!-- ★用官方 PlayerView 承载画面，与原项目一致。
+             PlayerView 内部自带一个 SurfaceView（surface_type=surface_view），
+             并且它是官方唯一会正确维护「surface 挂载 / 尺寸同步 / 首帧」三件事的类。
+             我们之前用手搓的裸 SurfaceView + setVideoSurfaceView，
+             等于自己接管了这三件事，却漏掉了官方在 attach 顺序上的细节。
+
+             三条必须核对过的设置：
+               use_controller=false           —— 不要它自带的控制条（我们有自己的条）
+               shutter_background_color=透明  —— 否则 player=null/tracks 为空时它会盖一块不透明黑，
+                                              这正是"呼条那一下黑"的来源之一
+               resize_mode=fit                —— 由外层视频容器决定尺寸，缩放交给它 -->
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/playerView"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_height="match_parent"
+            app:use_controller="false"
+            app:surface_type="surface_view"
+            app:shutter_background_color="@android:color/transparent"
+            app:resize_mode="fit" />
 
         <androidx.media3.ui.SubtitleView
             android:id="@+id/subtitleView"

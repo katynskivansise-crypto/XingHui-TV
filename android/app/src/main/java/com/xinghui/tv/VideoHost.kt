@@ -5,6 +5,7 @@ import android.view.SurfaceView
 import android.view.View
 import androidx.media3.common.Player
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 
 /**
@@ -31,14 +32,34 @@ import androidx.media3.ui.SubtitleView
  */
 class VideoHost(
     private val frame: AspectRatioFrameLayout,
-    val surfaceView: SurfaceView,
+    /** 官方 PlayerView。画面由它内部那个 SurfaceView 承载（surface_type=surface_view）。 */
+    val playerView: PlayerView,
     val subtitleView: SubtitleView,
 ) {
-    /** 与 PlayerView 的 resize_mode 完全同义（0=fit 1=fixed_width 2=fixed_height 3=fill 4=zoom） */
+    /**
+     * PlayerView 内部那块 SurfaceView。
+     * surface_type=surface_view 时它构造完就存在，所以这里可以直接强取；
+     * 取不到说明布局里的 surface_type 被改坏了，应该立刻暴露而不是静默降级。
+     */
+    val surfaceView: SurfaceView = (playerView.videoSurfaceView as? SurfaceView)
+        ?: throw IllegalStateException("PlayerView 内没有 SurfaceView，检查布局的 surface_type")
+    /**
+     * 与 PlayerView 的 resize_mode 完全同义（0=fit 1=fixed_width 2=fixed_height 3=fill 4=zoom）
+     *
+     * ★设置之后必须两层都 requestLayout。原版 PlaybackActivity.applyResizeMode 的原文：
+     *     view.setResizeMode(effectiveResizeMode);
+     *     view.requestLayout();
+     *     View surface = view.getVideoSurfaceView();
+     *     if (surface != null) surface.requestLayout();
+     *   只改 resizeMode 而不 requestLayout，尺寸已经算好的那一帧不会重排，
+     *   表现就是「选了缩放但画面没变」。
+     */
     var resizeMode: Int
         get() = frame.resizeMode
         set(value) {
             frame.resizeMode = value
+            frame.requestLayout()
+            surfaceView.requestLayout()
         }
 
     /** 只读：页面里有些诊断要读它，但不允许任何人改 */
@@ -127,14 +148,14 @@ class VideoHost(
      * 原项目也接受这个代价。**不要**把它用在呼条、改布局这类轻动作上。
      */
     fun recreateSurface() {
-        val parent = surfaceView.parent as? android.view.ViewGroup ?: return
-        val idx = parent.indexOfChild(surfaceView)
-        val lp = surfaceView.layoutParams
-        runCatching {
-            parent.removeView(surfaceView)
-            parent.addView(surfaceView, idx.coerceAtLeast(0), lp)
-        }
-        MpvDebug.log("[surf] 重建 surface idx=$idx owner=$owner")
+        // ★surfaceView 现在是 PlayerView 的子 View，不能再从父容器摘出来（会破坏 PlayerView 结构）。
+        //   官方 PlayerView 没有公开的「重建 surface」接口，等价做法是 detach → attach：
+        //   原项目用的是 setRender 切两次（RENDER_SURFACE ↔ RENDER_TEXTURE）来逼一次重建，
+        //   我们只有一个渲染目标，就用 setPlayer(null) → 下一帧 setPlayer(p) 逼近同样效果。
+        val p = bound
+        setPlayer(null)
+        MpvDebug.log("[surf] 重建 surface owner=$owner")
+        surfaceView.post { if (bound == null && p != null) setPlayer(p) }
     }
 
     /** VideoHost 是 holder 事件的唯一转发者：谁占着就转给谁 */
@@ -152,6 +173,10 @@ class VideoHost(
 
     init {
         surfaceView.holder.addCallback(forwarder)
+        // PlayerView 自带一个字幕视图（exo_subtitles）。字幕统一由外层 subtitleView 管，
+        // 不关掉就是两份字幕叠在一起。
+        // 按类型找而不是按 R.id 找：media3 的 R 在不同打包方式下不一定可见。
+        runCatching { hideSubtitleViews(playerView) }
     }
 
     /**
@@ -161,6 +186,17 @@ class VideoHost(
      * surface 还没创建好时先记下，等 created 再 attach —— 所以不需要我们提前判断。
      * 反方向必须先 clear，再换人：否则旧播放器还握着这块 surface。
      */
+    /** 递归把 PlayerView 内部的 SubtitleView 全部藏起来 */
+    private fun hideSubtitleViews(v: View) {
+        if (v is SubtitleView) {
+            v.visibility = View.GONE
+            return
+        }
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) hideSubtitleViews(v.getChildAt(i))
+        }
+    }
+
     fun setPlayer(p: Player?) {
         val old = bound
         if (old === p) return
@@ -172,8 +208,11 @@ class VideoHost(
         //   我们以前是反过来的（先 clear 再 set）：中间那一刻没有任何 surface 挂着，
         //   MediaCodecVideoRenderer 会退回 placeholderSurface（什么都不画），
         //   在这家 amlogic 的硬解上就是"黑一下"。先挂新的、再摘旧的，就没有这个中间态。
-        if (p != null) runCatching { p.setVideoSurfaceView(surfaceView) }
-        if (old != null) runCatching { old.clearVideoSurfaceView(surfaceView) }
+        // ★改走官方 PlayerView.setPlayer：
+        //   它内部就是 switchTargetView —— 先挂新的、再摘旧的，并且顺带把
+        //   SurfaceHolder.Callback、尺寸同步、首帧清 shutter 全部接好。
+        //   这些我们手搓了一遍，但漏了细节；既然主线就是这个类，就交回去。
+        runCatching { playerView.setPlayer(p) }
         bound = p
     }
 }

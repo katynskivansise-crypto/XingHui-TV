@@ -240,7 +240,7 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
             VideoHost(
                 // ★这三个视图在宿主布局（activity_main.xml）里，不在本层 —— 只此一份
                 host.findViewById(R.id.videoFrame),
-                host.findViewById(R.id.videoSurface),
+                host.findViewById(R.id.playerView),
                 host.findViewById(R.id.subtitleView)
             )
         }.onFailure {

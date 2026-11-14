@@ -74,6 +74,15 @@ class MainActivity : Activity() {
 
     /** 内嵌播放器（对齐原版 mBinding.video） */
     private var player: ExoPlayer? = null
+    /**
+     * 小窗形态的原始 LayoutParams —— 原版的 mFrameParams。
+     * ★保存的是 XML 里那个对象本身，退出全屏时原样还回去。
+     *   原版：VideoActivity.exitFullscreen() → mBinding.video.setLayoutParams(mFrameParams);
+     *   我之前是手算 400dp×225dp 再补 margin，等于重新拼一个"差不多"的参数，
+     *   漏掉的属性就会表现为位置或尺寸不对。
+     */
+    private var frameParams: android.view.ViewGroup.LayoutParams? = null
+
     /** 详情页小窗的占位框（透明）。画面本体一直是 host 层那块 videoFrame。 */
     private lateinit var inlineView: android.view.View
     private var inlineFullscreen = false
@@ -152,16 +161,13 @@ class MainActivity : Activity() {
      * 400x225 与 MATCH_PARENT 之间来回换，画面本身一直没动过。
      */
     private fun videoFrameToMini() {
-        val px = resources.displayMetrics.density
-        videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(
-            (400 * px).toInt(),
-            (225 * px).toInt()
-        ).apply {
-            gravity = android.view.Gravity.TOP or android.view.Gravity.START
-            // 与原版布局一致（activity_video.xml 的 video 容器带 layout_margin=24dp）
-            val m = (24 * px).toInt()
-            setMargins(m, m, 0, 0)
-        }
+        // ★原版 VideoActivity.exitFullscreen() 就这一句：
+        //     mBinding.video.setLayoutParams(mFrameParams);
+        //   保存的是 XML 里那个对象，原样还回去 —— 宽高、margin、gravity 一个不落。
+        frameParams?.let { videoFrame.layoutParams = it }
+        // 原版小窗还带一层焦点框：setForeground(selector_video)；全屏时置 null。
+        // 这就是详情页小窗外面那圈细边。
+        runCatching { videoFrame.foreground = getDrawable(R.drawable.selector_video) }
         videoFrame.requestLayout()
     }
 
@@ -171,6 +177,8 @@ class MainActivity : Activity() {
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT
         )
+        // 原版 enterFullscreen()：setForeground(null)
+        videoFrame.foreground = null
         videoFrame.requestLayout()
     }
 
@@ -229,12 +237,14 @@ class MainActivity : Activity() {
                 if (w > 0 && h > 0) {
                     findDetail<TextView>(R.id.vodInfoSize)?.text = "$w x $h"
                 }
-                // 把真实宽高比交给 AspectRatioFrameLayout。我们这块容器名就叫 AspectRatio 容器，
-                // 但以前从没调过 setAspectRatio —— 它一直按 0（不调整）跑，等于名不副实。
-                runCatching {
-                    if (w > 0 && h > 0) videoFrame.setAspectRatio(w.toFloat() / h.toFloat())
-                }
-                MpvDebug.log("[render] vsize ${w}x$h frame=${videoFrame.width}x${videoFrame.height}")
+                // ★不要调 videoFrame.setAspectRatio()。
+                //   那是我上一轮加的错误优化：AspectRatioFrameLayout 在宽度约束为 EXACTLY 时
+                //   会**强制按比例重算高度**（它为 PlayerView 设计的行为）。
+                //   我们是拿它当固定尺寸的容器用：设了 2.398 之后，
+                //   小窗 400dp×225dp 变 600×250（高度被压扁），
+                //   全屏 1920×1080 变 1920×801（底下露出两百多像素壁纸）。
+                //   比例要由 resize_mode 在子 View 上做，容器尺寸必须由 LayoutParams 说了算。
+                MpvDebug.log("[render] vsize ${w}x$h frame=${videoFrame.width}x${videoFrame.height} resizeMode=${videoFrame.resizeMode}")
             }
 
             /**
@@ -342,7 +352,10 @@ class MainActivity : Activity() {
         }
         playContainer = findViewHost(R.id.playLayer)
         videoFrame = findViewHost(R.id.videoFrame)
-        videoSurface = findViewHost(R.id.videoSurface)
+        // ★画面由官方 PlayerView 承载，它内部那个 SurfaceView 才是真正的渲染目标。
+        videoSurface = (findViewHost(R.id.playerView) as androidx.media3.ui.PlayerView)
+            .videoSurfaceView as android.view.SurfaceView
+        frameParams = videoFrame.layoutParams
         subtitleView = findViewHost(R.id.subtitleView)
 
         detailRoot = layoutInflater.inflate(R.layout.activity_detail_layer, detailLayer, false)
