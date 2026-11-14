@@ -132,6 +132,11 @@ class TrackDialog(
             }
             p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, indices))
+                // ★必须同时把该类型的 disabled 清掉。
+                //   「关闭字幕」走的是 setTrackTypeDisabled(true)，点选某条只设 override；
+                //   disabled 不清就会和 override 同时留在参数里 —— 当下一生效，
+                //   用户下次一改任何参数又被写回 sid=no，字幕"又莫名没了"。
+                .setTrackTypeDisabled(type, false)
                 .build()
         }
         dismiss()

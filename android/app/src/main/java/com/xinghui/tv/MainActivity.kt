@@ -188,11 +188,14 @@ class MainActivity : Activity() {
      */
     fun showPlayLayer(extras: Intent) {
         val layer = playLayer ?: PlayLayer(this) { exitPlayLayer() }.also { playLayer = it }
-        layer.prepare(extras)
-        layer.bind(playContainer)
         // 详情预览先把这块 surface 让出来，再交给播放层 —— 同一块，不新建
         detachSurfaceFrom()
         runCatching { player?.pause() }
+        // ★顺序不能反：先把引擎与画面接回播放层（退出时 takePlayer / releaseSurface 交出去的那一份），
+        //   再走进入协议起播。反过来的话，二次进入时起播会撞上 player == null。
+        layer.reconnect(player)
+        // ★每次进入都走同一条协议：重解析参数 → bind（首次才 inflate）→ 重新起播
+        layer.enter(extras, playContainer)
         playMode = true
         detailLayer.visibility = View.GONE
         playContainer.visibility = View.VISIBLE
@@ -273,6 +276,9 @@ class MainActivity : Activity() {
         // 播放层的引擎原样交回：不 release、不 prepare、不 seek。
         val p = playLayer?.takePlayer()
         if (p != null) player = p
+        // ★画面层同时松手：否则 VideoHost 的 owner 停在 EXO/NATIVE，
+        //   宿主小窗再挂同一块 surface 就是两家抢面（这是"小窗黑/再进不去"的共同来源）
+        playLayer?.releaseSurface()
         val q = p ?: player
         if (q == null) return
         bindDetailListener(q)

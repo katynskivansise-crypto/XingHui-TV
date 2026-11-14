@@ -1378,9 +1378,16 @@ class MpvPlayer(
             if (langs.isNotEmpty()) {
                 runCatching { core.setPropertyString("alang", langs.joinToString(",")) }
             }
+            // 有 override 的类型视为"已启用"：media3 语义里 override 与 disabled 互斥。
+            // 两者同时出现时（用户先关字幕、再点一条字幕而没人清 disabled），
+            // 如果照字面写 no，就把用户刚选的轨道又关掉了。
+            val overrideTypes = HashSet<Int>()
+            for (entry in parameters.overrides.entries) {
+                if (entry.key.id?.startsWith("mpv:") == true) overrideTypes.add(entry.key.type)
+            }
             for (type in intArrayOf(C.TRACK_TYPE_VIDEO, C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT)) {
                 val prop = mpvTrackProperty(type) ?: continue
-                val disabled = parameters.disabledTrackTypes.any { it == type }
+                val disabled = parameters.disabledTrackTypes.any { it == type } && type !in overrideTypes
                 val cur = runCatching { core.getPropertyString(prop) }.getOrNull().orEmpty()
                 if (disabled) {
                     if (cur != "no") runCatching { core.setPropertyString(prop, "no") }

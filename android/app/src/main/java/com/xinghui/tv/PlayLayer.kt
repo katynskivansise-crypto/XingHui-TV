@@ -54,6 +54,177 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
     /** 把当前引擎原样交回宿主（退出播放层时用，不 release、不重建） */
     fun takePlayer(): ExoPlayer? { val p = player; player = null; return p }
 
+    /**
+     * 退出播放层时让画面层松手。
+     * ★以前退出只把 EXO 交回宿主，没有让 VideoHost 交权，owner 一直停在 EXO / NATIVE；
+     *   宿主小窗再用 setVideoSurfaceView 挂同一块 surface，就变成两家抢一块面。
+     */
+    fun releaseSurface() {
+        runCatching { videoHost?.releaseOwner() }
+    }
+
+    /**
+     * 解析 Intent 字段。
+     * ★从 bind() 里抽出来的：bind() 只 inflate 一次（attached 后立刻 return），
+     *   而每次从详情页进来都可能带着不同的集 / 不同的线路，字段必须每次重解析。
+     */
+    private fun applyArgs(a: android.content.Intent) {
+        vodId = a.getStringExtra("vod_id") ?: ""
+        vodName = a.getStringExtra("vod_name") ?: ""
+        vodPic = a.getStringExtra("vod_pic") ?: ""
+        flag = a.getStringExtra("flag") ?: ""
+        epUrl = a.getStringExtra("ep_url") ?: ""
+        invalidateHistoryKey()
+        directUrl = a.getStringExtra("direct_url") ?: ""
+        pushMode = a.getBooleanExtra("push_mode", false)
+        // 直播频道与手机推送写入历史时，vod_id 存的就是播放地址本身（原版同样如此）。
+        // 从历史点回来时不会有 direct_url，这里补认一次，否则会去站点详情接口查一个 URL，必然失败。
+        if (directUrl.isBlank() && (looksLikeMedia(vodId) || ThunderPlay.match(vodId))) directUrl = vodId
+        siteKey = SubscriptionStore(host).currentKey() ?: ""
+    }
+
+    /**
+     * 解析地址并起播。
+     * ★以前这段在 bind() 末尾，而 bind() 第二次进入直接 return ——
+     *   结果"回详情页后再点集数"既不解析也不起播，表现就是「进不去播放页」。
+     */
+    private fun startPlayback() {
+        showPlayProgress("进页面解析")
+        // ★输入环境探针（只打一次，几乎零开销）。
+        //   Android 官方文档明确：开启无障碍/触摸探索后，D-pad 事件不会传给开发者定义的方向键处理器，
+        //   而是被无障碍服务拿走用于移动无障碍焦点 —— 这是"应用收不到方向键、菜单键却照常到达"的一个真实成因。
+        //   touchMode 同理：触摸模式下没有视图持有焦点，第一下按键只会把焦点捡回来。
+        //   这两项只读一次，就足以越过所有猜测。
+        runCatching {
+            val am = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+            MpvDebug.log(
+                "[env] touchMode=${runCatching { window.decorView.isInTouchMode }.getOrNull()}" +
+                    " a11y=${am?.isEnabled} touchExploration=${am?.isTouchExplorationEnabled}" +
+                    " rootFocusable=${rootView?.isFocusable} rootFocusableInTouch=${rootView?.isFocusableInTouchMode}" +
+                    " decorHasFocus=${runCatching { window.decorView.hasFocus() }.getOrNull()}"
+            )
+        }
+        MpvDebug.log("[play] 进页面 开始解析/起播 t=${System.currentTimeMillis() % 100000}")
+        updateDecodeText()
+        updatePlayerText()
+        val marks0 = HistoryStore(host).marks(historyKey, epUrl)
+        openingMs = marks0[0]
+        endingMs = marks0[1]
+        startPosMs = marks0[2]
+        updateOpeningText()
+        updateEndingText()
+        // 倍速：点击循环档位，对齐原项目 addSpeed()
+        val speedBtn = findViewById<TextView>(R.id.btnSpeed)
+        speedBtn.setOnClickListener { toggleSpeed() }
+        // 长按倍速快进（对齐原项目 onSpeedUp：长按 3x，松开恢复）
+        speedBtn.setOnLongClickListener {
+            fastForwarding = true
+            savedSpeedIdx = speedIdx
+            speedBtn.text = "快进 3x（松开恢复）"
+            if (isMpvMode()) mpv?.setSpeed(3f) else player?.setPlaybackSpeed(3f)
+            true
+        }
+        // 缩放档位循环（对齐原项目 onScale/setScale）
+        findViewById<TextView>(R.id.btnScale).setOnClickListener { toggleScale() }
+        // 上一集/下一集（对齐原项目 control.prev/next → checkPrev/checkNext）
+        findViewById<View>(R.id.btnPrev).setOnClickListener { switchEpisode(-1) }
+        findViewById<View>(R.id.btnPlayPause).setOnClickListener { togglePlayPause() }
+        findViewById<View>(R.id.btnNext).setOnClickListener { switchEpisode(1) }
+        // 清晰度切换（对齐原项目 QualityAdapter/setQualityActivated）
+        findViewById<View>(R.id.btnQuality).setOnClickListener { toggleQuality() }
+
+        // 原版 VideoActivity:1269-1271 在起播前就把 History 建好（createHistory / updateHistory），
+        // 不依赖抖源解析成功。之前只在各条「解析成功」分支里记，解析慢或中途退出就漏记，
+        // 「看过的片子历史里没有」就是这么来的。
+        // ★条件放宽到与 HistoryStore.addHistory 内部 key 规则一致（vodId 优先、退回片名）。
+        //   原来要求 vodName 也非空：从历史/收藏/推送进来的入口常常只带 vodId，
+        //   于是这部片从来没被写进历史 —— 现场就是 row=false 但 total=9。
+        if (historyKey.isNotBlank()) recordHistory()
+
+        // 直播直链：直接播放；影片：先拉详情拿线路（供选集面板），再解析播放
+        if (directUrl.isNotBlank()) {
+            // 手机推送（push_mode）有两种来源：
+            //   1) 直链 m3u8/mp4/磁力/迅雷 —— 直接进播放器；
+            //   2) 网页分享地址 —— 交给嗅探 WebView 抓真实流地址，等价原版
+            //      VideoActivity.push → 播放失败后转解析/嗅探的路径。
+            // 直播直链（push_mode=false）保持原样，不受影响。
+            // 只有 http/https 的「页面地址」才进嗅探；rtmp/rtsp/smb/ftp 这类协议直接交播放器，
+            // 否则 WebView 会去加载一个它根本不支持的 scheme。认不出的 scheme 同样不进 WebView。
+            val scheme = directUrl.substringBefore(':', "").lowercase()
+            val pageLike = scheme == "http" || scheme == "https"
+            if (pushMode && pageLike && !ThunderPlay.match(directUrl) && !looksLikeMedia(directUrl)) {
+                startSniff(directUrl, emptyMap())
+            } else {
+                playUrl(directUrl)
+            }
+            // 历史由上面的守卫统一写一次：push / 直播 / 历史回放三条来源都带了 vod_id，
+            // 这里再写一次会是同一 key 的重复入库（addHistory 虽幂等，但没必要双写）。
+        } else {
+            Thread { fetchAndPlay(vodId, flag, epUrl) }.start()
+        }
+    }
+
+    /**
+     * 进入播放层。每次进入都走这一条：
+     *   1) 记下 Intent
+     *   2) 重解析参数（换集 / 换线路都会变）
+     *   3) bind 只在第一次真正干活（inflate + 绑 UI）
+     *   4) 每次重新起播
+     */
+    fun enter(a: android.content.Intent, parent: android.view.ViewGroup) {
+        val wasAttached = attached
+        // ★必须在 applyArgs 之前比：applyArgs 会把 epUrl 覆盖成新值
+        val sameEpisode = a.getStringExtra("ep_url").orEmpty() == epUrl &&
+            a.getStringExtra("flag").orEmpty() == flag
+        args = a
+        applyArgs(a)
+        bind(parent)
+        // 同集二次进入：不重新拉站点详情、不重新 setMediaItem。
+        // 原版的设计意图就是"把小窗里正在播的那一路原样提升到全屏，不重载"；
+        // 重载会表现成"进得去，但先转几秒、画面还要黑一下"。
+        // 恢复动作交给 onHostResume（它负责 mpv 的 setBackground(false)/resume
+        // 与 EXO 的 play），这里只负责跳过重载。
+        if (wasAttached && sameEpisode && activeUrl.isNotBlank()) {
+            MpvDebug.log("[play] 同集再入：跳过解析与重载 url=${activeUrl.take(48)}")
+            return
+        }
+        startPlayback()
+    }
+
+    /**
+     * 再次进入播放层：把引擎和画面一起接回来。
+     *
+     * ★所有权模型：引擎归宿主，画面层由宿主临时借给详情小窗。
+     *   退出时 takePlayer() 把 EXO 交回宿主、releaseSurface() 让画面层松手；
+     *   再进入必须由宿主把这两样都还回来。
+     *   缺这一步时 PlayLayer.player 恒为 null，onHostResume 里的 player?.play() 是空操作 ——
+     *   真机表现就是「从播放页回详情页后，再点集数进不去播放页」。
+     */
+    fun reconnect(p: ExoPlayer?) {
+        // 首次进入：bind 会自己建引擎，这里什么都不做
+        if (!attached) return
+        // 只补空位。二次进入时 player 已被 takePlayer() 置空，才需要从宿主接回；
+        // 不要覆盖本层自己建的实例（会丢一个没人释放的 ExoPlayer）。
+        if (p != null && player == null) player = p
+        if (isMpvMode()) {
+            // mpv 复用时要重新交主权（releaseSurface 已经把 VideoHost 的 native 回调清掉了）
+            val m = mpv
+            if (m != null) videoHost?.let { vh -> runCatching { m.bindToHost(vh) } }
+        } else {
+            // EXO 模式兜底：万一宿主那边也没有实例，就地建一颗，否则起播无从谈起
+            if (player == null) {
+                player = ExoPlayer.Builder(host).build().also { p2 ->
+                    p2.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
+                    session.adoptExo(p2)
+                }
+                attachPlayerListeners()
+            }
+            player?.let { videoHost?.takeExo(it) }
+        }
+        MpvDebug.log("[life] reconnect kernel=${if (isMpvMode()) "mpv" else "exo"} " +
+            "player=${if (player != null) "ok" else "null"} mpv=${if (mpv != null) "ok" else "null"}")
+    }
+
 
     /** 承接原来 46 处 window.xxx：播放层用的就是宿主的窗口，不存在第二个窗口 */
     private val window get() = host.window
@@ -213,18 +384,7 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
         runCatching { window.setBackgroundDrawable(null) }
             .onFailure { MpvDebug.log("[boot] ★窗口背景置空失败：$it") }
 
-        vodId = intent.getStringExtra("vod_id") ?: ""
-        vodName = intent.getStringExtra("vod_name") ?: ""
-        vodPic = intent.getStringExtra("vod_pic") ?: ""
-        flag = intent.getStringExtra("flag") ?: ""
-        epUrl = intent.getStringExtra("ep_url") ?: ""
-        invalidateHistoryKey()
-        directUrl = intent.getStringExtra("direct_url") ?: ""
-        pushMode = intent.getBooleanExtra("push_mode", false)
-        // 直播频道与手机推送写入历史时，vod_id 存的就是播放地址本身（原版同样如此）。
-        // 从历史点回来时不会有 direct_url，这里补认一次，否则会去站点详情接口查一个 URL，必然失败。
-        if (directUrl.isBlank() && (looksLikeMedia(vodId) || ThunderPlay.match(vodId))) directUrl = vodId
-        siteKey = SubscriptionStore(host).currentKey() ?: ""
+        applyArgs(intent)
 
         session = PlaybackSession(
             exoFactory = { null },                        // 实例由 Activity 自己建，建好交给会话
@@ -330,6 +490,10 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         val tBar0 = SystemClock.uptimeMillis()
         bindControlBar()
+        // ★时间条监听只能在 bind（一次性）里挂：DefaultTimeBar.addListener 没有对应的 remove，
+        //   挂几次就回调几次。它刚从 startPlayback 挪回来 —— 那版每进一次播放页就多挂一个，
+        //   onScrubStop 会成倍执行（也是"进出几次后按键手感变差"的来源之一）。
+        bindTimeBarScrub()
         MpvDebug.log("[perf] bindControlBar=${SystemClock.uptimeMillis() - tBar0}ms 距onCreate=${SystemClock.uptimeMillis() - tCreate}ms")
         videoHost?.post { setupSharedSurface() }
         uiHandler.postDelayed(snapTick, 1000)
@@ -379,80 +543,6 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
         //   收尾时把用户刚呼出的条也收掉，现场表现就是要按两次。现在起播前只用"加载中"
         //   把这段时间如实表达出来（不亮转圈的话，用户按菜单正好赶上这段，看到的是"按菜单把画面按黑了"，
         //   而实际是还没出帧）。
-        showPlayProgress("进页面解析")
-        // ★输入环境探针（只打一次，几乎零开销）。
-        //   Android 官方文档明确：开启无障碍/触摸探索后，D-pad 事件不会传给开发者定义的方向键处理器，
-        //   而是被无障碍服务拿走用于移动无障碍焦点 —— 这是"应用收不到方向键、菜单键却照常到达"的一个真实成因。
-        //   touchMode 同理：触摸模式下没有视图持有焦点，第一下按键只会把焦点捡回来。
-        //   这两项只读一次，就足以越过所有猜测。
-        runCatching {
-            val am = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
-            MpvDebug.log(
-                "[env] touchMode=${runCatching { window.decorView.isInTouchMode }.getOrNull()}" +
-                    " a11y=${am?.isEnabled} touchExploration=${am?.isTouchExplorationEnabled}" +
-                    " rootFocusable=${rootView?.isFocusable} rootFocusableInTouch=${rootView?.isFocusableInTouchMode}" +
-                    " decorHasFocus=${runCatching { window.decorView.hasFocus() }.getOrNull()}"
-            )
-        }
-        MpvDebug.log("[play] 进页面 开始解析/起播 t=${System.currentTimeMillis() % 100000}")
-        updateDecodeText()
-        updatePlayerText()
-        val marks0 = HistoryStore(host).marks(historyKey, epUrl)
-        openingMs = marks0[0]
-        endingMs = marks0[1]
-        startPosMs = marks0[2]
-        updateOpeningText()
-        updateEndingText()
-        // 倍速：点击循环档位，对齐原项目 addSpeed()
-        val speedBtn = findViewById<TextView>(R.id.btnSpeed)
-        speedBtn.setOnClickListener { toggleSpeed() }
-        // 长按倍速快进（对齐原项目 onSpeedUp：长按 3x，松开恢复）
-        speedBtn.setOnLongClickListener {
-            fastForwarding = true
-            savedSpeedIdx = speedIdx
-            speedBtn.text = "快进 3x（松开恢复）"
-            if (isMpvMode()) mpv?.setSpeed(3f) else player?.setPlaybackSpeed(3f)
-            true
-        }
-        // 缩放档位循环（对齐原项目 onScale/setScale）
-        findViewById<TextView>(R.id.btnScale).setOnClickListener { toggleScale() }
-        // 上一集/下一集（对齐原项目 control.prev/next → checkPrev/checkNext）
-        findViewById<View>(R.id.btnPrev).setOnClickListener { switchEpisode(-1) }
-        findViewById<View>(R.id.btnPlayPause).setOnClickListener { togglePlayPause() }
-        bindTimeBarScrub()
-        findViewById<View>(R.id.btnNext).setOnClickListener { switchEpisode(1) }
-        // 清晰度切换（对齐原项目 QualityAdapter/setQualityActivated）
-        findViewById<View>(R.id.btnQuality).setOnClickListener { toggleQuality() }
-
-        // 原版 VideoActivity:1269-1271 在起播前就把 History 建好（createHistory / updateHistory），
-        // 不依赖抖源解析成功。之前只在各条「解析成功」分支里记，解析慢或中途退出就漏记，
-        // 「看过的片子历史里没有」就是这么来的。
-        // ★条件放宽到与 HistoryStore.addHistory 内部 key 规则一致（vodId 优先、退回片名）。
-        //   原来要求 vodName 也非空：从历史/收藏/推送进来的入口常常只带 vodId，
-        //   于是这部片从来没被写进历史 —— 现场就是 row=false 但 total=9。
-        if (historyKey.isNotBlank()) recordHistory()
-
-        // 直播直链：直接播放；影片：先拉详情拿线路（供选集面板），再解析播放
-        if (directUrl.isNotBlank()) {
-            // 手机推送（push_mode）有两种来源：
-            //   1) 直链 m3u8/mp4/磁力/迅雷 —— 直接进播放器；
-            //   2) 网页分享地址 —— 交给嗅探 WebView 抓真实流地址，等价原版
-            //      VideoActivity.push → 播放失败后转解析/嗅探的路径。
-            // 直播直链（push_mode=false）保持原样，不受影响。
-            // 只有 http/https 的「页面地址」才进嗅探；rtmp/rtsp/smb/ftp 这类协议直接交播放器，
-            // 否则 WebView 会去加载一个它根本不支持的 scheme。认不出的 scheme 同样不进 WebView。
-            val scheme = directUrl.substringBefore(':', "").lowercase()
-            val pageLike = scheme == "http" || scheme == "https"
-            if (pushMode && pageLike && !ThunderPlay.match(directUrl) && !looksLikeMedia(directUrl)) {
-                startSniff(directUrl, emptyMap())
-            } else {
-                playUrl(directUrl)
-            }
-            // 历史由上面的守卫统一写一次：push / 直播 / 历史回放三条来源都带了 vod_id，
-            // 这里再写一次会是同一 key 的重复入库（addHistory 虽幂等，但没必要双写）。
-        } else {
-            Thread { fetchAndPlay(vodId, flag, epUrl) }.start()
-        }
     }
 
     /** 拉详情（取线路列表）→ 解析指定线路/集播放 */
