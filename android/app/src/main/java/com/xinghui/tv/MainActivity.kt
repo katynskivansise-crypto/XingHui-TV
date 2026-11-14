@@ -205,9 +205,10 @@ class MainActivity : Activity() {
     fun showPlayLayer(extras: Intent) {
         val layer = playLayer ?: PlayLayer(this) { exitPlayLayer() }.also { playLayer = it }
         // gate 日志：进入这条链路每一步的输入状态。有它才不用靠猜。
+        // ★这里只用 PlayLayer 已有的公开 API（mpvInstance / takePlayer / enter / reconnect），
+        //   不再引用后加的调试方法 —— 少一个跨文件依赖，就少一次"只覆盖了一个文件"导致的编译失败。
         MpvDebug.log("[gate] showPlayLayer ep=${extras.getStringExtra("ep_url").orEmpty().take(40)} " +
-            "exoPlayer=${if (player != null) "ok" else "null"} mpv=${if (playLayer?.mpvInstance() != null) "ok" else "-"} " +
-            "attached=${layer.isAttached()}")
+            "exoPlayer=${if (player != null) "ok" else "null"} mpv=${if (layer.mpvInstance() != null) "ok" else "-"}")
         // 详情预览先把这块 surface 让出来，再交给播放层 —— 同一块，不新建
         detachSurfaceFrom()
         runCatching { player?.pause() }

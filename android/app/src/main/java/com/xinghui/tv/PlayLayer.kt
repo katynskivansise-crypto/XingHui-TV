@@ -62,6 +62,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      */
     fun mpvInstance(): MpvPlayer? = if (isMpvMode()) mpv else null
 
+    /** gate 日志用：本层是否已经 inflate 过（第二次进入时为 true） */
+    fun isAttached(): Boolean = attached
+
     /**
      * 退出播放层时让画面层松手。
      * ★以前退出只把 EXO 交回宿主，没有让 VideoHost 交权，owner 一直停在 EXO / NATIVE；
