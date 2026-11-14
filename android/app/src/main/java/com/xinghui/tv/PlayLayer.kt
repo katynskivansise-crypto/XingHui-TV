@@ -45,7 +45,7 @@ import org.json.JSONObject
  *   bind / onHostResume / onHostPause / onHostWindowFocusChanged /
  *   onHostConfigurationChanged / onHostKeyEvent / onHostKeyUp / onHostDestroy
  */
-class PlayLayer(private val host: android.app.Activity, private val onExit: () -> Unit) {
+class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) {
 
     /** 本次要播的东西（宿主传进来，不再从成 host.intent 读） */
     private var args: android.content.Intent? = null
@@ -53,6 +53,14 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
 
     /** 把当前引擎原样交回宿主（退出播放层时用，不 release、不重建） */
     fun takePlayer(): ExoPlayer? { val p = player; player = null; return p }
+
+    /**
+     * 当前内核是 mpv 时它手里的实例。
+     * ★退出播放层必须把它交出去：takePlayer() 只能拿 ExoPlayer，mpv 模式拿不到，
+     *   退出后小窗没有任何东西接手，mpv 继续出声、画面留在已经不可见的面上 ——
+     *   现场就是"小窗像暂停一样，只有声音"。
+     */
+    fun mpvInstance(): MpvPlayer? = if (isMpvMode()) mpv else null
 
     /**
      * 退出播放层时让画面层松手。
@@ -309,7 +317,13 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
     private var speedIdx = 2 // 默认 1.0x
     private var fastForwarding = false
     private var savedSpeedIdx = 2
-    private var videoHost: VideoHost? = null
+    /**
+     * 画面层只有一份，由宿主持有（videoFrame + PlayerView + subtitleView 全在宿主布局里）。
+     * ★以前本层自己 new 了一个包同一块 PlayerView 的 VideoHost —— 两个实例的 bound 记录
+     *   各记一份，等于两个人同时以为自己拥有这块面。换所有者时一个松手、另一个不知道，
+     *   表现就是小窗黑 / 退出后进不去 / 只有声音。改为单一实例。
+     */
+    private val videoHost: VideoHost get() = host.videoHost
     /** 播放状态唯一所有者：控制动作一律经它，Activity 不再直接判「能不能做」 */
     private lateinit var session: PlaybackSession
     // ★默认用「裁剪」而不是「原始(fit)」。
@@ -402,19 +416,7 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
         // 这三处是"一处不中，整页静默"的关键路径，失败必须出声：
         // 之前一律 runCatching 吞掉，画面层没接上时 videoHost=null，表现就是黑屏 + 按键全无反应，
         // 而日志里一个字都没有 —— 这正是"改了没效果、看不出接线断没断"的来源。
-        videoHost = runCatching {
-            VideoHost(
-                // ★这三个视图在宿主布局（activity_main.xml）里，不在本层 —— 只此一份
-                host.findViewById(R.id.videoFrame),
-                host.findViewById(R.id.playerView),
-                host.findViewById(R.id.subtitleView)
-            )
-        }.onFailure {
-            MpvDebug.log("[boot] ★画面层构建失败，本页将黑屏且按键无反馈：" +
-                "videoFrame=${host.findViewById<View>(R.id.videoFrame)?.javaClass?.simpleName} " +
-                "playerView=${host.findViewById<View>(R.id.playerView)?.javaClass?.simpleName} " +
-                "subtitle=${host.findViewById<View>(R.id.subtitleView)?.javaClass?.simpleName} err=$it")
-        }.getOrNull()
+        // 画面层由宿主持有（见 videoHost 的 getter），本层不再自建第二个实例。
         // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」。
         // ★必须打在 videoHost 赋值之后：以前它写在前面，host 恒为 null，把「画面层是否接上」
         //   这个最该看的信号变成了永远读不出来的假值。

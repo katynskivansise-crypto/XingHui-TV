@@ -57,7 +57,16 @@ class MainActivity : Activity() {
     /** 播放层（懒加载：第一次进播放才 inflate） */
     private var playLayer: PlayLayer? = null
     /** 当前占据这块 surface 的 ExoPlayer（预览或播放页），用于 surfaceCreated 后补挂 */
-    private var surfaceConsumer: androidx.media3.exoplayer.ExoPlayer? = null
+    private var surfaceConsumer: androidx.media3.common.Player? = null
+
+    /**
+     * 唯一画面层的持有者 —— 全仓只此一份。
+     * 播放层以前自己 new 了一个包同一块 PlayerView 的实例，两个实例各记一份 bound，
+     * 结果就是两家抢一块面。这里作为唯一入口。
+     */
+    internal val videoHost: VideoHost by lazy {
+        VideoHost(videoFrame, findViewHost(R.id.playerView), subtitleView)
+    }
     /** SurfaceView 的 surface 是否已有效 */
     private var surfaceValid = false
     /** 是否处于播放页形态（播放层在前台） */
@@ -126,18 +135,25 @@ class MainActivity : Activity() {
      *   历史教训：以前小窗也用那块 SurfaceView，靠改 LayoutParams 缩放，
      *   surface 的 buffer 尺寸跟着变，API 25 的 MediaCodec 不重建输出 → 有声音没画面。
      */
-    private fun attachPreviewTo(p: androidx.media3.exoplayer.ExoPlayer) {
+    private fun attachPreviewTo(p: androidx.media3.common.Player) {
         surfaceConsumer = p
         // ★必须是 setVideoSurfaceView(View)，不能是 setVideoSurface(裸 Surface)。
         //   media3 只有在拿到一个 View 时才会挂 SurfaceHolder.Callback，并在 surfaceChanged
         //   里自己调用 setVideoSurfaceSize —— 解码器就是靠这一次通知重建输出。
         //   给裸 Surface 的话没有任何人监听尺寸变化，容器从小窗撑到全屏时画面就停住了。
-        runCatching { p.setVideoSurfaceView(videoSurface) }
+        // ★只走 PlayerView.setPlayer 这条官方路径。
+        //   以前是 p.setVideoSurfaceView(videoSurface) —— 那块是 1920x1080 的全屏 SurfaceView，
+        //   拿它开小窗等于让解码器把全屏 buffer 塞进 400x225：API 25 的 MediaCodec 不重建输出，
+        //   表现就是"有声音没画面"（这段话本文件上面已经写过一次，是上一轮踩过的坑）。
+        //   现在交给 PlayerView：surface 尺寸、缩放、首帧三件事都由它按 videoFrame 的尺寸维护。
+        runCatching { videoHost.setPlayer(p) }
     }
 
     private fun detachSurfaceFrom() {
-        surfaceConsumer?.let { runCatching { it.clearVideoSurfaceView(videoSurface) } }
         surfaceConsumer = null
+        // 松手也走 PlayerView：keep_content_on_player_reset=true 会保留最后一帧，
+        // 切到播放页时不会先闪一下黑。
+        runCatching { videoHost.setPlayer(null) }
     }
 
     private fun previewAttached(): Boolean = surfaceConsumer != null
@@ -221,7 +237,7 @@ class MainActivity : Activity() {
      */
     private var detailListener: androidx.media3.common.Player.Listener? = null
 
-    private fun bindDetailListener(p: androidx.media3.exoplayer.ExoPlayer) {
+    private fun bindDetailListener(p: androidx.media3.common.Player) {
         detailListener?.let { runCatching { p.removeListener(it) } }
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -279,7 +295,12 @@ class MainActivity : Activity() {
         // ★画面层同时松手：否则 VideoHost 的 owner 停在 EXO/NATIVE，
         //   宿主小窗再挂同一块 surface 就是两家抢面（这是"小窗黑/再进不去"的共同来源）
         playLayer?.releaseSurface()
-        val q = p ?: player
+        // ★mpv 内核退出时必须把 MpvPlayer 交出去。takePlayer() 只拿 ExoPlayer，
+        //   mpv 模式拿不到 → 旧代码在这里 q == null 直接 return：小窗什么都没挂上，
+        //   mpv 还在出声，画面却留在播放页那块已经不可见/已销毁的面上 →
+        //   现场就是"小窗像暂停一样，只有声音"。
+        val mpvNow = playLayer?.mpvInstance()
+        val q: androidx.media3.common.Player? = mpvNow ?: (p ?: player)
         if (q == null) return
         bindDetailListener(q)
         // ★海报要收起来。以前退出播放层没走这一步：如果进播放页前海报是可见的，
@@ -291,7 +312,7 @@ class MainActivity : Activity() {
         attachPreviewTo(q)
         // ★引擎可能已经被重置成 IDLE（换源/换集/换内核都会）。IDLE 下调 play() 不会起播，
         //   表现就是"小窗有 surface 但一直是灰的"。
-        if (q.playbackState == androidx.media3.common.Player.STATE_IDLE) {
+        if (q !is MpvPlayer && q.playbackState == androidx.media3.common.Player.STATE_IDLE) {
             // 只 prepare 不设 mediaItem 等于空转，先补上片源
             runCatching {
                 if (q.mediaItemCount == 0 && inlineUrl.isNotBlank()) {
@@ -300,6 +321,9 @@ class MainActivity : Activity() {
             }
             runCatching { q.prepare() }
         }
+        // mpv 在 onHostPause 里被 setBackground(true)（等于告诉它"进后台了"），
+        // 交接后必须还原，否则它认为在后台、不出帧。
+        if (q is MpvPlayer) runCatching { q.setBackground(false) }
         runCatching { q.play() }
         // 把判断依据直接打到屏幕上：装一版就能看清是哪一环断的，不用再去翻日志。
         runCatching {
@@ -382,7 +406,10 @@ class MainActivity : Activity() {
                 MpvDebug.log("[sv2] created（全屏播放页专用） ${videoSurface.width}x${videoSurface.height}")
                 // ★只在播放页把 surface 交出去。详情页期间这块 SurfaceView 是 GONE 的，
                 //   它一旦重新出现不应该抢走详情页小窗（小窗走 TextureView）。
-                if (playMode) surfaceConsumer?.let { p -> runCatching { p.setVideoSurface(h.surface) } }
+                // ★这里以前给引擎补一个裸 Surface（setVideoSurface(h.surface)）。
+                //   PlayerView 已经在按自己的 SurfaceView 维护输出，再塞一个裸 Surface 进去，
+                //   等于把"尺寸同步"这件事的来源换掉 —— 解码器拿到的是没人监听尺寸的 surface。
+                //   画面层现在只有 PlayerView 一个所有者，这一行不该存在。
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
                 MpvDebug.log("[sv2] changed $w x $ht")
