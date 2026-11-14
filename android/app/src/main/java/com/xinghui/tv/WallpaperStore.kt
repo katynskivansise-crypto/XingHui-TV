@@ -33,8 +33,13 @@ object WallpaperStore {
     fun apply(activity: Activity) {
         runCatching {
             val f = file(activity)
-            if (f.exists() && f.length() > 0) {
-                activity.window.setBackgroundDrawable(Drawable.createFromPath(f.absolutePath))
+            // ★createFromPath 遇到损坏/非图片文件会返回 null，而不是抛异常。
+            //   外面那层 runCatching 抓不到它，setBackgroundDrawable(null) 就静默变成纯黑
+            //   —— 「首页/详情页突然黑了、但文件明明在」就是这条。
+            //   必须判断返回值，拿不到就回退内置图。
+            val self = if (f.exists() && f.length() > 0) Drawable.createFromPath(f.absolutePath) else null
+            if (self != null) {
+                activity.window.setBackgroundDrawable(self)
             } else {
                 // 原版 Setting.getWall() 默认 1 → 用内置 wallpaper_1。
                 // 之前这里设 null 会把 MainActivity 刚设好的壁纸清掉，首页退回纯黑，

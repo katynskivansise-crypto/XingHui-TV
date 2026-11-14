@@ -141,7 +141,13 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
     private var videoHost: VideoHost? = null
     /** 播放状态唯一所有者：控制动作一律经它，Activity 不再直接判「能不能做」 */
     private lateinit var session: PlaybackSession
-    private var scaleIdx = 0
+    // ★默认用「裁剪」而不是「原始(fit)」。
+    //   fit 在 PlayerView 里不是"缩放画面"，而是让内部 AspectRatioFrameLayout **改自己的尺寸**
+    //   去贴合视频比例 —— 结果就是容器 600x338、里面的 SurfaceView 只有 600x250，
+    //   上下各留 44px 黑边（真机 frame=600x338 sv=600x250 就是它）。
+    //   原版没这个问题，因为它的画面对应的是裸 SurfaceView，fit 根本不参与测量。
+    //   我们要的是"铺满且不变形"：裁剪(zoom) 按比例填满容器、只裁掉多余边，不变形。
+    private var scaleIdx = 4
     // 对齐原版 select_scale：原始 / 16:9 / 4:3 / 填充 / 裁剪 → ExoPlayer resizeMode
     private val scaleModes = intArrayOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
