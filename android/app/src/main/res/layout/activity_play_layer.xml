@@ -1,0 +1,453 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 播放页：全屏播放器 + 底部控制条（结构照原版 leanback/res/layout/view_control_vod.xml）
+     - 控制条默认隐藏，遥控器 ↓/↑ 或菜单键呼出，5 秒无操作自动收起（原版 Constant.INTERVAL_HIDE）
+     - 控制条隐藏时：OK = 暂停/继续，←/→ = 快退/快进 10 秒（对齐原版 CustomKeyDownVod）
+     - 按钮顺序与文案也是原版顺序：下集 上集 选集 刷新 EXO 硬解 1.00 原始 字幕 音轨 视轨 片头 片尾 弹幕搜索 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+
+    <!-- 属性对齐原版 styles.xml 的 Player 样式：
+         resize_mode=fit / use_controller=false / auto_show=false。
+         shutter 不单独指定颜色，走 media3 默认（黑）—— 原版 Player 样式里同样没有
+         shutter_background_color 这一项，多设一项反而偏离原版。
+         起播/换集那段空档由上面的 playProgress 转圈占位，与原版 Player.Vod 的行为一致
+         （keep_content_on_player_reset=false，旧帧清掉后直接看到转圈）。 -->
+    <!-- EXO 画面层保持原版的 surface_view（原版全仓零处 setSurfaceType / setZOrder / shutter，
+         就是 media3 默认值）。用户实测「最新版 EXO 在原版也没问题」，说明 EXO 这条链在
+         同机同 ROM 上本来就正常，这里不做任何偏离原版的改动；要换类实现只在 mpv 侧做
+         （原版没有 mpv，不存在参照）。 -->
+    <!-- ★画面层 = 官方 AspectRatioFrameLayout + 一块自有 SurfaceView + 公开 SubtitleView。
+         不再使用 PlayerView：它内部有一套我们控制不了的状态机
+         （shutter 自动盖黑、setVisibility 连带改内部 SurfaceView 的可见性、
+           没播放器时走 placeholderSurface 不画、player=null 命中 tracks 为空就关快门），
+         这几条正是「按菜单黑一下 / 首帧回放」的全部来源。
+         这里三件都是 media3 的公开类：resize_mode 行为与 PlayerView 内部完全一致，
+         SurfaceView 的生死只由我们自己 attach/detach，外界一律不碰。 -->
+    <!-- ★画面层已整体上移到 activity_main.xml 的 videoFrame：一块 SurfaceView 从进详情页起
+         就存在，播放页/小窗/全屏预览三种形态只改它的 LayoutParams，永不重建、永不 detach。
+         本层（播放层）只负责"盖在画面上的东西"：转圈、顶栏、控制条。 -->
+
+
+    <!-- 内嵌 mpv 的画面层已删除（路线 A）：mpv 与 EXO 共用上面 playView 的那一块 SurfaceView。
+         播放页现在只有一套画面层，任何地方都不再需要第二块 surface 或第二块视图。 -->
+
+
+    <!-- 起播/缓冲指示：对齐原版 view_widget_vod.xml 的 @id/progress
+         （LinearLayout 居中，内含 view_progress 的 ProgressBar + traffic 网速文本）。
+         原版靠 Player.STATE_BUFFERING -> showProgress()、STATE_READY -> hideProgress() 切换；
+         这里同理，另在解析阶段（resolvePlay 开始到首个状态回调之间）也盖上，
+         否则点了播放到 ExoPlayer 第一次回调之间仍然是纯黑。 -->
+    <LinearLayout
+        android:id="@+id/playProgress"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- 原版 view_progress.xml：ProgressBar 居中，indeterminateTint=white -->
+        <ProgressBar
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:indeterminateTint="@android:color/white" />
+
+        <!-- 原版 widget/traffic：白字 16sp，距上 8dp，显示实时网速（我们暂填「加载中」） -->
+        <TextView
+            android:id="@+id/playProgressText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="加载中"
+            android:textColor="@android:color/white"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+    <!-- 暂停时居中提示：对齐原版 view_widget_vod.xml 的 @id/center。
+         结构完全照抄：外形 LinearLayout（圆角半透明黑 background=@drawable/shape_widget，padding=16dp），
+         上面 56dp 的 action 图标（暂停时是 ic_widget_play，语义为「按 OK 继续播放」），
+         下面一行「当前位置 / 总时长」，16sp 白字，斜杠两侧各 4dp。
+         原版时机：onPaused() 时 showInfoAndCenter()（全屏才显示），onPlay() 时 hideCenter()。 -->
+    <LinearLayout
+        android:id="@+id/playCenter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/shape_widget"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/playCenterIcon"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_widget_play" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/playCenterPos"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:text="/"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/playCenterDur"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- 片名：原版顶部 info（view_widget_vod），跟随控制条显隐 -->
+    <TextView
+        android:id="@+id/playTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:background="#66000000"
+        android:paddingStart="12dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:text="播放中"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp" />
+
+    <!-- 底部控制条 -->
+    <LinearLayout
+        android:id="@+id/controlBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@drawable/shape_controller"
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingTop="18dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:visibility="visible">
+
+        <!-- 解析源（原版控制条最上一行 parse） -->
+        <HorizontalScrollView
+            android:id="@+id/parseBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/parseRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <!-- 按钮行：横向可滚动 -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/actionLayout"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnPlayPause"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="暂停"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnNext"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="下集"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnPrev"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="上集"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnEpisodes"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="选集"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnReset"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="刷新"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnPlayer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="EXO"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnDecode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="硬解"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnSpeed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="1.00"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnScale"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="原始"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnTrackText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="字幕"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnTrackAudio"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="音轨"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnTrackVideo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="视轨"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnOpening"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="片头"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnEnding"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="片尾"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <!-- 弹幕未接入：原版按站点是否支持弹幕显隐，无源时不显示。
+                 先固定 gone，避免出现点了只提示「未接入」的死按钮。 -->
+            <TextView
+                android:id="@+id/btnDanmu"
+                android:visibility="gone"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="弹幕搜索"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btnLoop"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="循环"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+
+            <!-- 清晰度：原版控制条没有独立按钮，多清晰度时才显示（保留功能） -->
+            <TextView
+                android:id="@+id/btnQuality"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/selector_text"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusDown="@id/timeBar"
+                android:text="清晰度"
+                android:textColor="@color/white"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- 时间栏（原版 view_control_seek.xml）：位置 / 进度条 / 时长 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/timePos"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="00:00"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <androidx.media3.ui.DefaultTimeBar
+                android:id="@+id/timeBar"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:nextFocusUp="@id/btnPlayPause" />
+
+            <TextView
+                android:id="@+id/timeDur"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="00:00"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+</FrameLayout>

@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 详情页：按原版 activity_video.xml 的数值逐项对齐
+     video 400x225dp(marginStart 24/marginTop 24) / name 24sp bold 右侧 / 三按钮贴框底
+     flag 线路行在框下方 / 集数网格 paddingStart 24 -->
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent">
+
+    <!-- 播放器小窗：原版是固定 400x225dp（16:9 硬尺寸），不是按 weight 撑开 -->
+    <FrameLayout
+        android:id="@+id/playerBox"
+        android:layout_width="400dp"
+        android:layout_height="225dp"
+        android:layout_marginStart="24dp"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="12dp"
+        android:background="@android:color/transparent"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:foreground="@drawable/selector_video">
+
+        <ImageView
+            android:id="@+id/detailImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitCenter" />
+
+        <!-- ★小窗画面不再由本页持有：页面里那块常驻 SurfaceView（activity_main.xml 的
+             videoFrame/videoSurface）在详情模式下被摆到本框的位置，播放模式下撑成全屏。
+             所以本框只留一层透明占位 + 海报 + 覆盖文字；
+             背景必须透明，否则会把底下的画面挡住（这就是"只有声音没有画面"的成因）。 -->
+        <!-- ★surface_type="texture_view" —— 这一行是「从详情页进播放页第一下按键打空 / 首次呼条黑」的根。
+             官方 Surface types 文档（developer.android.com/media/media3/ui/surface）原文：
+               "The lifecycle of a SurfaceView's surface is tied to **view visibility**, whereas a
+                TextureView's surface lifecycle is tied to **window attachment and detachment**.
+                Therefore ... starting playback can take longer because the output surface becomes
+                available slightly later."
+             我们的情况正是它的反面：详情页这块 PlayerView 默认是 surface_view，
+             它的 surface 绑的是**可见性**，而本页离开时只走 onPause（没有 onStop 重载，
+             inlineView 也从不被设回 GONE），所以跳去播放页之后这块 surface 仍然活着 ——
+             两块 SurfaceView（1920x1080 的后台预览 + 播放页画面）在切换那几百毫秒里共存，
+             播放页窗口的首次合成被推后，winFocus 迟到，第一下按键就打空；
+             那一下菜单"刚好"把首次合成的代价付掉，于是看起来"必须先按一次菜单"。
+             改成 texture_view 后，它的 surface 绑的是**窗口 attach/detach**，离开窗口即释放，
+             与播放页的 SurfaceView 永不共存。官方同一页给的分工依据：
+               · SurfaceView 的优势（低功耗 / 精确帧时序 / HDR / DRM secure / **Android TV 上
+                 上采样设备能按屏幕全分辨率输出**）—— 这些只有全屏播放页需要，详情页小窗一样用不上；
+               · "TextureView should be used only if SurfaceView does not meet your needs" ——
+                 "不与另一个 surface 抢合成" 正好就是这里的需求。
+             所以分工是：**会共存的一方（详情页）用 texture_view，独占全屏的一方（播放页）保持 surface_view**，
+             不能反过来 —— TV 上只有 SurfaceView 才能按屏幕全分辨率输出，播放页改 texture 会掉清晰度。 -->
+        <!-- ★纯占位，不是画面。画面本体是 host 层那块 videoFrame（与小窗位置对齐，
+             全屏时整个撑开）。这里保持透明，否则会盖住画面 ——
+             历史上"只有声音没有画面"就有一半是这里盖了不透明的东西。 -->
+        <FrameLayout
+            android:id="@+id/inlinePlayer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@android:color/transparent"
+            android:visibility="visible" />
+
+        <!-- 起播浮层：原版 view_widget_vod 的 info，标题 20sp、分辨率 16sp，带阴影 -->
+        <RelativeLayout
+            android:id="@+id/vodInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/vodInfoTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:layout_marginTop="16dp"
+                android:layout_marginEnd="16dp"
+                android:letterSpacing="0.02"
+                android:shadowColor="#FF212121"
+                android:shadowDx="2"
+                android:shadowDy="2"
+                android:shadowRadius="1"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:textColor="@color/white"
+                android:textSize="20sp" />
+
+            <TextView
+                android:id="@+id/vodInfoSize"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_below="@id/vodInfoTitle"
+                android:layout_alignStart="@id/vodInfoTitle"
+                android:layout_marginBottom="16dp"
+                android:shadowColor="#FF212121"
+                android:shadowDx="2"
+                android:shadowDy="2"
+                android:shadowRadius="1"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+        </RelativeLayout>
+
+    </FrameLayout>
+
+    <!-- 标题：原版 24sp bold，紧贴播放器框右侧 -->
+    <TextView
+        android:id="@+id/detailName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/playerBox"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:layout_marginTop="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:text="影片详情" />
+
+    <!-- 站源/年份/地区/更新：原版 row1，16sp，各项间隔 12dp -->
+    <TextView
+        android:id="@+id/detailInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/detailName"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:text="年份 · 地区 · 备注" />
+
+    <TextView
+        android:id="@+id/detailDesc"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/detailInfo"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
+        android:ellipsize="end"
+        android:lineSpacingExtra="4dp"
+        android:maxLines="4"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:text="简介" />
+
+    <!-- 返回按钮已去掉：原版 VodActivity 没有这个按钮，返回靠系统返回键 -->
+
+    <!-- 简介/收藏/换源：原版 row2 与播放器框底边对齐，右移一列 -->
+    <LinearLayout
+        android:id="@+id/row2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignStart="@id/detailName"
+        android:layout_alignBottom="@id/playerBox"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/btnDesc"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/selector_item"
+            android:drawablePadding="6dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:singleLine="true"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:drawableStart="@drawable/ic_detail_desc"
+            android:drawableTint="@color/white"
+            android:text="简介" />
+
+        <TextView
+            android:id="@+id/btnFav"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/selector_item"
+            android:drawablePadding="6dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:singleLine="true"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:drawableStart="@drawable/ic_detail_keep_off"
+            android:drawableTint="@color/white"
+            android:text="收藏" />
+
+        <TextView
+            android:id="@+id/btnSource"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/selector_item"
+            android:drawablePadding="6dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:singleLine="true"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:drawableStart="@drawable/ic_detail_change"
+            android:drawableTint="@color/white"
+            android:text="换源" />
+
+    </LinearLayout>
+
+    <!-- 播放源 tab：原版 flag 位于播放器框正下方，左右各留 24dp -->
+    <HorizontalScrollView
+        android:id="@+id/flagRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/playerBox"
+        android:layout_marginBottom="12dp"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/flagItems"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
+
+    </HorizontalScrollView>
+
+    <!-- 倒序 + 分段：1-40 / 41-80 / 81-102 -->
+    <LinearLayout
+        android:id="@+id/groupRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/flagRow"
+        android:layout_marginBottom="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp">
+
+        <TextView
+            android:id="@+id/btnOrder"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/selector_item"
+            android:focusable="true"
+            android:clickable="true"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:text="倒序" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingEnd="16dp"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:text="→" />
+
+        <LinearLayout
+            android:id="@+id/groupItems"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="horizontal" />
+
+    </LinearLayout>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/detailList"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_below="@id/groupRow"
+        android:layout_marginBottom="12dp"
+        android:clipToPadding="false"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp" />
+
+</RelativeLayout>
