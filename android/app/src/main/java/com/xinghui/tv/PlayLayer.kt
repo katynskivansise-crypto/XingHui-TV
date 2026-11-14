@@ -330,7 +330,12 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
         // ★共用画面层的生命周期：这条以前只在 mpv 分支里打（[mpv] surfaceCreated…），
         // 用 EXO 时完全看不见 surface 有没有被重建。画面黑一下如果是 surface 重建，
         // 这一行必然出现；如果不出现，黑就与 surface 无关，方向直接分叉。
-        videoHost?.surfaceView?.holder?.addCallback(object :
+        // ★同一个回调只会挂一次：每次进播放页都会走 bind()，以前这里每走一次就
+        //   addCallback 一个新建的匿名对象、且从不 removeCallback —— 进出几轮之后，
+        //   surfaceCreated 会回调 N 次（surfGen 被重复 ++，[sv2] 日志成倍）。
+        //   回调和监听器都不是一次性消耗品，复用同一个实例。
+        surfCallback?.let { runCatching { videoHost?.surfaceView?.holder?.removeCallback(it) } }
+        val cb = object :
             android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
                 surfGen++
@@ -359,7 +364,9 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
             override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
                 MpvDebug.log("[sv2] destroyed kernel=${if (isMpvMode()) "mpv" else "exo"}")
             }
-        })
+        }
+        surfCallback = cb
+        videoHost?.surfaceView?.holder?.addCallback(cb)
         // 首次呼出控制条会触发一次窗口重排，这家 ROM 上这一次要重建画面层的抠洞，表现为
         // 「第一次按菜单黑几秒、之后完全正常」。
         // ★这里以前有一段"用 alpha=0 预演一次显隐"的预热，已删：那种预热自己会触发收尾，
@@ -1902,6 +1909,9 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
     private var tCreate = 0L
     private var tResume = 0L
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 画面层 holder 回调（复用同一个，避免反复 bind 累积） */
+    private var surfCallback: android.view.SurfaceHolder.Callback? = null
     private val autoHide = Runnable { hideControl() }
 
     // 片头/片尾（对齐原版 History.getOpening/getEnding，按片记忆）

@@ -199,8 +199,20 @@ class MainActivity : Activity() {
      * 把详情页的监听器挂到某个引擎上。★ 退出播放层时播放层会把引擎原样交回来，
      * 但监听器不会跟着回来 —— 不重新挂，小窗就没有 onVideoSizeChanged，画面比例和分辨率都会停在旧值。
      */
+    /**
+     * 详情页用到的播放器监听器。**必须复用同一个实例**。
+     *
+     * ★这是一个自己造出来的负面优化：以前这里每次都 addListener 一个新建的匿名对象，
+     *   而从不 removeListener。来回进出播放页几次之后，同一个事件（错误、vsize、首帧）
+     *   会回调 N 次 —— 表现为「播放失败连发好几次」「诊断 Toast 一次弹两三个」「日志成倍」，
+     *   还会让 handlePlayFailure 的 800ms 去抖形同虚设。
+     *   监听器不是一次性的，挂一次就够了。
+     */
+    private var detailListener: androidx.media3.common.Player.Listener? = null
+
     private fun bindDetailListener(p: androidx.media3.exoplayer.ExoPlayer) {
-        p.addListener(object : androidx.media3.common.Player.Listener {
+        detailListener?.let { runCatching { p.removeListener(it) } }
+        val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 // 同一个错误可能连发，800ms 内只处理一次，避免疯狂切源
                 val now = System.currentTimeMillis()
@@ -217,8 +229,29 @@ class MainActivity : Activity() {
                 if (w > 0 && h > 0) {
                     findDetail<TextView>(R.id.vodInfoSize)?.text = "$w x $h"
                 }
+                // 把真实宽高比交给 AspectRatioFrameLayout。我们这块容器名就叫 AspectRatio 容器，
+                // 但以前从没调过 setAspectRatio —— 它一直按 0（不调整）跑，等于名不副实。
+                runCatching {
+                    if (w > 0 && h > 0) videoFrame.setAspectRatio(w.toFloat() / h.toFloat())
+                }
+                MpvDebug.log("[render] vsize ${w}x$h frame=${videoFrame.width}x${videoFrame.height}")
             }
-        })
+
+            /**
+             * ★唯一能证明「帧有没有真的进到这块 surface」的信号。
+             *   st=READY + playing=true 只能说明解码器在跑，不能说明画面进了我们这块面。
+             *   这个回调只在渲染器真的把第一帧送到 surface 时触发一次。
+             */
+            override fun onRenderedFirstFrame() {
+                MpvDebug.log(
+                    "[render] 首帧已进面 sv=${videoSurface.width}x${videoSurface.height} " +
+                        "frame=${videoFrame.width}x${videoFrame.height} " +
+                        "visible=${videoSurface.isShown} playMode=$playMode"
+                )
+            }
+        }
+        detailListener = listener
+        p.addListener(listener)
     }
 
     fun exitPlayLayer() {
@@ -233,6 +266,9 @@ class MainActivity : Activity() {
         val q = p ?: player
         if (q == null) return
         bindDetailListener(q)
+        // ★海报要收起来。以前退出播放层没走这一步：如果进播放页前海报是可见的，
+        //   回来后海报会一直盖在小窗上 —— 用户看到的是静止封面，而不是"没画面"。
+        runCatching { setPreviewVisible(true) }
         // ① 容器先缩回小窗（原版 mFrameParams 那一步）
         videoFrameToMini()
         // ② 把画面交回，走 setVideoSurfaceView —— media3 自己接住尺寸变化
@@ -240,6 +276,12 @@ class MainActivity : Activity() {
         // ★引擎可能已经被重置成 IDLE（换源/换集/换内核都会）。IDLE 下调 play() 不会起播，
         //   表现就是"小窗有 surface 但一直是灰的"。
         if (q.playbackState == androidx.media3.common.Player.STATE_IDLE) {
+            // 只 prepare 不设 mediaItem 等于空转，先补上片源
+            runCatching {
+                if (q.mediaItemCount == 0 && inlineUrl.isNotBlank()) {
+                    q.setMediaItem(androidx.media3.common.MediaItem.Builder().setUri(inlineUrl).build())
+                }
+            }
             runCatching { q.prepare() }
         }
         runCatching { q.play() }
@@ -248,15 +290,23 @@ class MainActivity : Activity() {
             val st = when (q.playbackState) {
                 1 -> "IDLE"; 2 -> "BUFFERING"; 3 -> "READY"; 4 -> "ENDED"; else -> "?" + q.playbackState
             }
-            android.widget.Toast.makeText(
-                this,
-                "[exit] st=$st playing=${q.isPlaying} " +
-                    "vsize=${q.videoSize.width}x${q.videoSize.height} " +
-                    "tracks=${q.currentTracks.groups.size} " +
-                    "sv=${videoSurface.width}x${videoSurface.height} " +
-                    "surfValid=$surfaceValid ep=${episodes.getOrNull(playingIdx)?.first}",
-                android.widget.Toast.LENGTH_LONG
-            ).show()
+            // ★必须延后：videoFrameToMini 只是 requestLayout，布局要到下一帧才跑完。
+            //   在同一拍读 videoSurface.width 拿到的是上一轮的尺寸（1920x1080），
+            //   那条 Toast 因此误导了两轮排查。
+            videoSurface.postDelayed({
+                runCatching {
+                    android.widget.Toast.makeText(
+                        this,
+                        "[exit] st=$st playing=${q.isPlaying} " +
+                            "vsize=${q.videoSize.width}x${q.videoSize.height} " +
+                            "tracks=${q.currentTracks.groups.size} " +
+                            "frame=${videoFrame.width}x${videoFrame.height} " +
+                            "sv=${videoSurface.width}x${videoSurface.height} " +
+                            "shown=${videoSurface.isShown} surfValid=$surfaceValid",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }, 600)
         }
         MpvDebug.log(
             "[exit] 交回小窗 frame=${videoFrame.width}x${videoFrame.height} " +
