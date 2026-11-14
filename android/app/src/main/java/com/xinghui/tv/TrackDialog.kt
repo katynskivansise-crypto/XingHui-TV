@@ -15,7 +15,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.common.Player
 
 /**
  * 轨道选择弹窗，对齐原版 ui/dialog/TrackDialog.java + player/exo/ExoUtil.selectTrack。
@@ -30,10 +30,8 @@ import androidx.media3.exoplayer.ExoPlayer
  */
 class TrackDialog(
     context: Context,
-    private val player: ExoPlayer?,
+    private val player: Player?,
     private val type: Int,
-    /** mpv 内核时传它，player 传 null；两者共用同一套弹窗外观 */
-    private val mpv: MpvPlayer? = null
 ) : Dialog(context) {
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
@@ -64,7 +62,7 @@ class TrackDialog(
         })
 
         val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        var shown = if (mpv != null) fillMpv(list) else fillExo(list)
+        val shown = fillExo(list)
         if (shown == 0) {
             list.addView(item("本片没有可选的${title()}", false, null))
         }
@@ -72,14 +70,10 @@ class TrackDialog(
         // 原版 TrackDialog 底部只对字幕给「关闭」开关；音轨同理，视轨关了就是黑屏，不给入口
         if (type != C.TRACK_TYPE_VIDEO) {
             list.addView(item("关闭${title()}", true) {
-                if (mpv != null) {
-                    mpv.disableTracks(kindOf())
-                } else {
-                    runCatching {
-                        player?.trackSelectionParameters = player!!.trackSelectionParameters.buildUpon()
-                            .setTrackTypeDisabled(type, true)
-                            .build()
-                    }
+                runCatching {
+                    player?.trackSelectionParameters = player!!.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(type, true)
+                        .build()
                 }
                 dismiss()
             })
@@ -93,12 +87,6 @@ class TrackDialog(
     }
 
     /** mpv 的 kind：video / audio / sub */
-    private fun kindOf(): String = when (type) {
-        C.TRACK_TYPE_AUDIO -> "audio"
-        C.TRACK_TYPE_TEXT -> "sub"
-        else -> "video"
-    }
-
     /** EXO 侧：沿用原来的 Tracks.Group 遍历 */
     private fun fillExo(list: LinearLayout): Int {
         val groups: List<Tracks.Group> = player?.currentTracks?.groups ?: emptyList()
@@ -114,21 +102,6 @@ class TrackDialog(
                     true
                 ) { applyOverride(g, gi, ti, !g.isTrackSelected(ti)) })
             }
-        }
-        return shown
-    }
-
-    /** mpv 侧：读 track-list/N/xxx 形式的子属性 */
-    private fun fillMpv(list: LinearLayout): Int {
-        val m = mpv ?: return 0
-        val kind = kindOf()
-        var shown = 0
-        for (t in m.tracks(kind)) {
-            shown++
-            list.addView(item((if (t.selected) "✓ " else "   ") + t.label, true) {
-                m.selectTrack(kind, t.id)
-                dismiss()
-            })
         }
         return shown
     }

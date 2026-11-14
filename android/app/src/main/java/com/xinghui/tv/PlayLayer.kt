@@ -2072,17 +2072,9 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
     /** 字幕/音轨/视轨：打开轨道选择（对齐原版 TrackDialog） */
     private fun openTrack(type: Int) {
         hideControl()
-        if (isMpvMode()) {
-            // mpv 也走同一套弹窗：读 track-list 列出全部可选轨道，点哪路切哪路
-            val m = mpv
-            if (m == null) {
-                Toast.makeText(host, "播放器还没准备好", Toast.LENGTH_SHORT).show()
-                return
-            }
-            TrackDialog(host, null, type, m).show()
-            return
-        }
-        val p = player
+        // 两颗内核现在都实现标准 Player 契约：轨道列表来自 player.currentTracks，
+        // 选择走 player.trackSelectionParameters。上层不再需要判断"现在是哪个内核"。
+        val p: androidx.media3.common.Player? = if (isMpvMode()) mpv else player
         if (p == null) {
             Toast.makeText(host, "播放器还没准备好", Toast.LENGTH_SHORT).show()
             return
