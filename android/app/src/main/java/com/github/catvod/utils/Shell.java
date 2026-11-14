@@ -1,6 +1,6 @@
 package com.github.catvod.utils;
 
-import com.orhanobut.logger.Logger;
+import android.util.Log;
 
 public class Shell {
 
@@ -9,7 +9,7 @@ public class Shell {
     public static void exec(String command) {
         try {
             int code = Runtime.getRuntime().exec(command).waitFor();
-            if (code != 0) Logger.t(TAG).d("Shell command '%s' failed with exit code '%s'", command, code);
+            if (code != 0) Log.d(TAG, String.format("Shell command '%s' failed with exit code '%s'", command, code));
         } catch (Exception e) {
             e.printStackTrace();
         }

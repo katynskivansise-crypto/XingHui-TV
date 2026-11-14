@@ -16,7 +16,12 @@ import java.net.URL
  * 壁纸存储与生效（对齐原版 WallConfig + FileUtil.getWall + BaseActivity.refreshWall）：
  * - 落盘位置：filesDir/wallpaper_0（原版是 Path.files("wallpaper_" + index)）
  * - 导入后按屏幕尺寸 centerCrop 压成 JPEG 再存（原版 WallConfig.resize 用 Glide centerCrop + 100% JPEG）
- * - 生效方式：window.setBackgroundDrawable（原版 BaseActivity 也是设 window 背景，铺满整界面）
+ * - 生效方式：**布局层**。原版 BaseActivity.setContentView 里有一句
+ *     ((ViewGroup) findViewById(android.R.id.content))
+ *         .addView(new CustomWallView(this, null), 0, new LayoutParams(MATCH_PARENT, MATCH_PARENT));
+ *   它往 contentView 的第 0 位插了一块全屏 View，壁纸是实打实的 View，不是窗口背景。
+ *   全仓 grep setBackgroundDrawable 只有 ColorDrawable(TRANSPARENT) 这一种用法，从没拿它放过图片。
+ *   ★这条以前写的是"原版也是设 window 背景" —— 是错的，正是壁纸反复失败的根源。
  * 我们比原版多一步"允许用户自选图片"——原版只有 1~4 号内置壁纸 + 订阅 wall 配置，
  * 内置图我们仓库里没有，改成"本地选图 / 图片地址 / 恢复默认"三种来源。
  */
@@ -28,6 +33,19 @@ object WallpaperStore {
     fun file(context: Context): File = File(context.filesDir, FILE_NAME)
 
     fun has(context: Context): Boolean = file(context).let { it.exists() && it.length() > 0 }
+
+    /**
+     * 取当前该用的壁纸 Drawable：有自设图用它，否则内置 wallpaper_1。
+     * contextWall（布局里的 ImageView）与 window 背景共用这一份，避免两处判断不一致。
+     */
+    fun drawableFor(context: Context): Drawable? {
+        val f = file(context)
+        if (f.exists() && f.length() > 0) {
+            Drawable.createFromPath(f.absolutePath)?.let { return it }
+        }
+        // 内置图换成 BitmapDrawable 也走解码，统一成 Drawable 返回
+        return androidx.core.content.ContextCompat.getDrawable(context, R.drawable.wallpaper_1)
+    }
 
     /** 应用到窗口；有自设壁纸用它，没有就回退原版内置 wallpaper_1（全站统一，对齐 BaseActivity.refreshWall） */
     fun apply(activity: Activity) {

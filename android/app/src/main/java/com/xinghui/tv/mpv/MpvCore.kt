@@ -3,23 +3,27 @@ package com.xinghui.tv.mpv
 import android.content.Context
 import android.os.Build
 import android.os.Handler
-import android.os.HandlerThread
 import android.os.Looper
 import android.view.Surface
 import com.xinghui.tv.MpvDebug
+import `is`.xyz.mpv.MPVLib
 
 /**
- * mpv 控制核心：官方 libmpv + 我们自己的 render API 上屏（零分叉）。
+ * mpv 控制核心：**官方 libmpv + 官方 libplayer.so（MPVLib）+ vo=gpu**。
  *
- * 与原来 `is.xyz.mpv.MPVLib`（libplayer.so）的关系：
- *   那一层把 mpv_handle 锁在 so 内部，只给 attachSurface；
- *   这里 handle 由我们 create，EGL/GLES2 也由我们持有，
- *   于是 `mpv_render_context_render` + `report_swap` 在我们手里 ——
- *   **哪一帧上屏、什么时候上屏由我们决定**。
+ * 这条路和 mpv-android 官方 App 完全一致（README 原文：
+ *   "If you'd like to use libmpv in your app you can use our code as inspiration.
+ *    The important parts are MPVLib, MPVView and the native code"）。
  *
- * 线程模型：
- *   * GL 线程（xh-mpv-gl）：attach / detach / render 全在这条线程上（EGL 是线程绑定的）
- *   * 轮询线程（xh-mpv-poll）：200ms 读一次属性，模拟原来的事件回调
+ * 以前这里走的是自研 render API（vo=libmpv + mpv_render_context_render + 自持 EGL，
+ * 见已废弃的 xh_mpv.cpp / XhMpv.kt）：那条路要把 EGL 生命周期、渲染线程、
+ * 手工 report_swap 全部自己管，任何一环错位都表现为"黑屏有声"。
+ * 官方 vo=gpu 把这一整层交给 mpv 自己，我们只负责把 Surface 交过去。
+ *
+ * 线程模型现在很简单：
+ *   * 画面：mpv 内部渲染线程（vo=gpu + gpu-context=android）
+ *   * 事件：libplayer.so 通过 MPVLib 静态回调直接推上来，不再 200ms 轮询
+ *   * 所有回调都 post 到主线程，调用方不用关心线程
  */
 class MpvCore(private val appContext: Context) {
 
@@ -32,206 +36,205 @@ class MpvCore(private val appContext: Context) {
         fun eventProperty(property: String, value: String)
     }
 
+    companion object {
+        /** MPVLib 的句柄是 so 内静态的：真正能 destroy 的只有最后一个核心 */
+        @Volatile private var liveCores = 0
+    }
+
+    /** 与官方 MPVLib.MpvFormat 同一套取值，上层沿用旧的 MpvCore.MpvFormat 写法 */
     object MpvFormat {
         const val MPV_FORMAT_NONE = 0
         const val MPV_FORMAT_STRING = 1
         const val MPV_FORMAT_FLAG = 3
-        const val MPV_FORMAT_DOUBLE = 5
         const val MPV_FORMAT_INT64 = 4
+        const val MPV_FORMAT_DOUBLE = 5
     }
 
     object MpvEvent {
         const val MPV_EVENT_NONE = 0
-        const val MPV_EVENT_FILE_LOADED = 8
+        const val MPV_EVENT_SHUTDOWN = 1
         const val MPV_EVENT_END_FILE = 7
+        const val MPV_EVENT_FILE_LOADED = 8
     }
-
-    private val native = XhMpv()
-
-    private val glThread = HandlerThread("xh-mpv-gl").apply { start() }
-    private val gl = Handler(glThread.looper)
-
-    private val pollThread = HandlerThread("xh-mpv-poll").apply { start() }
-    private val pollHandler = Handler(pollThread.looper)
-    private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var observer: EventObserver? = null
     @Volatile private var surface: Surface? = null
-    @Volatile private var surfaceW = 0
-    @Volatile private var surfaceH = 0
-    @Volatile private var renderPending = false
+    @Volatile private var dead = false
+    @Volatile private var created = false
 
-    /** 当前实际使用的离屏位深：8 或 10，attach 之后才定下来 */
     @Volatile var colorBits = 8
         private set
 
-    /** 已销毁：此后任何入口都不许再碰 native 句柄 */
-    @Volatile private var dead = false
+    private val main = Handler(Looper.getMainLooper())
 
-    /** 是否尝试 10bit：系统 >= API26（才有 RGBA_1010102 窗口格式）且拿到 GLES3 */
-    fun applyColorDepth(wantTenBit: Boolean): Int {
-        val bits = if (wantTenBit && Build.VERSION.SDK_INT >= 26 && native.esVersion() >= 3) 10 else 8
-        native.setColorBits(bits)
-        colorBits = bits
-        return bits
+    /** libplayer.so 的原生回调 → 主线程 + 我们自己的 EventObserver */
+    private val libObserver = object : MPVLib.EventObserver {
+        override fun event(eventId: Int) {
+            main.post { runCatching { observer?.event(eventId) } }
+        }
+
+        override fun eventProperty(property: String) {
+            main.post { runCatching { observer?.eventProperty(property) } }
+        }
+
+        override fun eventProperty(property: String, value: Long) {
+            main.post { runCatching { observer?.eventProperty(property, value) } }
+        }
+
+        override fun eventProperty(property: String, value: Boolean) {
+            main.post { runCatching { observer?.eventProperty(property, value) } }
+        }
+
+        override fun eventProperty(property: String, value: String) {
+            main.post { runCatching { observer?.eventProperty(property, value) } }
+        }
+
+        override fun eventProperty(property: String, value: Double) {
+            main.post { runCatching { observer?.eventProperty(property, value) } }
+        }
     }
 
-    @Volatile private var lastPause: Boolean? = null
-    @Volatile private var lastEof: Boolean? = null
-    @Volatile private var loaded = false
+    /**
+     * 位深：官方 vo=gpu 自己按 target-colorspace-hint 决定，
+     * 我们不再往 GL 侧塞 RGBA_1010102（那是自研 render API 才需要做的事）。
+     * 这里只回报"应该用多少"，供诊断日志对照。
+     */
+    fun applyColorDepth(wantTenBit: Boolean): Int {
+        colorBits = if (wantTenBit && Build.VERSION.SDK_INT >= 26) 10 else 8
+        return colorBits
+    }
 
     fun create(): Boolean {
-        if (!XhMpv.available) {
-            MpvDebug.log("[mpv] xhmpv 原生库不可用")
-            return false
+        if (dead || created) return created
+        val ok = runCatching {
+            MPVLib.create(appContext)
+            MPVLib.addObserver(libObserver)
+            true
+        }.getOrElse {
+            MpvDebug.log("[mpv] MPVLib.create 失败 ${it.message}")
+            false
         }
-        if (!native.create()) return false
-        native.onFrameAvailable = { requestRender() }
-        return true
+        if (ok) {
+            created = true
+            liveCores++
+        }
+        return ok
     }
 
-    fun init(): Boolean = native.setProperty("pause", "yes")
+    fun init(): Boolean = runCatching { MPVLib.init(); true }.getOrElse {
+        MpvDebug.log("[mpv] MPVLib.init 失败 ${it.message}")
+        false
+    }
 
     fun setOptionString(name: String, value: String) {
-        if (dead) return
-        if (!native.setOption(name, value)) MpvDebug.log("[mpv] 选项未生效 $name=$value")
+        if (dead || !created) return
+        runCatching { MPVLib.setOptionString(name, value) }
+            .onFailure { MpvDebug.log("[mpv] 选项失败 $name=$value ${it.message}") }
     }
 
     fun setPropertyString(name: String, value: String) {
-        if (!dead) native.setProperty(name, value)
+        if (dead || !created) return
+        runCatching { MPVLib.setPropertyString(name, value) }
     }
 
     fun setPropertyBoolean(name: String, value: Boolean) {
-        if (!dead) native.setProperty(name, if (value) "yes" else "no")
+        if (dead || !created) return
+        runCatching { MPVLib.setPropertyBoolean(name, value) }
     }
 
     fun setPropertyDouble(name: String, value: Double) {
-        if (!dead) native.setProperty(name, value.toString())
+        if (dead || !created) return
+        runCatching { MPVLib.setPropertyDouble(name, value) }
     }
 
-    fun getPropertyString(name: String): String? = if (dead) null else native.getProperty(name)
+    fun getPropertyString(name: String): String? =
+        if (dead || !created) null else runCatching { MPVLib.getPropertyString(name) }.getOrNull()
 
-    fun getPropertyBoolean(name: String): Boolean? = if (dead) null else native.getBool(name)
+    fun getPropertyBoolean(name: String): Boolean? =
+        if (dead || !created) null else runCatching { MPVLib.getPropertyBoolean(name) }.getOrNull()
 
-    fun getPropertyInt(name: String): Int? = if (dead) null else native.getProperty(name)?.toIntOrNull()
+    fun getPropertyInt(name: String): Int? =
+        if (dead || !created) null else runCatching { MPVLib.getPropertyInt(name) }.getOrNull()
 
-    fun getPropertyDouble(name: String): Double? = if (dead) null else native.getDouble(name)
+    fun getPropertyDouble(name: String): Double? =
+        if (dead || !created) null else runCatching { MPVLib.getPropertyDouble(name) }.getOrNull()
 
     fun command(args: Array<String>) {
-        if (!dead) native.command(*args)
+        if (dead || !created) return
+        runCatching { MPVLib.command(args) }
     }
 
-    fun observeProperty(name: String, format: Int) = Unit
+    fun observeProperty(name: String, format: Int) {
+        if (dead || !created) return
+        runCatching { MPVLib.observeProperty(name, format) }
+    }
 
     fun addObserver(o: EventObserver) {
         observer = o
-        startPolling()
+        if (!created) return
+        // 官方观察机制：设一次就持续推，不需要轮询
+        observeProperty("pause", 3)        // MPV_FORMAT_FLAG
+        observeProperty("eof-reached", 3)
+        observeProperty("time-pos", 5)     // MPV_FORMAT_DOUBLE
+        observeProperty("duration", 5)
+        observeProperty("idle-active", 3)
     }
 
     fun removeObserver(o: EventObserver) {
-        if (observer === o) {
-            observer = null
-            pollHandler.removeCallbacksAndMessages(null)
-        }
+        if (observer === o) observer = null
     }
 
     // ---------------------------------------------------------------- 画面
 
+    /**
+     * 官方挂面：attachSurface 之后 mpv 自己起 vo=gpu 渲染线程往这块 Surface 推帧。
+     * android-surface-size 一定要在 attach 之后设，并且每次窗口尺寸变化都要重设。
+     */
     fun attachSurface(s: Surface, width: Int, height: Int) {
-        if (dead) return
-        // ★位深/格式这类 setProperty 一律留在调用线程上：
-        //   render.h 明文要求渲染线程除 mpv_render_* 之外不得调用其它 libmpv API，
-        //   在 gl.post 里做 setProperty 属于违规，官方标注会死锁。
+        if (dead || !created) return
         applyColorDepth(true)
         surface = s
-        surfaceW = width
-        surfaceH = height
-        gl.post {
-            native.attach(s, width, height)
-            // 挂上后先强制贴一帧：此刻没有"新帧"概念，不 force 会什么都没画
-            native.render(width, height, force = true)
-            MpvDebug.log("[mpv] render 挂载 ${width}x${height}")
+        val ok = runCatching {
+            MPVLib.attachSurface(s)
+            if (width > 0 && height > 0) {
+                MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+            }
+            true
+        }.getOrElse {
+            MpvDebug.log("[mpv] attachSurface 失败 ${it.message}")
+            false
         }
+        MpvDebug.log("[mpv] vo=gpu attach ${width}x${height} ok=$ok")
+    }
+
+    /** 尺寸变了但 Surface 没换：只更新 android-surface-size */
+    fun updateSurfaceSize(width: Int, height: Int) {
+        if (dead || !created || surface == null) return
+        if (width <= 0 || height <= 0) return
+        runCatching { MPVLib.setPropertyString("android-surface-size", "${width}x$height") }
     }
 
     fun detachSurface() {
         surface = null
-        gl.post { native.detach() }
+        if (dead || !created) return
+        runCatching { MPVLib.detachSurface() }
+        MpvDebug.log("[mpv] vo=gpu detach")
     }
 
-    /** 窗口被扰动后主动重绘上一帧：这一帧本来就在 mpv 手里，重绘不产生新帧 */
-    fun redrawNow() {
-        val w = surfaceW
-        val h = surfaceH
-        if (w <= 0 || h <= 0) return
-        requestRender()
-        gl.post { native.render(w, h, force = true) }
-    }
-
-    private fun requestRender() {
-        if (renderPending) return
-        renderPending = true
-        gl.post {
-            renderPending = false
-            val w = surfaceW
-            val h = surfaceH
-            if (surface != null && w > 0 && h > 0) native.render(w, h)
-        }
-    }
+    /** vo=gpu 自己上屏；保留这个方法让上层调用点不用改 */
+    fun redrawNow() = Unit
 
     fun destroy() {
         if (dead) return
         dead = true
         observer = null
-        pollHandler.removeCallbacksAndMessages(null)
-        gl.post { native.detach(); native.destroy() }
         surface = null
+        if (!created) return
+        runCatching { MPVLib.removeObserver(libObserver) }
+        liveCores = (liveCores - 1).coerceAtLeast(0)
+        if (liveCores == 0) {
+            runCatching { MPVLib.destroy() }
+            created = false
+        }
     }
-
-    // ---------------------------------------------------------------- 属性轮询 → 事件
-
-    private fun startPolling() {
-        pollHandler.removeCallbacksAndMessages(null)
-        pollHandler.post(object : Runnable {
-            override fun run() {
-                if (observer == null) return
-                poll()
-                pollHandler.postDelayed(this, 200)
-            }
-        })
-    }
-
-    private fun poll() {
-        val o = observer ?: return
-        val idle = native.getBool("idle-active") ?: true
-        val dur = native.getDouble("duration") ?: 0.0
-
-        if (!loaded && !idle && dur > 0.0) {
-            loaded = true
-            main.post { runCatching { o.event(MpvEvent.MPV_EVENT_FILE_LOADED) } }
-        }
-
-        val eof = native.getBool("eof-reached") ?: false
-        if (loaded && eof) {
-            loaded = false
-            main.post { runCatching { o.event(MpvEvent.MPV_EVENT_END_FILE) } }
-        } else if (loaded && idle) {
-            loaded = false
-            main.post { runCatching { o.event(MpvEvent.MPV_EVENT_END_FILE) } }
-        }
-
-        val pause = native.getBool("pause")
-        if (pause != null && pause != lastPause) {
-            lastPause = pause
-            main.post { runCatching { o.eventProperty("pause", pause) } }
-        }
-        if (eof != lastEof) {
-            lastEof = eof
-            main.post { runCatching { o.eventProperty("eof-reached", eof) } }
-        }
-        val pos = native.getDouble("time-pos")
-        if (pos != null) main.post { runCatching { o.eventProperty("time-pos", pos) } }
-        if (dur > 0.0) main.post { runCatching { o.eventProperty("duration", dur) } }
-    }
-
 }

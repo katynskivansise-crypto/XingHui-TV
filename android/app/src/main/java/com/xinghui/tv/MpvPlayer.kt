@@ -5,8 +5,18 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.SimpleBasePlayer
+import androidx.media3.common.SimpleBasePlayer.MediaItemData
+import androidx.media3.common.SimpleBasePlayer.PositionSupplier
+import androidx.media3.common.SimpleBasePlayer.State
+import androidx.media3.common.VideoSize
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import com.xinghui.tv.mpv.MpvCore
-import com.xinghui.tv.mpv.XhMpv
 import java.util.Locale
 
 /**
@@ -32,13 +42,15 @@ class MpvPlayer(
      * 不需要任何分叉库。切换只改布局里的一个属性，代码两条路径都保留。
      */
     private val host: android.view.View
-) : MpvCore.EventObserver {
+) : SimpleBasePlayer(android.os.Looper.getMainLooper()), MpvCore.EventObserver {
 
     /** 官方 libmpv + 我们自己的 render API 上屏（handle 与 EGL 都在这一层） */
     private val core = MpvCore(activity)
 
     companion object {
         private const val TAG = "XingHuiTV"
+        /** MediaItemData 的 uid，同一播放器内固定即可 */
+        private const val UID = "xinghui-mpv"
         /** 当前活着的 MpvPlayer 数量：>1 说明有实例没释放，MPVLib 的静态句柄会指错，指令全打到空实例上 */
         @Volatile
         var liveCount: Int = 0
@@ -87,6 +99,8 @@ class MpvPlayer(
     private var pendingSeekMs = 0L
     private var paused = true
     private var eofReached = false
+    /** 当前媒体项：走 Player 接口时由 handleSetMediaItems 写入，走老 play(url...) 时由 play() 补 */
+    private var currentItem: MediaItem? = null
     /**
      * 应用是否在后台（由 PlayActivity 的 onPause/onResume 置位）。
      *
@@ -234,12 +248,10 @@ class MpvPlayer(
             core.setOptionString("log-file", logFile.absolutePath)
             core.setOptionString("msg-level", "all=w")
             core.setOptionString("idle", "yes")
-            // ★ 输出是 libmpv：帧不再由 mpv 自己往 Surface 上推，而是由我们的
-            //   mpv_render_context_render + eglSwapBuffers 上屏（xh_mpv.cpp）。
-            //   vo 必须是 libmpv，且只有在 initialize 之前设才有效；
-            //   xh_mpv.cpp 的 nativeCreate 已经设好，这里不要再覆盖成 gpu / mediacodec_embed，
-            //   一旦覆盖，render 上下文就拿不到帧，画面直接空。
-            core.setOptionString("vo", "libmpv")
+            // ★ 官方路线：vo=gpu + gpu-context=android，帧由 mpv 自己的渲染线程推给 Surface。
+            //   vo 的具体值在 attachSurface() 里按 BaseMPVView 的写法设（surfaceCreated → setPropertyString("vo", voInUse)），
+            //   这里只把上下文类型定好。以前这里写 vo=libmpv 是自研 render API 的形态，已废弃。
+            core.setOptionString("vo", "gpu")
             core.setOptionString("gpu-context", "android")
             core.setOptionString("opengl-es", "yes")
             // ao 不显式指定时可能一个音频输出都找不到，结果是没声音或整条播放失败
@@ -403,9 +415,7 @@ class MpvPlayer(
         lastSurfaceH = height
         MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format")
         if (!inited) return
-        runCatching {
-            core.setPropertyString("android-surface-size", "${width}x$height")
-        }
+        core.updateSurfaceSize(width, height)
     }
 
     private fun onSurfaceDestroyed(holder: SurfaceHolder) {
@@ -413,10 +423,14 @@ class MpvPlayer(
         surfaceReady = false
         attachedSurface = null
         if (inited) {
-            // render API 下"停止输出"= 解绑 EGLSurface，vo 保持 libmpv。
-            // 以前这里写 vo=null + force-window=no，等于把 render 输出整个拆掉，
-            // 回来时再设 vo=gpu（见 attachSurface 注释），render context 就再也拿不到帧。
-            runCatching { core.detachSurface() }
+            // 官方 BaseMPVView.surfaceDestroyed 原文（BaseMPVView.kt:98-103）：
+            //   MPVLib.setPropertyString("vo", "null")
+            //   MPVLib.setPropertyString("force-window", "no")
+            //   MPVLib.detachSurface()
+            // 顺序不能反：先把视频输出摘掉，再解绑 Surface，否则 mpv 会在已失效的窗口上再推一帧。
+            runCatching { core.setPropertyString("vo", "null") }
+            runCatching { core.setPropertyString("force-window", "no") }
+            core.detachSurface()
         }
     }
 
@@ -439,16 +453,12 @@ class MpvPlayer(
         lastSurfaceW = width
         lastSurfaceH = height
         runCatching {
-            core.attachSurface(surface, host.width.coerceAtLeast(1), host.height.coerceAtLeast(1))
-            // ★这三行是照 mpv-android 官方 BaseMPVView 抄的，但那是"mpv 自己往 surface 推帧"的形态。
-            //   我们走的是 render API：vo 恒为 libmpv，帧由 mpv 交给我们的 EGL，我们自己 eglSwapBuffers。
-            //   在 render context 已经建好之后再 setProperty("vo","gpu")，等于让 mpv 丢掉 render 输出、
-            //   去建一个自己的窗口 vo —— 结果就是 render 回调不再出帧，画面停在黑，
-            //   而音频还在走（用户看到的"黑屏有声"）。surfaceDestroyed 里那句 vo=null 同理。
-            //   render API 下 re-attach 只需要把 EGLSurface 绑到新窗口，vo / force-window 一律不许动。
-            if (width > 0 && height > 0) {
-                core.setPropertyString("android-surface-size", "${width}x$height")
-            }
+            // 官方 BaseMPVView.surfaceCreated 原文（BaseMPVView.kt:90-95）：
+            //   恢复视频输出 → setPropertyString("vo", voInUse)
+            // 然后才是 attachSurface + android-surface-size（尺寸由 MpvCore 内部一并设好）。
+            core.setPropertyString("vo", "gpu")
+            core.setPropertyString("force-window", "yes")
+            core.attachSurface(surface, width, height)
         }
         // ★这里曾经调 holder.setFormat(RGBA_8888 / RGBA_1010102)，已删除。
         //
@@ -505,7 +515,8 @@ class MpvPlayer(
         }
     }
 
-    fun release() {
+    /** 真正的释放：对外 Player.release()（基类 final）→ handleRelease() → 这里 */
+    internal fun releaseInternal() {
         abandonAudioFocus()
         if (!inited) return
         // 先关闸再动 native：destroy 期间 surfaceDestroyed 和延迟的 idle 探测都可能进来
@@ -654,7 +665,6 @@ class MpvPlayer(
     // ---------------------------------------------------------------- 控制（与 EXO 同一套语义）
 
     /** 用缓存的 pause/eof，不在这里同步调 native（mpv_get_property 在 seek 期间会阻塞 UI） */
-    fun isPlaying(): Boolean = inited && !paused && !eofReached
 
     /**
      * 真实暂停态：缓存标记一旦被「写下去却没生效」带偏，就再也纠不回来 ——
@@ -688,10 +698,6 @@ class MpvPlayer(
         }
     }
 
-    fun pause() {
-        if (!inited) return
-        applyPause(true)
-    }
 
     fun resume() {
         if (!inited) return
@@ -1014,4 +1020,128 @@ class MpvPlayer(
     override fun eventProperty(property: String) = Unit
     override fun eventProperty(property: String, value: Long) = Unit
     override fun eventProperty(property: String, value: String) = Unit
+
+    // ============================================================ Player 接口
+    //
+    // mpv 成为 media3 的标准 Player 实现，PlayerView.setPlayer(mpvPlayer) 可直接用，
+    // 上层不再需要 VideoHost.Owner 那套手写交接。方向对齐原项目
+    // androidx.media3.mpvplayer.MpvPlayer（extends SimpleBasePlayer）。
+    // 关键前提：media3 1.4.1 起官方 SimpleBasePlayer 提供 handleSetVideoOutput（1.3.1 没有）。
+
+    private val commands: Player.Commands = Player.Commands.Builder().addAllCommands().build()
+
+    private fun posMsNow(): Long =
+        if (!inited) 0L
+        else runCatching { core.getPropertyDouble("time-pos") }.getOrNull()
+            ?.let { (it * 1000.0).toLong().coerceAtLeast(0L) } ?: 0L
+
+    private fun durMsNow(): Long =
+        if (!inited) C.TIME_UNSET
+        else runCatching { core.getPropertyDouble("duration") }.getOrNull()
+            ?.let { (it * 1000.0).toLong() }?.takeIf { it > 0L } ?: C.TIME_UNSET
+
+    private fun currentVideoSize(): VideoSize {
+        val params = runCatching { core.getPropertyString("video-params") }.getOrNull()
+        if (params != null) {
+            val w = Regex("\\bw\\s*=\\s*(\\d+)").find(params)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val h = Regex("\\bh\\s*=\\s*(\\d+)").find(params)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            if (w != null && h != null && w > 0 && h > 0) return VideoSize(w, h, 0, 1f)
+        }
+        return if (lastSurfaceW > 0 && lastSurfaceH > 0) VideoSize(lastSurfaceW, lastSurfaceH, 0, 1f)
+        else VideoSize.UNKNOWN
+    }
+
+    override fun getState(): State {
+        val state = when {
+            !inited -> Player.STATE_IDLE
+            eofReached -> Player.STATE_ENDED
+            playPending -> Player.STATE_BUFFERING
+            else -> Player.STATE_READY
+        }
+        val item = currentItem
+        val builder = State.Builder()
+            .setAvailableCommands(commands)
+            .setPlayWhenReady(!paused, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            .setPlaybackState(state)
+            .setIsLoading(playPending)
+            .setVideoSize(currentVideoSize())
+        if (item != null) {
+            builder
+                .setPlaylist(listOf(MediaItemData.Builder(UID).setMediaItem(item).build()))
+                .setCurrentMediaItemIndex(0)
+                .setContentPositionMs(PositionSupplier.getConstant(posMsNow()))
+        } else {
+            builder.setPlaylist(emptyList()).setCurrentMediaItemIndex(C.INDEX_UNSET)
+        }
+        return builder.build()
+    }
+
+    override fun handleSetMediaItems(
+        mediaItems: List<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long,
+    ): ListenableFuture<*> {
+        val item = mediaItems.getOrNull(startIndex) ?: return Futures.immediateVoidFuture()
+        currentItem = item
+        val uri = item.localConfiguration?.uri?.toString()
+        if (uri != null) play(uri, emptyMap(), startPositionMs, emptyList(), startPaused = true)
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handlePrepare(): ListenableFuture<*> {
+        if (!inited) initWithOptions()
+        if (pendingUrl.isNotBlank() && surfaceReady && playPending) {
+            playPending = false
+            doPlay(pendingUrl)
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
+        // 不能调基类 pause()（那会再进 handleSetPlayWhenReady，绕成环）
+        if (playWhenReady) resume() else if (inited) applyPause(true)
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
+        seekToMs(positionMs)
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetPlaybackParameters(playbackParameters: PlaybackParameters): ListenableFuture<*> {
+        setSpeed(playbackParameters.speed)
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleRelease(): ListenableFuture<*> {
+        releaseInternal()
+        return Futures.immediateVoidFuture()
+    }
+
+    /**
+     * 视频输出：PlayerView.setPlayer 时把它的 SurfaceView/SurfaceHolder/Surface 交进来。
+     * media3 1.4.1 的 SimpleBasePlayer 提供这个扩展点（1.3.1 没有）。
+     */
+    override fun handleSetVideoOutput(videoOutput: Any): ListenableFuture<*> {
+        when (videoOutput) {
+            is SurfaceView -> {
+                val h = videoOutput.holder
+                if (h.surface?.isValid == true) {
+                    attachSurface(h.surface, h.surfaceFrame.width(), h.surfaceFrame.height(), first = true)
+                }
+            }
+            is SurfaceHolder -> {
+                if (videoOutput.surface?.isValid == true) {
+                    attachSurface(videoOutput.surface, videoOutput.surfaceFrame.width(), videoOutput.surfaceFrame.height(), first = true)
+                }
+            }
+            is Surface -> attachSurface(videoOutput, 0, 0, first = true)
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleClearVideoOutput(videoOutput: Any?): ListenableFuture<*> {
+        runCatching { core.detachSurface() }
+        return Futures.immediateVoidFuture()
+    }
 }

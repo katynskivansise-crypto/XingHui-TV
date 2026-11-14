@@ -1,30 +1,22 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
 }
 
 android {
     namespace 'com.xinghui.tv'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "com.xinghui.tv"
-        minSdk 21
-        targetSdk 34
+        minSdk 23   // Compose ui/foundation/tv-material 的 minSdkVersion 实测均为 23
+        targetSdk 36
         versionCode 1
         versionName "0.1.0"
         // 只保留 cargo-ndk 编译出的 ABI
         ndk {
             abiFilters 'arm64-v8a'
-        }
-    }
-
-    // 我们自己的 libmpv 渲染层（官方 libmpv + render API，零分叉）
-    ndkVersion "26.1.10909125"
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
-            version "3.22.1"
         }
     }
 
@@ -38,36 +30,54 @@ android {
     buildTypes {
         release {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            minifyEnabled false
+            minifyEnabled true
         }
+    }
+
+    buildFeatures {
+        compose = true
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = '17'
+    // Kotlin 2.x：用 compilerOptions 代替已废弃的 kotlinOptions
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 }
 
 dependencies {
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.recyclerview:recyclerview:1.3.2'
-    implementation 'androidx.media3:media3-exoplayer:1.3.1'
-    implementation 'androidx.media3:media3-ui:1.3.1'
+    // ---- Jetpack Compose（UI 层） ----
+    implementation platform('androidx.compose:compose-bom:2026.09.00')
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    // TV 专用组件（焦点系统 / TvLazyColumn / TV 主题），不在 bom 内，须显式版本
+    implementation 'androidx.tv:tv-material:1.1.0'
+    // Baseline Profile：Compose 是库不是平台组件，低端设备靠它在安装时 AOT 关键路径
+    implementation 'androidx.profileinstaller:profileinstaller:1.4.1'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    // org.json / logger 已移除：前者 Android framework 内置（外部 jar 会被 BootClassLoader 抢先，永远用不上），
+    // 后者 2017 停维护且全项目仅 2 处调用，改用 android.util.Log。
+    implementation 'androidx.core:core-ktx:1.19.1'
+    implementation 'androidx.appcompat:appcompat:1.8.0'
+    implementation 'androidx.recyclerview:recyclerview:1.4.0'
+    implementation 'androidx.media3:media3-exoplayer:1.11.1'
+    implementation 'androidx.media3:media3-ui:1.11.1'
     // 流媒体扩展：DefaultMediaSourceFactory 靠反射查找这三个工厂类。
     // 缺任何一个，遇到 .m3u8 / .mpd / .ism 就抛
     // IllegalStateException: No suitable media source factory found for content type: N
-    implementation 'androidx.media3:media3-exoplayer-hls:1.3.1'
-    implementation 'androidx.media3:media3-exoplayer-dash:1.3.1'
-    implementation 'androidx.media3:media3-exoplayer-smoothstreaming:1.3.1'
-    implementation 'org.json:json:20240303'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-dash:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-smoothstreaming:1.11.1'
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
     // 推送二维码（对齐原版 utils/QRCode.java 的 zxing 用法）
     implementation 'com.google.zxing:core:3.5.3'
     // catvod 基础类（spider.jar 运行时依赖这些类，由 app 侧提供，与原版一致）
     implementation 'com.google.code.gson:gson:2.10.1'
-    implementation 'com.orhanobut:logger:2.2.0'
 }

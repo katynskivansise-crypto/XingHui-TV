@@ -343,7 +343,7 @@ class MainActivity : Activity() {
         hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)
         detailLayer = findViewHost(R.id.detailLayer)
         // ★不依赖 XML：布局文件的背景一律在这里强制成透明。
-        //   窗口背景才是壁纸（WallpaperStore 设的 window.setBackgroundDrawable），
+        //   壁纸现在是布局里那块 contextWall（全屏 ImageView），不再依赖窗口背景；
         //   这两层只要有一层不是 transparent，详情页就是纯黑 ——
         //   而历史上有过"只覆盖 kt 没覆盖 xml"的情况，所以不能把这件事交给 XML 决定。
         runCatching {
@@ -432,6 +432,14 @@ class MainActivity : Activity() {
         // 注意必须走 WallpaperStore.apply：它才有「用户自设图 > 内置 wallpaper_1」的分支。
         // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
         runCatching { WallpaperStore.apply(this) }
+        // ★同时把同一张图画到布局里的 contextWall（原版做法）。
+        //   只靠 window 背景在这一版上实测会间歇失效（同样是这套代码，之前绿过也黑过），
+        //   实打实的 ImageView 不会因为窗口层级或 decor 重建而丢。
+        runCatching {
+            val wall = findViewHost<android.widget.ImageView>(R.id.contextWall)
+            wall?.setImageDrawable(WallpaperStore.drawableFor(this))
+            wall?.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+        }
         // ★布局自检：一次回答三件事 —— 工程里跑的是新布局还是旧布局、壁纸有没有加载、
         //   画面层当前是什么控件多大。下面这些值如果和仓库里的 XML 对不上，
         //   就说明装上去的不是这一版（res 没重新编译 / 只覆盖了 kt 没覆盖 xml）。
