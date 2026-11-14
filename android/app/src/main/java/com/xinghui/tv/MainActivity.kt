@@ -204,21 +204,37 @@ class MainActivity : Activity() {
      */
     fun showPlayLayer(extras: Intent) {
         val layer = playLayer ?: PlayLayer(this) { exitPlayLayer() }.also { playLayer = it }
+        // gate 日志：进入这条链路每一步的输入状态。有它才不用靠猜。
+        MpvDebug.log("[gate] showPlayLayer ep=${extras.getStringExtra("ep_url").orEmpty().take(40)} " +
+            "exoPlayer=${if (player != null) "ok" else "null"} mpv=${if (playLayer?.mpvInstance() != null) "ok" else "-"} " +
+            "attached=${layer.isAttached()}")
         // 详情预览先把这块 surface 让出来，再交给播放层 —— 同一块，不新建
         detachSurfaceFrom()
         runCatching { player?.pause() }
-        // ★顺序不能反：先把引擎与画面接回播放层（退出时 takePlayer / releaseSurface 交出去的那一份），
-        //   再走进入协议起播。反过来的话，二次进入时起播会撞上 player == null。
+        // ★先把引擎与画面接回播放层（退出时 takePlayer / releaseSurface 交出去的那一份）
         layer.reconnect(player)
-        // ★每次进入都走同一条协议：重解析参数 → bind（首次才 inflate）→ 重新起播
-        layer.enter(extras, playContainer)
+        // ★★界面必须先切过来，再走进入协议。
+        //   以前这里是反的：enter() 在层切换之前，而 enter 里要 fetchAndPlay / 绑按钮 /
+        //   读标记，任何一步抛异常都会让整个 showPlayLayer 中断 ——
+        //   现场就是"点了集数没反应，人还停在详情页"，跟内核、跟画面都没有关系。
+        //   进入协议只该决定"播不播得起来"，不该决定"能不能进播放页"。
         playMode = true
         detailLayer.visibility = View.GONE
         playContainer.visibility = View.VISIBLE
         // 画面层一直是 VISIBLE：小窗形态下它只有 400x225，剩下的区域露出窗口壁纸；
         // 只有它变成 MATCH_PARENT 时才占满全屏。所以壁纸从不被挡住。
         videoFrameToFull()
+        // enter 单独兜住：起播失败不该把用户挡在详情页外面
+        runCatching { layer.enter(extras, playContainer) }
+            .onFailure {
+                MpvDebug.log("[gate] ★enter 抛异常（层已切换，起播未完成）：$it")
+                runCatching {
+                    android.widget.Toast.makeText(this, "[enter] 异常：${it.javaClass.simpleName}", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
         layer.onHostResume()
+        MpvDebug.log("[gate] 已切换 detail=${detailLayer.visibility} play=${playContainer.visibility} " +
+            "frame=${videoFrame.layoutParams?.width}x${videoFrame.layoutParams?.height} playMode=$playMode")
     }
 
     /** 退出播放层：播放层的引擎原样交回详情预览，不 release、不重建 */
@@ -301,6 +317,9 @@ class MainActivity : Activity() {
         //   现场就是"小窗像暂停一样，只有声音"。
         val mpvNow = playLayer?.mpvInstance()
         val q: androidx.media3.common.Player? = mpvNow ?: (p ?: player)
+        MpvDebug.log("[gate] exit kernel=${if (mpvNow != null) "mpv" else "exo"} " +
+            "takePlayer=${if (p != null) "ok" else "null"} hostPlayer=${if (player != null) "ok" else "null"} " +
+            "handoff=${if (q == null) "NONE(直接return)" else q.javaClass.simpleName}")
         if (q == null) return
         bindDetailListener(q)
         // ★海报要收起来。以前退出播放层没走这一步：如果进播放页前海报是可见的，
@@ -369,6 +388,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_host)
+        // ★版本戳。前几轮改完都是"问题依旧"，但谁也说不清是代码没生效、还是改错了方向 ——
+        //   从这一版起第一眼就能确认装的是哪一版：开机看到这条 Toast / 日志就说明进了包。
+        runCatching {
+            MpvDebug.log("[boot] build=tk20 handoff=playerView gate=on sdk=${android.os.Build.VERSION.SDK_INT}")
+            android.widget.Toast.makeText(this, "tk20 · 画面层归一", android.widget.Toast.LENGTH_LONG).show()
+        }
 
         hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)
         detailLayer = findViewHost(R.id.detailLayer)
@@ -954,6 +979,7 @@ class MainActivity : Activity() {
             }
             !showLines && key.startsWith("E:") -> {
                 val idx = key.removePrefix("E:").toIntOrNull() ?: return
+                MpvDebug.log("[pick] 点集数 E:$idx → openPlayPageAt（无条件进全屏）")
                 // ★点集数 = 直接进全屏播放层（原版 VideoActivity 点集数即进全屏）。
                 //   单 Activity 之后画面在宿主层的 videoFrame，详情页里的 playerBox 只是透明占位，
                 //   既没有 inlinePlayer 也没有第二块 surface。原来那套「小窗里换集 /
