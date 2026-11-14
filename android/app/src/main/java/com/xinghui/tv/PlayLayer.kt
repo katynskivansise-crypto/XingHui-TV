@@ -246,7 +246,7 @@ class PlayLayer(private val host: android.app.Activity, private val onExit: () -
         }.onFailure {
             MpvDebug.log("[boot] ★画面层构建失败，本页将黑屏且按键无反馈：" +
                 "videoFrame=${host.findViewById<View>(R.id.videoFrame)?.javaClass?.simpleName} " +
-                "videoSurface=${host.findViewById<View>(R.id.videoSurface)?.javaClass?.simpleName} " +
+                "playerView=${host.findViewById<View>(R.id.playerView)?.javaClass?.simpleName} " +
                 "subtitle=${host.findViewById<View>(R.id.subtitleView)?.javaClass?.simpleName} err=$it")
         }.getOrNull()
         // 版本戳：/debug 里能确认装的到底是哪一包，避免「以为装了其实没装」。
