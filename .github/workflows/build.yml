@@ -6,8 +6,8 @@ on:
 env:
   RUST_VERSION: stable
   JAVA_VERSION: 17
-  ANDROID_COMPILE_SDK: 34
-  ANDROID_BUILD_TOOLS: 34.0.0
+  ANDROID_COMPILE_SDK: 36
+  ANDROID_BUILD_TOOLS: 36.0.0
   ANDROID_NDK_VERSION: 26.1.10909125
 
 jobs:
@@ -55,10 +55,12 @@ jobs:
           mkdir -p android/app/src/main/assets/web
           cp -r frontend/dist/* android/app/src/main/assets/web/
 
-      # ============ 关键：编译 Rust 引擎必须带 --features jni ============
+      # ============ 编译 Rust 引擎必须带 --features jni ============
       # 缺少该参数时 jni 桥（#[cfg(feature="jni")]）不编译进 .so，
       # libtv_engine.so 就没有导出 Java_com_xinghui_tv_Engine_execute 符号，
       # 运行时 UnsatisfiedLinkError。
+      # NDK 仍需安装：android/app/build.gradle 里已删掉 ndkVersion / externalNativeBuild
+      #（自研 render 的 cpp/ 已清），但 cargo-ndk 编译 Rust 引擎要用这份 NDK。
       - name: 编译 Rust 引擎 (arm64)
         working-directory: engine
         env:
@@ -66,16 +68,16 @@ jobs:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}/sysroot"
         run: cargo ndk -t arm64-v8a -o ../android/app/src/main/jniLibs build --release --features jni
 
-      # ★Gradle 必须钉在项目要求的版本：
-      #   runner 自带的 gradle 是 9.x，而本项目 AGP 8.5.2 / Kotlin 1.9.24 的受支持上限是 Gradle 8.x。
-      #   用 9.x 跑会在「配置阶段」就解析不出 kotlin-gradle-plugin / kotlin-gradle-plugins-bom，
-      #   表现是一堆 Could not resolve / Could not find —— 跟我们的代码一行关系都没有。
+      # ★Gradle 必须钉 9.9.1：
+      #   本轮工具链已升到 AGP 8.13.2 / Kotlin 2.4.21 / compileSdk 36。
+      #   AGP 8.13.2 要求 Gradle >= 8.13，用 8.7 会在配置阶段直接报
+      #   "Incompatible Gradle version"。
       #   本工程的 wrapper 只留了 gradle-wrapper.properties（没有 gradlew 脚本），
-      #   所以这里用 setup-gradle 直接装 8.7，顺带把依赖缓存也带上。
-      - name: 安装 Gradle 8.7（对齐 AGP 8.5.2）
+      #   所以这里用 setup-gradle 装 9.9.1，顺带把依赖缓存也带上。
+      - name: 安装 Gradle 9.9.1（对齐 AGP 8.13.2）
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '9.9.1'
 
       - name: 编译 Debug 安装包
         working-directory: android
