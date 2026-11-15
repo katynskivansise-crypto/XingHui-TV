@@ -821,7 +821,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             val jpa = toPlayableUrl(url)
             if (jpa == null) {
                 Log.e("XingHuiTV", "[jpa] 起播失败 ${url.take(60)}")
-                runOnUiThread { Toast.makeText(host, "荐片 P2P 起播失败", Toast.LENGTH_LONG).show() }
+                showPlayError("荐片 P2P 起播失败")   // 原版 onError → showError(msg)，无 Toast
             } else {
                 playUrl(jpa, headers)
             }
@@ -891,13 +891,12 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 row.addView(tv, lp)
             }
             bar.visibility = android.view.View.VISIBLE
-            Toast.makeText(host, "本站需要解析，请用遥控器选择一个解析源", Toast.LENGTH_LONG).show()
+            showPlayError("本站需要解析，请用遥控器选择一个解析源")
         }
     }
 
     private fun runParseItem(item: ParseSources.Item) {
         Log.e("XingHuiTV", "[play] 解析源 ${item.name} type=${item.type}")
-        runOnUiThread { Toast.makeText(host, "正在尝试解析源：${item.name}", Toast.LENGTH_SHORT).show() }
         val mergedHeaders = parseHdrs + item.headers
         when (item.type) {
             0 -> startSniff(item.url + parseEpRaw, mergedHeaders, item.click)
@@ -926,9 +925,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             return
         }
         parseIdx = next
-        runOnUiThread {
-            Toast.makeText(host, "换下一个解析源：${parseList[next].name}", Toast.LENGTH_SHORT).show()
-        }
         runParseItem(parseList[next])
     }
 
@@ -994,7 +990,27 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 我们照同一套时机：解析开始、首次缓冲、seek 后都显示，就绪/播完/失败时收起。
      */
 
+    /**
+     * 播放失败提示：对齐原版 VideoActivity.showError / hideError（5.6.0 :3450 / :3456）。
+     *   原版 onError(msg) 顺序：停播放器 → showError(msg) → startFlow()（换源重试），即先亮居中错误块再换源，全程无 Toast。
+     *   显隐沿用本页约定（常驻 VISIBLE + alpha），不切 GONE。
+     */
+    private fun showPlayError(text: String) {
+        runOnUiThread {
+            findViewById<android.widget.TextView>(R.id.playErrorText)?.text = text
+            findViewById<View>(R.id.playError)?.alpha = 1f
+        }
+    }
+
+    private fun hidePlayError() {
+        runOnUiThread {
+            findViewById<View>(R.id.playError)?.alpha = 0f
+            findViewById<android.widget.TextView>(R.id.playErrorText)?.text = ""
+        }
+    }
+
     private fun showPlayProgress(reason: String = "其它") {
+        hidePlayError()   // 对齐原版 showProgress() 里的 hideError()：新一次起播先清掉上一次的错误
         // 转圈是谁点亮的 —— 这是区分「EXO 真的重新缓冲」与「我们自己误亮」的唯一依据
         MpvDebug.log(
             "[prog] 转圈 显示 来源=$reason state=${runCatching { player?.playbackState }.getOrNull()}" +
@@ -1042,7 +1058,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         hidePlayProgress()
         if (tryAutoSwitch()) return
         if (siteSwitchCount < MAX_SITE_SWITCH && autoSwitchSite()) return
-        runOnUiThread { Toast.makeText(host, msg, Toast.LENGTH_LONG).show() }
+        showPlayError(msg)   // 原版 onError → showError(msg)
     }
 
     private fun tryAutoSwitch(): Boolean {
@@ -1079,9 +1095,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         vodId = target.vodId
         invalidateHistoryKey()
         siteKey = target.source
-        runOnUiThread {
-            Toast.makeText(host, "自动切换到站点[${target.source}]，尝试播放《${target.vodName}》", Toast.LENGTH_LONG).show()
-        }
         Thread { fetchAndPlay(target.vodId, "", "") }.start()
         return true
     }
@@ -1089,7 +1102,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun toggleQuality() {
         if (qualities.size < 2) return
         if (isMpvMode()) {
-            Toast.makeText(host, "mpv 内核下清晰度由片源线路决定，请用「选集/换源」切换", Toast.LENGTH_SHORT).show()
             return
         }
         // 切档只换播放地址，但 headers 是在播放器构建时绑到数据源上的：
@@ -1313,7 +1325,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun playUrl(url: String, headers: Map<String, String> = emptyMap()) {
         if (url.isBlank()) {
-            Toast.makeText(host, "未解析到播放地址", Toast.LENGTH_LONG).show()
+            showPlayError("未解析到播放地址")
             return
         }
         // 对齐原版 Players.java：
@@ -1396,7 +1408,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             setKeepScreenOn(wantPlay)
             if (!wantPlay) showPlayCenter()
         } else {
-            Toast.makeText(host, "该片源当前内核不支持", Toast.LENGTH_LONG).show()
+            showPlayError("该片源当前内核不支持")
         }
     }
 
@@ -1455,9 +1467,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }.getOrElse { e ->
             Log.e("XingHuiTV", "[play] 播放源不被支持 ${b.build().localConfiguration?.uri}", e)
             runOnUiThread {
-                runCatching {
-                    Toast.makeText(host, "该片源当前内核不支持（${e.javaClass.simpleName}）", Toast.LENGTH_LONG).show()
-                }
+                runCatching { showPlayError("该片源当前内核不支持（${e.javaClass.simpleName}）") }
             }
             false
         }
@@ -1686,29 +1696,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 原版同时设了 setApplyEmbeddedStyles(!isCaption())：选「预设」时用 ASS 里自带样式，
      * 选「系统」时用系统样式覆盖内嵌样式。
      */
-    private fun applyCaptionStyle() {
-        val vh = videoHost ?: return
-        val sv = vh.subtitleView
-        val system = Settings(host).captionMode == 1
-        val style = if (system) {
-            val cm = getSystemService(android.content.Context.CAPTIONING_SERVICE) as? android.view.accessibility.CaptioningManager
-            if (cm != null) androidx.media3.ui.CaptionStyleCompat.createFromCaptionStyle(cm.userStyle)
-            else androidx.media3.ui.CaptionStyleCompat(
-                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
-                android.graphics.Color.TRANSPARENT,
-                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                android.graphics.Color.BLACK, null)
-        } else {
-            androidx.media3.ui.CaptionStyleCompat(
-                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
-                android.graphics.Color.TRANSPARENT,
-                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                android.graphics.Color.BLACK, null)
-        }
-        sv.setStyle(style)
-        sv.setApplyEmbeddedStyles(!system)
-        sv.setApplyEmbeddedFontSizes(false)
-    }
+    /**
+     * ★委托给宿主那一份实现。
+     *   原来本层和 MainActivity 各写了一遍完全相同的 CaptionStyleCompat 计算 —— 同一块 SubtitleView
+     *   （MainActivity:380 取到的 subtitleView 就是 VideoHost 构造时传进去的那一个），
+     *   代码双写意味着以后改一处漏一处，字幕样式就会在小窗和全屏两个形态下变得不一致。
+     */
+    private fun applyCaptionStyle() = host.applyCaptionStyle()
 
     /**
      * 画面层唯一的宿主：EXO 与 mpv 共用。
@@ -2213,10 +2207,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun resetCurrentEpisode() {
         if (epUrl.isBlank()) {
-            Toast.makeText(host, "无当前集地址，无法刷新", Toast.LENGTH_SHORT).show()
+            showPlayError("无当前集地址，无法刷新")
             return
         }
-        Toast.makeText(host, "刷新当前集", Toast.LENGTH_SHORT).show()
         Thread { resolvePlay(flag, epUrl) }.start()
     }
 
@@ -2226,7 +2219,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // 选择走 player.trackSelectionParameters。上层不再需要判断"现在是哪个内核"。
         val p: androidx.media3.common.Player? = if (isMpvMode()) mpv else player
         if (p == null) {
-            Toast.makeText(host, "播放器还没准备好", Toast.LENGTH_SHORT).show()
             return
         }
         TrackDialog(host, p, type).show()
@@ -2262,14 +2254,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         updatePlayerText()
         val url = activeUrl
         if (url.isBlank()) {
-            Toast.makeText(host, "已切换到 $kernel，下一集起生效", Toast.LENGTH_SHORT).show()
             return
         }
         if (isMpvMode()) {
-            Toast.makeText(host, "已切换到 mpv（内置）", Toast.LENGTH_SHORT).show()
             startMpv(url, activeHeaders, at)
         } else {
-            Toast.makeText(host, "已切换到 EXO", Toast.LENGTH_SHORT).show()
             runCatching {
                 videoHost?.releaseOwner()
                 MpvDebug.log("[kernel] 换到 EXO：releaseOwner 已执行（输出面沿用常驻 SurfaceView）")
@@ -2293,18 +2282,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             st.mpvHwdec = !st.mpvHwdec
             mpv?.setHardwareDecode(st.mpvHwdec)
             updateDecodeText()
-            Toast.makeText(host, if (st.mpvHwdec) "mpv 已切到硬解" else "mpv 已切到软解",
-                Toast.LENGTH_SHORT).show()
             return
         }
         val st = Settings(host)
         st.decodeMode = if (st.decodeMode == 1) 0 else 1
         updateDecodeText()
         if (activeUrl.isBlank()) {
-            Toast.makeText(host, "解码已切换为${if (st.decodeMode == 1) "硬解" else "软解"}，下一集起生效", Toast.LENGTH_SHORT).show()
             return
         }
-        Toast.makeText(host, "解码已切换为${if (st.decodeMode == 1) "硬解" else "软解"}，正在重启播放", Toast.LENGTH_SHORT).show()
         rebuildPlayer(activeHeaders)
         playUrl(activeUrl, activeHeaders)
     }
@@ -2318,7 +2303,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun toggleLoop() {
         loopOn = !loopOn
         findViewById<View>(R.id.btnLoop)?.isActivated = loopOn
-        Toast.makeText(host, if (loopOn) "单集循环已开启" else "单集循环已关闭", Toast.LENGTH_SHORT).show()
     }
 
     private fun updatePlayerText() {
@@ -2338,11 +2322,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             dur = runCatching { p.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
         }
         if (cur <= 0 || dur <= 0 || cur > dur / 2) {
-            Toast.makeText(host, "请播到片头附近再按（需在前半段）", Toast.LENGTH_SHORT).show()
+            showPlayError("请播到片头附近再按（需在前半段）")
             return
         }
         setOpening(cur)
-        Toast.makeText(host, "片头设为 ${fmtClock(cur)}", Toast.LENGTH_SHORT).show()
     }
 
     private fun markEnding() {
@@ -2357,11 +2340,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             dur = runCatching { p.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
         }
         if (cur <= 0 || dur <= 0 || cur < dur / 2) {
-            Toast.makeText(host, "请播到片尾附近再按（需在后半段）", Toast.LENGTH_SHORT).show()
+            showPlayError("请播到片尾附近再按（需在后半段）")
             return
         }
         setEnding(dur - cur)
-        Toast.makeText(host, "片尾设为 ${fmtClock(dur - cur)}", Toast.LENGTH_SHORT).show()
     }
 
     private fun setOpening(ms: Long) {
@@ -2379,12 +2361,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun clearOpening() {
         setOpening(0)
-        Toast.makeText(host, "片头已清除", Toast.LENGTH_SHORT).show()
     }
 
     private fun clearEnding() {
         setEnding(0)
-        Toast.makeText(host, "片尾已清除", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateOpeningText() {
@@ -3573,7 +3553,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun openEpisodes() {
         if (vodLines.isEmpty()) {
-            Toast.makeText(host, "暂未获取到线路信息（请稍候再点选集）", Toast.LENGTH_LONG).show()
+            showPlayError("暂未获取到线路信息（请稍候再点选集）")
             return
         }
         val cl = vodLines.indexOfFirst { it.name == flag }

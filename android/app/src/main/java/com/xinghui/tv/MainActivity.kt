@@ -144,7 +144,10 @@ class MainActivity : Activity() {
         runCatching { videoHost.setPlayer(null) }
     }
 
-    private fun previewAttached(): Boolean = surfaceConsumer != null
+    // ★previewAttached() 已删。它只判断 `surfaceConsumer != null`，不判断是不是"这一颗"，
+    //   实例换过之后必然误判成"已绑"，新实例一个 surface 都拿不到（只有声音、画面停在旧帧）。
+    //   现在已经换过三次实例的地方各踩了一次，所以连函数一起删掉，避免再被拿来当闸门。
+    //   绑定统一走 attachPreviewTo(p)，VideoHost.setPlayer 内部 `old === p` 会短路，幂等。
 
     /**
      * 预览显隐。★ 画面本体是宿主那块 SurfaceView，挡在它前面的是海报 detailImage，
@@ -589,7 +592,7 @@ class MainActivity : Activity() {
         return p
     }
 
-    private fun applyCaptionStyle() {
+    internal fun applyCaptionStyle() {
         val sv = subtitleView
         val system = Settings(this).captionMode == 1
         val style = if (system) {
@@ -1401,7 +1404,7 @@ class MainActivity : Activity() {
             //   走不到后面重建段的挂载。实例被保留时它是 READY，挂上就能出画面。
             runCatching {
                 val p0 = player
-                if (p0 != null && !previewAttached()) attachPreviewTo(p0)
+                if (p0 != null) attachPreviewTo(p0)
             }
             // 在独立播放页里换过集：集号以历史里最后记下的那一集为准。
             // 不这样做，返回后小窗会退回离开前那一集 —— 就是「选了第 3 集，退回来又变第 1 集」。
@@ -1426,7 +1429,7 @@ class MainActivity : Activity() {
                 val p = player ?: buildInlinePlayer().also { player = it; applyCaptionStyle() }
                 // ★跳转时摘掉了画面层（inlineView.player = null），回来要重新挂上。
                 //   实例若被保留，此刻它是 READY，不需要 prepare，也就不会转圈。
-                runCatching { if (!previewAttached()) attachPreviewTo(p) }
+                runCatching { attachPreviewTo(p) }
                 if (p.playbackState == androidx.media3.common.Player.STATE_IDLE) {
                     if (inlineUrl.isNotBlank()) {
                         p.setMediaItem(MediaItem.Builder().setUri(inlineUrl).build())
