@@ -90,6 +90,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // 从历史点回来时不会有 direct_url，这里补认一次，否则会去站点详情接口查一个 URL，必然失败。
         if (directUrl.isBlank() && (looksLikeMedia(vodId) || ThunderPlay.match(vodId))) directUrl = vodId
         siteKey = SubscriptionStore(host).currentKey() ?: ""
+        // ★每次进页面都要按设置重算初值：设置页改了「播放倍速」，播放页原来根本不读。
+        runCatching {
+            // 两张表顺序完全一致（0.25/0.5/0.75/1.0/1.25/1.5/2.0），设置里的档位下标就是这里的下标
+            val at = Settings(host).playSpeed.coerceIn(0, speedSteps.lastIndex)
+            speedIdx = at
+            savedSpeedIdx = at
+        }
     }
 
     /**
@@ -135,8 +142,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         speedBtn.setOnLongClickListener {
             fastForwarding = true
             savedSpeedIdx = speedIdx
-            speedBtn.text = "快进 3x（松开恢复）"
-            if (isMpvMode()) mpv?.setSpeed(3f) else player?.setPlaybackSpeed(3f)
+            // ★读设置里的「长按倍速」：原版是 1.0 / 3.0 两档（1.0 = 长按不加速）。
+            //   原来这里硬编码 3f，设置里选「1.0 不加速」等于没选。
+            val press = runCatching { Settings(host).pressSpeed }.getOrDefault(3.0f)
+            speedBtn.text = if (press >= 3f) "快进 3x（松开恢复）"
+            else String.format(java.util.Locale.US, "%.2f", speedSteps[speedIdx])
+            if (press >= 3f) {
+                if (isMpvMode()) mpv?.setSpeed(press) else player?.setPlaybackSpeed(press)
+            }
             true
         }
         // 缩放档位循环（对齐原项目 onScale/setScale）
@@ -165,6 +178,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             updatePlayerText()
             setKeepScreenOn(true)
             // 片头/片尾/倍速这些是"按片记忆"的界面状态，上面已经读过，这里不用再改播放器
+            // ★复用路径必须自己补挂监听：正常路径是在 rebuildPlayerInternal 里挂的，
+            //   而复用这条从来不重建实例 —— 以前没人走得到这里，一走通就暴露了：
+            //   不挂的话播放页里 BUFFERING / READY / ENDED / 错误 / 暂停落盘 一律不回调，
+            //   表现就是「进播放页后转圈不消失、播完不切集」。
+            attachPlayerListeners()
             MpvDebug.log("[play] 复用已在播的一路，不重新加载 url=${reuseUrl.take(48)} pos=${currentPosMs()}ms")
             return
         }
@@ -221,9 +239,28 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // ★播放器处于错误态时不能走"跳过重载"：同集重进本来想省掉重新解析，
         //   但错误态下跳过就等于"进去之后什么都不发生"，看起来和进不去一模一样。
         //   playerError 非空 → 老老实实重新起播（这条只对 EXO 有意义，mpv 模式 player 恒为 null）。
-        val playerBroken = player?.playerError != null
+        // ★★判据只认宿主播放器（host.player）—— 这一条是本轮真正的根因。
+        //
+        //   原来这里读的是 `player`，那是 **PlayLayer 自己的字段**，只有 rebuildPlayer /
+        //   session.adoptExo 跑过之后才有值；而"第一次点进播放页"这个时刻它必然还是 null。
+        //   详情页小窗那一路播的是宿主 `host.player`，两者不是同一个引用（虽然重建后会回写成同一个）。
+        //   于是：runningUrl 恒为空串 → 判据一次都没命中过 → 每次都老实重新解析加载。
+        //   这就是"小窗一点就播、进播放页反而要转一圈"的真正原因 ——
+        //   不是 mediaId 的问题，也不是 uri 的问题，是**在错误的对象上查状态**。
+        //   session.hasContent() 同理：它读 session.exo，首次进入时还没 adopt，也恒为 false。
+        val src = player ?: host.player
+        val playerBroken = src?.playerError != null
         if (wasAttached && sameEpisode && activeUrl.isNotBlank() && !playerBroken) {
-            MpvDebug.log("[play] 同集再入：跳过解析与重载 url=${activeUrl.take(48)}")
+            // ★★这里以前是裸 return —— 等于「什么都不重新初始化」。
+            //   bind() 早就因为 attached 直接返回了，于是这一趟进页面：
+            //     · 片名/集数/尺寸文字还是上一次留下的
+            //     · 转圈状态、控制条显隐停在上一趟退出时的样子
+            //     · 没人 requestFocus → 第一下方向键落空
+            //   用户看到的就是「点了集数，画面在那儿，但界面像死的一样」＝「没进播放页」。
+            //   现在改走 startPlayback 的复用分支：它会把界面全部补齐（片名/解码/内核/转圈收起/
+            //   keepScreenOn），并且**不重设媒体项**，所以既不重载也不黑。
+            MpvDebug.log("[play] 同集再入：补齐界面，不重载 url=${activeUrl.take(48)}")
+            startPlayback(reuseUrl = activeUrl)
             return
         }
         // ★★小窗已经在播这一路 → 进播放页只接管界面，不重新解析、不重新加载。
@@ -234,14 +271,28 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // ★取 localConfiguration.uri 作主判据：mediaId 只有在小窗起播时显式设过才有值，
         //   而 uri 是 setMediaItem 就存在的。两者取先到的非空值，避免任何一侧漏设导致永远判不中。
         val runningUrl = runCatching {
-            val item = player?.currentMediaItem ?: return@runCatching ""
+            val item = src?.currentMediaItem ?: return@runCatching ""
             item.localConfiguration?.uri?.toString().orEmpty().ifBlank { item.mediaId }
         }.getOrDefault("")
+        val hasContent = (src?.mediaItemCount ?: 0) > 0
         // ★内核为 mpv 时不能复用：详情页小窗那一路上宿主 EXO 起的，播放页要交 mpv，
         //   直接把 EXO 的媒体项当成"已在播"接过去就是黑屏。这种跨内核只能老实加载一次。
         //   （要让 mpv 用户也做到"零加载"，得让详情页小窗直接跑 mpv —— 那是下一步，不在本包。）
-        if (preUrl.isNotBlank() && runningUrl == preUrl && !playerBroken && contentReady() && !isMpvMode()) {
-            MpvDebug.log("[play] 小窗已在播，接管界面不重载 url=${preUrl.take(48)}")
+        // ★判据不命中时也要留一行证据 —— 否则"为什么还要加载一次"只能靠猜。
+        //   这一行把五个条件的实际值全打出来，一眼就能看出卡在哪个上。
+        MpvDebug.log(
+            "[play] 复用判据 preUrl=${preUrl.take(48)} running=${runningUrl.take(48)} " +
+                "hit=${preUrl.isNotBlank() && runningUrl == preUrl} ready=$hasContent src=${if (src == null) "null" else (if (player === src) "layer" else "host")} " +
+                "mpv=${isMpvMode()} broken=$playerBroken"
+        )
+        if (preUrl.isNotBlank() && runningUrl == preUrl && !playerBroken && hasContent && !isMpvMode()) {
+            // ★复用前必须把宿主那一颗接进本层：player 字段与 session.exo 都要指向它，
+            //   否则 startPlayback 之后 onHostResume 的 play() 会落到空引用上（表现就是"进去了不播"）。
+            if (src != null && player !== src) {
+                player = src
+                runCatching { session.adoptExo(src) }
+            }
+            MpvDebug.log("[play] 小窗已在播，接管界面不重载 url=${preUrl.take(48)} pos=${currentPosMs()}ms")
             startPlayback(reuseUrl = preUrl)
             return
         }
@@ -336,10 +387,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private var vodLines: List<PlayLine> = emptyList()
 
     // 倍速档位（对齐原项目点击循环 addSpeed；Up/Down 加减 0.25）
-    private val speedSteps = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-    private var speedIdx = 2 // 默认 1.0x
+    // ★档位必须与设置页同一张表（Settings.SPEED_VALUES = 0.25/0.5/0.75/1.0/1.25/1.5/2.0）。
+    //   原来是自造的 0.5~2.0 六档：设置里能选 0.25，播放页却永远调不到 0.25，
+    //   而且设置页那项「播放倍速」在播放页从来没被读过（用户视角就是"设了没效果"）。
+    private val speedSteps = listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+    private var speedIdx = 3 // 默认 1.0x（本表下标 3）
     private var fastForwarding = false
-    private var savedSpeedIdx = 2
+    private var savedSpeedIdx = speedIdx
     /**
      * 画面层只有一份，由宿主持有（videoFrame + PlayerView + subtitleView 全在宿主布局里）。
      * ★以前本层自己 new 了一个包同一块 PlayerView 的 VideoHost —— 两个实例的 bound 记录
@@ -385,9 +439,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //    bit0 片名 / bit1 时钟 / bit2 网速 / bit3 总时长 / bit4 底部 1dp 进度条
         runCatching {
             val mask = Settings(host).displayMask
+            // 同样只用 alpha：这几项是常驻元素，GONE 会改绘制区域（黑帧）
             fun vis(v: android.view.View?, bit: Int) {
-                v?.visibility = if ((mask and (1 shl bit)) != 0) android.view.View.VISIBLE
-                else android.view.View.GONE
+                v?.alpha = if ((mask and (1 shl bit)) != 0) 1f else 0f
             }
             vis(root?.findViewById(R.id.playTitle), 0)
             vis(root?.findViewById(R.id.clock), 1)
@@ -1187,9 +1241,26 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     /** 统一挂播放器监听：onCreate 和 rebuildPlayer 都要挂，避免两处逻辑漂移 */
+    /** 挂在播放器上的那份监听器 —— 只为摘除；**没有它就会随重建累积** */
+    private var playerListener: Player.Listener? = null
+    private var playerListenerHost: ExoPlayer? = null
+
+    /**
+     * 挂播放器监听（错误、缓冲、就绪续播、暂停落盘）。
+     *
+     * ★幂等：先摘掉上一份再挂新的。
+     *   原来是每次调用就 addListener 一个匿名对象且从不 remove，
+     *   而调用点有两个（首帧建实例、rebuildPlayerInternal），所以「切内核 / 换源重建」
+     *   每做一次就多一份监听：错误会上报多次（连弹好几个失败提示、自动换源被触发多次），
+     *   暂停落盘也会重复写。现在无论调用多少次都只保留一份。
+     */
     private fun attachPlayerListeners() {
+        playerListener?.let { l -> playerListenerHost?.let { h -> runCatching { h.removeListener(l) } } }
+        playerListener = null
+        playerListenerHost = null
+        val p = player ?: return
         // 字幕 cue 由 PlaybackSession 统一转发给 SubtitleView（见 session.cueSink）
-        player?.addListener(object : Player.Listener {
+        val l = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (directUrl.isNotBlank()) return // 直播直链不自动换线路
                 onPlayFail("播放出错：${error.errorCodeName}")
@@ -1259,7 +1330,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                     scheduleSave()
                 } else savePosition(reason = "暂停")
             }
-        })
+        }
+        playerListener = l
+        playerListenerHost = p
+        p.addListener(l)
     }
 
     private fun scheduleSave() {
@@ -1359,6 +1433,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         val effHeaders = withUa(headers)
         activeUrl = url
         startGen++
+        // ★★回写宿主：播放页里切集（上一集/下一集、播完自动下一集）必须让详情页知道现在播的是哪一集。
+        //   不回写的后果是一整条错位链：
+        //     · exitPlayLayer 里 scrollToPosition(playingIdx) 与焦点恢复都把用户带回「进入时那一集」
+        //     · 详情页高亮永远是旧集
+        //     · 再点真正的当前集时 wasPlayingThis 判 false → 又老老实实重新加载一遍
+        //   这就是「返回详情页后选集对不上/再进要重载」的残余根因。
+        runCatching { host.onEpisodeChanged(epUrl, url) }
         logVideoCodecOnce()
         // 片头/片尾按片记忆（对齐原版 History.getOpening/getEnding）
         val marks = HistoryStore(host).marks(historyKey, epUrl)

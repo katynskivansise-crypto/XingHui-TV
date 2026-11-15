@@ -208,6 +208,46 @@ class MainActivity : Activity() {
      * 进播放层。★ 只换层，不换窗口、不换 surface。
      * 这就是 OwnTV 的 "promotes the running preview straight to full screen with no reload"。
      */
+    /**
+     * 两层的显隐统一走这里 —— **只改 alpha 与焦点可达性，绝不改 visibility**。
+     * alpha=0 的层仍在窗口里占着同一块区域，所以绘制区域从页面第一帧起就是固定的，
+     * 进出播放页不再触发挖洞区域重算（黑帧就是那么来的）。
+     * 焦点这一侧用 FOCUS_BLOCK_DESCENDANTS 挡住：alpha=0 但视图还在，
+     * 不挡的话方向键会落进看不见的层里。
+     */
+    private fun showDetailLayer(show: Boolean) {
+        detailLayer.alpha = if (show) 1f else 0f
+        detailLayer.descendantFocusability = if (show)
+            android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+        else android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        if (!show) detailLayer.clearFocus()
+    }
+
+    private fun showPlayLayerView(show: Boolean) {
+        playContainer.alpha = if (show) 1f else 0f
+        playContainer.descendantFocusability = if (show)
+            android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+        else android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        if (!show) playContainer.clearFocus()
+    }
+
+    /**
+     * 播放层切集后的回写入口。
+     *
+     * 播放层自己有一套集数游标（epUrl 所在子串），宿主持有另一套（playingIdx + inlineUrl）。
+     * 这两套以前**完全没有同步**：播放页里切到第 5 集，宿主还停在进入时的第 1 集。
+     * 于是退出时的滚动/焦点恢复、详情页高亮、"这一集是不是正在播"的复用判据，全都按旧集算。
+     */
+    internal fun onEpisodeChanged(newEpUrl: String, newUrl: String) {
+        val idx = if (newEpUrl.isBlank()) -1 else episodes.indexOfFirst { it.second == newEpUrl }
+        if (idx >= 0 && idx != playingIdx) {
+            playingIdx = idx
+            MpvDebug.log("[gate] 播放层切集回写 playingIdx=$idx ep=${newEpUrl.take(30)}")
+        }
+        if (newUrl.isNotBlank()) inlineUrl = newUrl
+        if (playingIdx >= 0) runCatching { adapter.setActive("E:" + playingIdx) }
+    }
+
     fun showPlayLayer(extras: Intent) {
         val layer = playLayer ?: PlayLayer(this) { exitPlayLayer() }.also { playLayer = it }
         // gate 日志：进入这条链路每一步的输入状态。有它才不用靠猜。
@@ -228,8 +268,15 @@ class MainActivity : Activity() {
         //   现场就是"点了集数没反应，人还停在详情页"，跟内核、跟画面都没有关系。
         //   进入协议只该决定"播不播得起来"，不该决定"能不能进播放页"。
         playMode = true
-        detailLayer.visibility = View.GONE
-        playContainer.visibility = View.VISIBLE
+        // ★★不再 GONE↔VISIBLE 对调。两者都常驻 VISIBLE，只切 alpha。
+        //
+        //   依据：这台机器上"整片有内容区域变透明"会让 ViewRootImpl 重算挖洞区域
+        //   （setTransparentRegionHint），窗口层那一帧被合成器跳过 —— 用户看到的就是黑一帧。
+        //   退出时最严重：播放层（整屏不透明）消失 + 详情层（大面积透明）出现，同一帧发生。
+        //   本文件里 playProgress / playCenter / controlBar 三层早就统一成"常驻 + alpha"了，
+        //   只有最外面这两层还留着 GONE，黑帧就一直是这里漏出来的。
+        showDetailLayer(false)
+        showPlayLayerView(true)
         // 画面层一直是 VISIBLE：小窗形态下它只有 400x225，剩下的区域露出窗口壁纸；
         // 只有它变成 MATCH_PARENT 时才占满全屏。所以壁纸从不被挡住。
         videoFrameToFull()
@@ -242,7 +289,7 @@ class MainActivity : Activity() {
                 }
             }
         layer.onHostResume()
-        MpvDebug.log("[gate] 已切换 detail=${detailLayer.visibility} play=${playContainer.visibility} " +
+        MpvDebug.log("[gate] 已切换 detailAlpha=${detailLayer.alpha} playAlpha=${playContainer.alpha} " +
             "frame=${videoFrame.layoutParams?.width}x${videoFrame.layoutParams?.height} playMode=$playMode")
     }
 
@@ -321,8 +368,9 @@ class MainActivity : Activity() {
         //   最后一帧留着、音频独立继续 —— "小窗像暂停一样、只有声音"；
         //   这条链上任何一步失败，就是"再点集数进不去"。
         //   现在整条链删除，画面从头到尾没有人动过。
-        playContainer.visibility = View.GONE
-        detailLayer.visibility = View.VISIBLE
+        // 同上：退出只切 alpha，不碰 visibility（否则整屏变透明 → 黑一帧）
+        showPlayLayerView(false)
+        showDetailLayer(true)
         runCatching { setPreviewVisible(true) }
         videoFrameToMini()
         // ★焦点必须落到**当前那一集的格子**上，而不是列表容器本身。
@@ -771,7 +819,12 @@ class MainActivity : Activity() {
         }
         // 集数区高度是 match_parent，横向单行会把每个格子撑满整屏高，所以这里只做网格。
         // 列数按名称长度自适应（原版 setEpisodeAdapter 的算法），不需要用户再选「选集样式」。
-        rv.layoutManager = GridLayoutManager(this, cols)
+        // ★「选集样式」设置（原版 select_episode：单行 / 多行）必须真的改变布局。
+        //   以前这里恒为网格，设置页那一格选了"单行"没有任何效果 —— 典型的空壳开关。
+        val singleLine = runCatching { Settings(this).episodeStyle == 0 }.getOrDefault(false)
+        rv.layoutManager = if (singleLine)
+            androidx.recyclerview.widget.LinearLayoutManager(this, RecyclerView.HORIZONTAL, false)
+        else GridLayoutManager(this, cols)
         if (rv.itemDecorationCount == 0) {
             // 列间隙 8dp：左右各 4dp，相邻两格加起来正好 8dp（对齐原版 colWidth 的扣减方式）
             rv.addItemDecoration(object : RecyclerView.ItemDecoration() {
@@ -1205,6 +1258,27 @@ class MainActivity : Activity() {
         if (playMode) {
             val handled = runCatching { playLayer?.onHostKeyEvent(event) ?: false }.getOrDefault(false)
             if (handled) return true
+        }
+        // ★★详情页返回键：这里以前**没有任何 BACK 分支**。
+        //   后果：详情页全屏预览看片时按返回，事件直接落到默认处理 = finish 整个页面，
+        //   用户看到的是"全屏看片按一下返回，直接回主页了"，而不是像原版那样先回小窗。
+        //   原版 VideoActivity 的返回键第一层就是 exitFullscreen()，这一层从不退出页面。
+        //   select_small_window_back_key 两档：0=返回（退出全屏）、1=焦点移动（不退出）。
+        if (!playMode && event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                if (inlineFullscreen) {
+                    val backMode = runCatching { Settings(this).smallWindowBackKey }.getOrDefault(0)
+                    if (backMode == 0) {
+                        exitInlineFullscreen()
+                    } else {
+                        // 「焦点移动」：不退出全屏，把焦点交给集数列表（原版同语义）
+                        findDetail<android.view.View>(R.id.detailList)?.requestFocus()
+                    }
+                } else {
+                    return super.dispatchKeyEvent(event)
+                }
+            }
+            return true
         }
         val menu = event.keyCode == KeyEvent.KEYCODE_MENU
         if (inlineFullscreen && menu) {

@@ -48,10 +48,28 @@ class PlaybackSession(
     val mpv: MpvPlayer? get() = mpvProvider()
     val mv: MpvPlayer? get() = mpv  // 便于调用点读起来短一点
 
+    /** 我们挂在 exo 上的监听器与它所在的实例 —— 只为摘除，不做别的 */
+    private var exoListener: Player.Listener? = null
+    private var exoListenerHost: ExoPlayer? = null
+
+    /**
+     * 接管一颗 EXO 实例。
+     *
+     * ★必须是**幂等**的。这个方法会被"进播放页复用宿主那一颗"反复调用
+     *   （见 PlayLayer.enter 的复用分支），而它原来是每次调用就 addListener 一个匿名对象、
+     *   且从不 removeListener —— 进 N 次进来就是 N 份回调：
+     *     · 同一个播放事件被上报 N 次（转圈反复亮灭、错误重复触发自动换源）
+     *     · 监听器持有整条 lambda 链 → 引用链一直挂在这颗 player 上
+     */
     fun adoptExo(p: ExoPlayer?) {
+        exoListener?.let { l -> exoListenerHost?.let { h -> runCatching { h.removeListener(l) } } }
+        exoListener = null
+        exoListenerHost = null
+
         exo = p
         bindSurfaceToExo(p)
-        p?.addListener(object : Player.Listener {
+        if (p == null) return
+        val l = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 when (state) {
                     Player.STATE_BUFFERING -> events.onState(State.BUFFERING)
@@ -73,7 +91,10 @@ class PlaybackSession(
                 // 字幕由 Activity 里的 SubtitleView 显示，这里只转发
                 cueSink?.invoke(cueGroup)
             }
-        })
+        }
+        exoListener = l
+        exoListenerHost = p
+        p.addListener(l)
     }
 
     /** 由 Activity 注入：把 cue 灌给它的 SubtitleView */
