@@ -59,8 +59,33 @@ class MainActivity : Activity() {
 
 /**
      */
+    /**
+     * 画面层宿主的解析：**运行时查 id，不在代码里写死画面层的资源 id**。
+     *
+     * 为什么不用编译期常量：R 里的 id 由 AGP 从 layout 生成。画面层换形态时，
+     * 新 id 在旧布局里不存在、旧 id 在新布局里不存在 —— 任何一边没同步，
+     * 都会变成 Unresolved reference 把整包编译打断。
+     * 画面层是运行时装配的对象，不该成为编译期的硬依赖。
+     *
+     * 顺序：独立常驻 SurfaceView（新布局） → PlayerView 内部那块（旧布局） → 明确报错。
+     */
+    private fun resolveSurfaceView(): android.view.SurfaceView {
+        val idNew = resources.getIdentifier("videoSurface", "id", packageName)
+        if (idNew != 0) {
+            findViewById<android.view.View>(idNew)?.let { if (it is android.view.SurfaceView) return it }
+        }
+        val idPv = resources.getIdentifier("playerView", "id", packageName)
+        if (idPv != 0) {
+            val pv = findViewById<android.view.View>(idPv) as? androidx.media3.ui.PlayerView
+            (pv?.videoSurfaceView as? android.view.SurfaceView)?.let { return it }
+        }
+        throw IllegalStateException(
+            "画面层宿主缺失：布局里既没有独立的 videoSurface，也没有带 surface 的 PlayerView"
+        )
+    }
+
     internal val videoHost: VideoHost by lazy {
-        VideoHost(videoFrame, findViewHost(R.id.videoSurface), subtitleView, null)
+        VideoHost(videoFrame, resolveSurfaceView(), subtitleView, null)
     }
     private var surfaceValid = false
     private var playMode = false
@@ -352,7 +377,7 @@ class MainActivity : Activity() {
         playContainer = findViewHost(R.id.playLayer)
         videoFrame = findViewHost(R.id.videoFrame)
         // ★画面由官方 PlayerView 承载，它内部那个 SurfaceView 才是真正的渲染目标。
-        videoSurface = findViewHost(R.id.videoSurface)
+        videoSurface = resolveSurfaceView()
         frameParams = videoFrame.layoutParams
         subtitleView = findViewHost(R.id.subtitleView)
 

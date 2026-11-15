@@ -52,26 +52,28 @@
         android:background="@android:color/black"
         app:resize_mode="fit">
 
-        <!-- ★用官方 PlayerView 承载画面，与原项目一致。
-             PlayerView 内部自带一个 SurfaceView（surface_type=surface_view），
-             并且它是官方唯一会正确维护「surface 挂载 / 尺寸同步 / 首帧」三件事的类。
-             我们之前用手搓的裸 SurfaceView + setVideoSurfaceView，
-             等于自己接管了这三件事，却漏掉了官方在 attach 顺序上的细节。
+        <!-- ★画面层结构（依据官方原文 + 两版原项目布局，不是经验）：
+             1) media3 官方 PlayerView 文档：surface_type 取值 none 时 getVideoSurfaceView() 返回 null，
+                "Corresponding method: None" —— 这个属性运行时改不了，只能在布局写死。
+             2) 5.0.8 与 5.6.0 的 activity_video / activity_live / activity_cast 三个播放页，
+                全部写 app:surface_type="none"；只有海报墙的 view_wall_video 用 texture_view。
+             3) 官方 keep_content_on_player_reset 默认就是 false，原项目 Player.Vod 也写 false。
+             4) PlayerManager 原注释："A Surface used by a CPU renderer stays connected after decoder
+                release. A different player needs a new Surface before its GPU/codec can connect."
+                且 resetVideoSurface 只在换内核时为 true —— 尺寸变化从不重建 surface。 -->
 
-             三条必须核对过的设置：
-               use_controller=false           —— 不要它自带的控制条（我们有自己的条）
-               shutter_background_color=透明  —— 否则 player=null/tracks 为空时它会盖一块不透明黑，
-                                              这正是"呼条那一下黑"的来源之一
-               resize_mode=fit                —— 由外层视频容器决定尺寸，缩放交给它 -->
-        <androidx.media3.ui.PlayerView
-            android:id="@+id/playerView"
+        <!-- 画面由这块常驻 SurfaceView 承载。它不在任何会随布局改尺寸的包装类内部，
+             所以小窗↔全屏、比例切换只触发 surfaceChanged，不会 destroyed→created。 -->
+        <SurfaceView
+            android:id="@+id/videoSurface"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            app:use_controller="false"
-            app:surface_type="surface_view"
-            app:shutter_background_color="@android:color/transparent"
-            app:keep_content_on_player_reset="true"
-            app:resize_mode="zoom" />
+            android:layout_height="match_parent" />
+
+        <!-- PlayerView 已移除：surface_type=none 之后它不提供任何画面，只剩一层可能遮挡的空壳。
+             它原本承担的三件事现在各有归属：
+               resize_mode   → 外层 AspectRatioFrameLayout（VideoHost.resizeMode 直接操作它）
+               use_controller→ 我们自己的 activity_play_layer 控制条
+               shutter        → 场景不存在了（没有 PlayerView 就没有 shutter） -->
 
         <androidx.media3.ui.SubtitleView
             android:id="@+id/subtitleView"
