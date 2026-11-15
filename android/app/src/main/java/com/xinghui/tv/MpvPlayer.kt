@@ -48,7 +48,6 @@ class MpvPlayer(
     private val host: android.view.View
 ) : SimpleBasePlayer(android.os.Looper.getMainLooper()), MpvCore.EventObserver {
 
-    /** 官方 libmpv + 我们自己的 render API 上屏（handle 与 EGL 都在这一层） */
     private val core = MpvCore(activity)
 
     companion object {
@@ -60,9 +59,7 @@ class MpvPlayer(
         private const val MIME_AUDIO_GENERIC = "audio/mp4"
         private const val MIME_TEXT_GENERIC = "application/x-subrip"
         private const val TAG = "XingHuiTV"
-        /** MediaItemData 的 uid，同一播放器内固定即可 */
         private const val UID = "xinghui-mpv"
-        /** 当前活着的 MpvPlayer 数量：>1 说明有实例没释放，MPVLib 的静态句柄会指错，指令全打到空实例上 */
         @Volatile
         var liveCount: Int = 0
             private set
@@ -86,23 +83,18 @@ class MpvPlayer(
     var onTimePos: ((Long) -> Unit)? = null
     var onDuration: ((Long) -> Unit)? = null
     var onPauseChanged: ((Boolean) -> Unit)? = null
-    /** 非正常结束（加载失败 / 解码失败 / 网络断）：上层据此走自动换源 */
     var onFailed: ((String) -> Unit)? = null
 
     private var inited = false
     private var surfaceReady = false
-    /** 当前 attach 到 mpv 的那块 surface，渲染自检复位时要重新用上它 */
     private var attachedSurface: android.view.Surface? = null
     private var lastSurfaceW = 0
     private var lastSurfaceH = 0
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
-    /** play() 已下发但还没真正执行过 loadfile；surfaceCreated 与 play() 都会尝试补播，用它去重 */
     private var playPending = false
-    /** mpv_create 是否已成功：init() 失败重试时不能重复 create，否则会多实例泄漏 */
     private var created = false
-    /** 初始化期抛出的原因：那时 onFailed 还没接上，先存着，等 play() 时报出来 */
     private var initError: String? = null
     private val logFile: java.io.File by lazy { java.io.File(activity.filesDir, "mpv.log") }
     private var pendingStartMs = 0L
@@ -110,7 +102,6 @@ class MpvPlayer(
     private var pendingSeekMs = 0L
     private var paused = true
     private var eofReached = false
-    /** 当前媒体项：走 Player 接口时由 handleSetMediaItems 写入，走老 play(url...) 时由 play() 补 */
     private var currentItem: MediaItem? = null
     // ---- media3 状态快照（唯一事实来源）----
     //
@@ -122,22 +113,14 @@ class MpvPlayer(
     private var snapPosMs = 0L
     private var snapDurMs = C.TIME_UNSET
     private var snapSpeed = 1f
-    /** 视频帧尺寸，来自 mpv 的 width / height 属性（整数），不再解析 video-params 字符串 */
     private var snapVideoW = 0
     private var snapVideoH = 0
-    /** 媒体项对应的 playlist，只在 item / 时长变化时重建，getState 不重复分配 */
     private var playlistData: List<MediaItemData>? = null
     private var playlistForItem: MediaItem? = null
-    /** 状态推送节流时间戳：位置由 media3 外推，这里只做 1Hz 校准 */
     private var lastStatePushAt = 0L
     /**
      * 应用是否在后台（由 PlayActivity 的 onPause/onResume 置位）。
-     *
-     * 为什么需要它：切后台时 Activity 的 SurfaceView 会被系统销毁，
-     * surfaceDestroyed 把 vo 置 null、detachSurface 之后，mpv 会短暂掉进 idle-active=true。
-     * END_FILE 的异常判定若只看 idle-active，就会把「切后台」误判成「播放中断」，
-     * 进而触发上层静默自动换线路 —— 用户看到的就是「切回来卡住/换了台」。
-     */
+ */
     private var backgrounded = false
     /**
      * resume() 在 surface 还没回来时先记账。
@@ -202,18 +185,6 @@ class MpvPlayer(
         }
         current = this
         liveCount++
-        // ★不再由 MpvPlayer 自己往 holder 上注册回调。
-        //
-        // 原来这里写的是：
-        //     v.holder.addCallback(holderCallback)
-        //     if (v.holder.surface?.isValid == true) onSurfaceCreated(v.holder)
-        // 而 VideoHost 也在同一个 holder 上注册了 forwarder。SurfaceHolder 的 Callback 是**列表**，
-        // 两套回调会同时收到 created / changed / destroyed —— 同一块 Surface 上有两个"主人"，
-        // 谁也说不清现在是哪个内核在画。原项目用一个 render 状态机保证"同一时刻只有一个 render 目标"
-        // （PlayerManager.getRender / attachSurface 的 publishRenderTarget），我们没有。
-        //
-        // 现在把 holder 的主权交回 VideoHost：由它 takeNative(attach, release) 决定何时把事件转给 mpv，
-        // 见 VideoHost.kt 的 owner / forwarder。外部调用方在拿到 MpvPlayer 之后必须调 bindToHost()。
         when (val v = host) {
             is SurfaceView -> {
                 MpvDebug.log("[mpv] 构造完成，holder 主权交由 VideoHost（本实例不再自注册回调）")
@@ -237,7 +208,6 @@ class MpvPlayer(
         MpvDebug.log("[mpv] holder 主权已交给 VideoHost，owner=NATIVE")
     }
 
-    /** VideoHost 转发来的 destroyed：与自家回调同一语义，但不再依赖 holder 上的注册 */
     private fun onSurfaceDestroyedForHost() {
         MpvDebug.log("[mpv] VideoHost 转发 surfaceDestroyed inited=$inited")
         surfaceReady = false
@@ -247,7 +217,6 @@ class MpvPlayer(
 
     // ---------------------------------------------------------------- 生命周期
 
-    /** 必须在 UI 线程、且在 Surface 可用之后调用 */
     private fun initWithOptions() {
         if (inited) return
         if (android.os.Build.VERSION.SDK_INT < 23) {
@@ -277,9 +246,6 @@ class MpvPlayer(
             core.setOptionString("log-file", logFile.absolutePath)
             core.setOptionString("msg-level", "all=w")
             core.setOptionString("idle", "yes")
-            // ★ 官方路线：vo=gpu + gpu-context=android，帧由 mpv 自己的渲染线程推给 Surface。
-            //   vo 的具体值在 attachSurface() 里按 BaseMPVView 的写法设（surfaceCreated → setPropertyString("vo", voInUse)），
-            //   这里只把上下文类型定好。以前这里写 vo=libmpv 是自研 render API 的形态，已废弃。
             core.setOptionString("vo", "gpu")
             core.setOptionString("gpu-context", "android")
             core.setOptionString("opengl-es", "yes")
@@ -489,24 +455,6 @@ class MpvPlayer(
             core.setPropertyString("force-window", "yes")
             core.attachSurface(surface, width, height)
         }
-        // ★这里曾经调 holder.setFormat(RGBA_8888 / RGBA_1010102)，已删除。
-        //
-        // 删除依据是 PlayActivity 里早就定下的两条结论，和这段代码正面冲突：
-        //   PlayActivity.kt「★不在这里 setFormat。SurfaceHolder.setFormat 在 surface 已经创建的情况下
-        //   会让系统重分配 buffer，老 ROM 上等于把这块 surface 重建一次
-        //   （EXO 解码器跟着重启、mpv 要重挂 EGL）」
-        //   PlayActivity.kt「★不再 setFormat(RGBA_8888)。画面层沿用官方默认 PixelFormat」
-        //
-        // 实际危害（这正是「从 EXO 切到 mpv 闪退」的机制）：
-        //   attachSurface 是在 surface **已经创建**之后被 onSurfaceCreated 调进来的，
-        //   这里再 setFormat 等于向 SurfaceFlinger 申请重分配整套 buffer → 老 ROM 上触发一次
-        //   surfaceDestroyed→surfaceCreated；而 mpv 的 EGLSurface 还绑在旧窗口上，
-        //   下一次 render/swap 就写到已经失效的窗口 → 原生崩溃（Java 层看不到栈，表现为直接闪退）。
-        //
-        // 而且在这台机器上它连收益都没有：本机 sdk=25，`SDK_INT >= 26` 恒假，
-        // 分支永远落到 RGBA_8888 —— 纯负优化。
-        // 10bit 若将来要支持，正确的位置是「surface 创建之前」设一次，
-        // 不是每次 attach 都重设一遍（attach 会被 surfaceChanged 反复调用）。
         runCatching {
             MpvDebug.log("[mpv] attachSurface ${width}x${height} first=$first 像素格式保持系统默认（本版不再 setFormat）")
         }
@@ -515,7 +463,6 @@ class MpvPlayer(
             playPending = false
             doPlay(pendingUrl)
         } else if (pendingResume && pendingUrl.isNotBlank()) {
-            // 回前台时 onResume 早于 surface 可用：resume() 当时只记账，这里才真正下发 pause=false
             pendingResume = false
             paused = false
             runCatching { core.setPropertyBoolean("pause", false) }
@@ -532,7 +479,6 @@ class MpvPlayer(
         }
     }
 
-    /** 页面回到前台后重新确认一次画面层（TextureView 可能被系统回收过） */
     fun ensureSurface() {
         if (!inited) return
         when (host) {
@@ -544,7 +490,6 @@ class MpvPlayer(
         }
     }
 
-    /** 真正的释放：对外 Player.release()（基类 final）→ handleRelease() → 这里 */
     internal fun releaseInternal() {
         abandonAudioFocus()
         if (!inited) return
@@ -589,7 +534,6 @@ class MpvPlayer(
 
     // ---------------------------------------------------------------- 音频焦点
 
-    /** mpv 自己不申请 AudioFocus，不补会和后台播放器混音 */
     private fun requestAudioFocus() {
         val mgr = activity.getSystemService(android.content.Context.AUDIO_SERVICE)
                 as? android.media.AudioManager ?: return
@@ -721,8 +665,6 @@ class MpvPlayer(
 
     // ---------------------------------------------------------------- 控制（与 EXO 同一套语义）
 
-    /** 用缓存的 pause/eof，不在这里同步调 native（mpv_get_property 在 seek 期间会阻塞 UI） */
-
     /**
      * 真实暂停态：缓存标记一旦被「写下去却没生效」带偏，就再也纠不回来 ——
      * 按 OK 第一次把 paused 置 true（mpv 其实没停），之后每次 toggle 都会走 resume()，
@@ -755,7 +697,6 @@ class MpvPlayer(
         }
     }
 
-
     fun resume() {
         if (!inited) return
         if (eofReached) {
@@ -763,9 +704,6 @@ class MpvPlayer(
             runCatching { core.command(arrayOf("seek", "0", "absolute+exact")) }
         }
         paused = false
-        // surface 还没回来：此时 vo 是 null（surfaceDestroyed 置的），
-        // 直接解暂停会让 mpv 在无视频输出下开播，部分机型借此触发 END_FILE → 误判中断。
-        // 只记账，等 surfaceCreated 里 attach 完再补发。
         if (!surfaceReady) {
             pendingResume = true
             return
@@ -794,10 +732,8 @@ class MpvPlayer(
      *
      * @return true 表示确实做过复位
      */
-    /** 调试用：surface 是否还挂着 */
     fun surfaceReadyNow(): Boolean = surfaceReady
 
-    /** 由宿主 Activity 的 onPause/onResume 置位：后台期间不把 idle 判定成播放中断 */
     fun setBackground(value: Boolean) {
         backgrounded = value
         if (!value) return
@@ -851,7 +787,6 @@ class MpvPlayer(
         runCatching { core.setPropertyDouble("speed", speed.toDouble()) }
     }
 
-    /** 缩放 5 档，对应原版 select_scale：原始 / 16:9 / 4:3 / 填充 / 裁剪 */
     fun applyScale(idx: Int) {
         desiredScale = idx
         if (!inited) return
@@ -889,7 +824,6 @@ class MpvPlayer(
         }
     }
 
-    /** 硬解切换：对齐 EXO 的软解 / 硬解两档 */
     fun setHardwareDecode(hard: Boolean) {
         if (!inited) return
         runCatching {
@@ -1124,7 +1058,6 @@ class MpvPlayer(
         trackRefreshHandler.postDelayed(trackRefreshRunnable, if (startup) 2000L else 120L)
     }
 
-    /** 把 mpv 的 track-list 转成 media3 标准 Tracks */
     private fun refreshTracks() {
         if (!inited) {
             currentTracks = Tracks.EMPTY
@@ -1203,7 +1136,6 @@ class MpvPlayer(
         playlistForItem = null
     }
 
-    /** 回写单条轨道：写 vid / aid / sid，已选中同一条就跳过（归一化去前导 0） */
     private fun setMpvTrack(type: Int, mpvId: String) {
         if (!inited || mpvId.isBlank()) return
         val prop = mpvTrackProperty(type) ?: return
@@ -1225,14 +1157,12 @@ class MpvPlayer(
         else -> MIME_TEXT_GENERIC
     }
 
-    /** mpv 可能返回 "1"，调用方可能传 "01"，比较前统一去前导 0（原项目 MpvInitialTrackSelectionPolicy） */
     private fun normalizeTrackId(value: String): String {
         var s = value.trim()
         while (s.length > 1 && s.startsWith("0")) s = s.substring(1)
         return s
     }
 
-    /** 立即把状态推给 media3（状态机发生跃迁时用：加载完成 / 暂停 / 播完 / seek / 变速） */
     private fun pushStateNow() {
         lastStatePushAt = android.os.SystemClock.elapsedRealtime()
         runCatching { invalidateState() }
@@ -1361,9 +1291,6 @@ class MpvPlayer(
      */
     /**
      * 轨道选择：把 media3 标准参数翻译成 mpv 的 vid / aid / sid。
-     *
-     * 这是原项目缺的那半边 —— 它只做了上报，回写走的是自造 PlayerEngine.setTrack。
-     * 走标准入口后，上层完全不需要知道"现在是哪个内核"。
      *
      * 三层语义全部落在 mpv 原生能力上：
      *   preferredAudioLanguages → alang（mpv 官方就是按语言优先级自动选轨）

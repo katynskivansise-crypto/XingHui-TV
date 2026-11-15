@@ -32,17 +32,15 @@ import androidx.media3.ui.SubtitleView
  */
 class VideoHost(
     private val frame: AspectRatioFrameLayout,
-    /** 官方 PlayerView。画面由它内部那个 SurfaceView 承载（surface_type=surface_view）。 */
-    val playerView: PlayerView,
+    val surfaceView: SurfaceView,
     val subtitleView: SubtitleView,
+    private val playerView: PlayerView?,
 ) {
     /**
      * PlayerView 内部那块 SurfaceView。
      * surface_type=surface_view 时它构造完就存在，所以这里可以直接强取；
      * 取不到说明布局里的 surface_type 被改坏了，应该立刻暴露而不是静默降级。
      */
-    val surfaceView: SurfaceView = (playerView.videoSurfaceView as? SurfaceView)
-        ?: throw IllegalStateException("PlayerView 内没有 SurfaceView，检查布局的 surface_type")
     /**
      * 与 PlayerView 的 resize_mode 完全同义（0=fit 1=fixed_width 2=fixed_height 3=fill 4=zoom）
      *
@@ -62,7 +60,6 @@ class VideoHost(
             surfaceView.requestLayout()
         }
 
-    /** 只读：页面里有些诊断要读它，但不允许任何人改 */
     val visibility: Int
         get() = frame.visibility
 
@@ -86,10 +83,8 @@ class VideoHost(
     var owner: Owner = Owner.NONE
         private set
 
-    /** native 侧交回控制权时用的回调（由 MpvPlayer 提供，它负责 detach 与 vo=null） */
     private var nativeRelease: (() -> Unit)? = null
 
-    /** native 侧拿到 Surface 后要做的事（由 MpvPlayer 提供，它负责 attach 与 vo=gpu） */
     private var nativeAttach: ((SurfaceHolder) -> Unit)? = null
 
     /**
@@ -111,7 +106,6 @@ class VideoHost(
         if (p != null) owner = Owner.EXO
     }
 
-    /** native（mpv）接管画面。EXO 必须先 clear 掉，理由同上。 */
     fun takeNative(attach: (SurfaceHolder) -> Unit, release: () -> Unit): Boolean {
         // 同上：不论 owner 是谁，只要 PlayerView 上还挂着引擎就先摘掉
         if (bound != null) setPlayer(null)
@@ -125,7 +119,6 @@ class VideoHost(
         return true
     }
 
-    /** 让当前主人松手，交回 NONE。换内核前必须调。 */
     fun releaseOwner() {
         when (owner) {
             Owner.EXO -> setPlayer(null)
@@ -161,7 +154,6 @@ class VideoHost(
         surfaceView.post { if (bound == null && p != null) setPlayer(p) }
     }
 
-    /** VideoHost 是 holder 事件的唯一转发者：谁占着就转给谁 */
     private val forwarder = object : SurfaceHolder.Callback {
         override fun surfaceCreated(h: SurfaceHolder) {
             if (owner == Owner.NATIVE) runCatching { nativeAttach?.invoke(h) }
@@ -179,7 +171,7 @@ class VideoHost(
         // PlayerView 自带一个字幕视图（exo_subtitles）。字幕统一由外层 subtitleView 管，
         // 不关掉就是两份字幕叠在一起。
         // 按类型找而不是按 R.id 找：media3 的 R 在不同打包方式下不一定可见。
-        runCatching { hideSubtitleViews(playerView) }
+        playerView?.let { runCatching { hideSubtitleViews(it) } }
     }
 
     /**
@@ -189,7 +181,6 @@ class VideoHost(
      * surface 还没创建好时先记下，等 created 再 attach —— 所以不需要我们提前判断。
      * 反方向必须先 clear，再换人：否则旧播放器还握着这块 surface。
      */
-    /** 递归把 PlayerView 内部的 SubtitleView 全部藏起来 */
     private fun hideSubtitleViews(v: View) {
         if (v is SubtitleView) {
             v.visibility = View.GONE
@@ -203,19 +194,11 @@ class VideoHost(
     fun setPlayer(p: Player?) {
         val old = bound
         if (old === p) return
-        // ★顺序照 media3 官方 PlayerView.switchTargetView 的注释：
-        //   "We attach the new view before detaching the old one because this ordering allows the
-        //    player to swap directly from one surface to another, without transitioning through a
-        //    state where no surface is attached. This is significantly more efficient and achieves
-        //    a more seamless transition when using platform provided video decoders."
-        //   我们以前是反过来的（先 clear 再 set）：中间那一刻没有任何 surface 挂着，
-        //   MediaCodecVideoRenderer 会退回 placeholderSurface（什么都不画），
-        //   在这家 amlogic 的硬解上就是"黑一下"。先挂新的、再摘旧的，就没有这个中间态。
-        // ★改走官方 PlayerView.setPlayer：
-        //   它内部就是 switchTargetView —— 先挂新的、再摘旧的，并且顺带把
-        //   SurfaceHolder.Callback、尺寸同步、首帧清 shutter 全部接好。
-        //   这些我们手搓了一遍，但漏了细节；既然主线就是这个类，就交回去。
-        runCatching { playerView.setPlayer(p) }
+        runCatching { p?.setVideoSurfaceView(surfaceView) }
+        runCatching { if (old != null && old !== p) old.setVideoSurfaceView(null) }
         bound = p
+        // 字幕：本轮不动。media3 1.11 的 SubtitleView 没有 setPlayer，只有 setCues(Cues)，
+        // 需要 Player.Listener.onCues；沙盒 jar 里查不到 Cues 类型，无法编译验证就先不接，
+        // 保持与原状一致（此前字幕挂在 PlayerView 内部且被 hideSubtitleViews 置 GONE）。
     }
 }

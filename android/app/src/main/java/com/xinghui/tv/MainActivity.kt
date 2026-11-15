@@ -54,39 +54,25 @@ class MainActivity : Activity() {
     private lateinit var videoSurface: android.view.SurfaceView
     private lateinit var subtitleView: androidx.media3.ui.SubtitleView
 
-    /** 播放层（懒加载：第一次进播放才 inflate） */
     private var playLayer: PlayLayer? = null
-    /** 当前占据这块 surface 的 ExoPlayer（预览或播放页），用于 surfaceCreated 后补挂 */
     private var surfaceConsumer: androidx.media3.common.Player? = null
 
-    /**
-     * 唯一画面层的持有者 —— 全仓只此一份。
-     * 播放层以前自己 new 了一个包同一块 PlayerView 的实例，两个实例各记一份 bound，
-     * 结果就是两家抢一块面。这里作为唯一入口。
+/**
      */
     internal val videoHost: VideoHost by lazy {
-        VideoHost(videoFrame, findViewHost(R.id.playerView), subtitleView)
+        VideoHost(videoFrame, findViewHost(R.id.videoSurface), subtitleView, null)
     }
-    /** SurfaceView 的 surface 是否已有效 */
     private var surfaceValid = false
-    /** 是否处于播放页形态（播放层在前台） */
     private var playMode = false
 
-    /** 详情层的节点都在 detailRoot 里，统一从这里找 */
     private fun <T : View> findDetail(id: Int): T = detailRoot.findViewById(id)
     private fun <T : View> findViewHost(id: Int): T = this.findViewById<View>(id) as T
-
 
     private lateinit var store: HistoryStore
     private var vod: Vod? = null
     private var currentLine: PlayLine? = null
 
-    /** 内嵌播放器（对齐原版 mBinding.video） */
-    /**
-     * ★全局唯一一颗 ExoPlayer：详情页预览与播放页共用同一个实例。
-     *   原版 VideoActivity 的 PlayerManager 就是这个语义（一个 Activity 里只有一颗播放器）。
-     *   我们以前是详情页 buildInlinePlayer() 一颗、播放页 rebuildPlayerInternal() 又一颗，
-     *   进播放页时新实例把画面抢走、旧实例还在出声 —— 这就是"小窗没画面、只有声音"的另一半。
+/**
      */
     internal var player: ExoPlayer? = null
     /**
@@ -98,34 +84,20 @@ class MainActivity : Activity() {
      */
     private var frameParams: android.view.ViewGroup.LayoutParams? = null
 
-    /** 详情页小窗的占位框（透明）。画面本体一直是 host 层那块 videoFrame。 */
     private lateinit var inlineView: android.view.View
     private var inlineFullscreen = false
-    /** 预览是否因为离开页面被我们主动暂停（回来时不自动续播） */
     private var inlinePausedByLeave = false
-    /** 本次离开是「跳去独立播放页」，回来要把预览续上；按返回退出详情页则不用 */
     private var inlineResumeOnReturn = false
-    // ★进独立播放页之前，预览当时是「小窗」还是「全屏」。
-    //   跳转前刻意不调用 exitInlineFullscreen()：那会把列表立刻恢复可见、把小窗尺寸还原，
-    //   而页面还没跳走 —— 转场那段时间用户看到的就是「详情页布局 + 小窗一个黑洞」，
-    //   也就是"按菜单后回详情页会先显示详情页"。改成记住形态，返回时再按它还原。
     private var inlineLeaveFullscreen = false
+    private var lastMenuTriggerMs = 0L
     private var inlineUrl: String = ""
-    /** 进全屏前的 playerBox 原始 LayoutParams（退出时原样还原） */
     private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
-    /** 进全屏前小窗上的焦点边框（selector_video），退出全屏时原样还原 */
     private var savedBoxForeground: Drawable? = null
-    /** 当前正在播放的集下标；-1 表示还没起播 */
     private var playingIdx = -1
-    /** 当前线路的集数数组，供"点当前那集进全屏"判断用 */
     private var episodes: List<Pair<String, String>> = emptyList()
-    /** 是否倒序（原版「倒序」按钮） */
     private var epOrder = false
-    /** 当前所在分段（0 表示 1-40 那一段） */
     private var activeSection = 0
-    /** 原版每段 40 集（1-40 / 41-80 / 81-102） */
     private val GROUP_SIZE = 40
-    /** 播放器框的 16:9 高度（退出全屏时按这个恢复） */
     private var boxH = 0
 
     private val pairs = mutableListOf<Pair<String, String>>() // (key, 显示名)
@@ -133,25 +105,10 @@ class MainActivity : Activity() {
 
     // ================= 宿主：唯一 surface + 层切换 =================
 
-    /** 把这块唯一的 surface 交给某个引擎；surface 还没创建时先记下，created 后自动补挂 */
-    /**
-     * 把详情页的小窗画面交给某个引擎 —— 走 TextureView。
-     * ★这里不再碰 videoSurface.holder.surface：那块 SurfaceView 只服务全屏播放页，
-     *   详情页期间它被不透明的 detailLayer 盖住，尺寸一次都不改。
-     *   历史教训：以前小窗也用那块 SurfaceView，靠改 LayoutParams 缩放，
-     *   surface 的 buffer 尺寸跟着变，API 25 的 MediaCodec 不重建输出 → 有声音没画面。
+/**
      */
     private fun attachPreviewTo(p: androidx.media3.common.Player) {
         surfaceConsumer = p
-        // ★必须是 setVideoSurfaceView(View)，不能是 setVideoSurface(裸 Surface)。
-        //   media3 只有在拿到一个 View 时才会挂 SurfaceHolder.Callback，并在 surfaceChanged
-        //   里自己调用 setVideoSurfaceSize —— 解码器就是靠这一次通知重建输出。
-        //   给裸 Surface 的话没有任何人监听尺寸变化，容器从小窗撑到全屏时画面就停住了。
-        // ★只走 PlayerView.setPlayer 这条官方路径。
-        //   以前是 p.setVideoSurfaceView(videoSurface) —— 那块是 1920x1080 的全屏 SurfaceView，
-        //   拿它开小窗等于让解码器把全屏 buffer 塞进 400x225：API 25 的 MediaCodec 不重建输出，
-        //   表现就是"有声音没画面"（这段话本文件上面已经写过一次，是上一轮踩过的坑）。
-        //   现在交给 PlayerView：surface 尺寸、缩放、首帧三件事都由它按 videoFrame 的尺寸维护。
         runCatching { videoHost.setPlayer(p) }
     }
 
@@ -193,7 +150,6 @@ class MainActivity : Activity() {
         videoFrame.requestLayout()
     }
 
-    /** 全屏形态 */
     private fun videoFrameToFull() {
         videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
@@ -233,11 +189,7 @@ class MainActivity : Activity() {
 
     /**
      * 播放层切集后的回写入口。
-     *
-     * 播放层自己有一套集数游标（epUrl 所在子串），宿主持有另一套（playingIdx + inlineUrl）。
-     * 这两套以前**完全没有同步**：播放页里切到第 5 集，宿主还停在进入时的第 1 集。
-     * 于是退出时的滚动/焦点恢复、详情页高亮、"这一集是不是正在播"的复用判据，全都按旧集算。
-     */
+ */
     internal fun onEpisodeChanged(newEpUrl: String, newUrl: String) {
         val idx = if (newEpUrl.isBlank()) -1 else episodes.indexOfFirst { it.second == newEpUrl }
         if (idx >= 0 && idx != playingIdx) {
@@ -255,18 +207,6 @@ class MainActivity : Activity() {
         //   不再引用后加的调试方法 —— 少一个跨文件依赖，就少一次"只覆盖了一个文件"导致的编译失败。
         MpvDebug.log("[gate] showPlayLayer ep=${extras.getStringExtra("ep_url").orEmpty().take(40)} " +
             "exoPlayer=${if (player != null) "ok" else "null"} mpv=${if (layer.mpvInstance() != null) "ok" else "-"}")
-        // ★★原版 VideoActivity.enterFullscreen() 全文只有两句：
-        //     mBinding.video.setForeground(null);
-        //     mBinding.video.setLayoutParams(MATCH_PARENT, MATCH_PARENT);
-        //   播放器与 PlayerView 的绑定在页面生命周期里只建立一次，进出全屏从不碰它。
-        //   这里原来做 detachSurfaceFrom()（= setPlayer(null)）→ reconnect()（= setPlayer 回来），
-        //   等于每进一次都把视频输出断开重接：画面停在最后一帧、音频独立继续。
-        //   这两句已删除 —— 进播放页不碰播放器、不碰 surface。
-        // ★★界面必须先切过来，再走进入协议。
-        //   以前这里是反的：enter() 在层切换之前，而 enter 里要 fetchAndPlay / 绑按钮 /
-        //   读标记，任何一步抛异常都会让整个 showPlayLayer 中断 ——
-        //   现场就是"点了集数没反应，人还停在详情页"，跟内核、跟画面都没有关系。
-        //   进入协议只该决定"播不播得起来"，不该决定"能不能进播放页"。
         playMode = true
         // ★★不再 GONE↔VISIBLE 对调。两者都常驻 VISIBLE，只切 alpha。
         //
@@ -293,20 +233,13 @@ class MainActivity : Activity() {
             "frame=${videoFrame.layoutParams?.width}x${videoFrame.layoutParams?.height} playMode=$playMode")
     }
 
-    /** 退出播放层：播放层的引擎原样交回详情预览，不 release、不重建 */
     /**
      * 把详情页的监听器挂到某个引擎上。★ 退出播放层时播放层会把引擎原样交回来，
      * 但监听器不会跟着回来 —— 不重新挂，小窗就没有 onVideoSizeChanged，画面比例和分辨率都会停在旧值。
      */
     /**
      * 详情页用到的播放器监听器。**必须复用同一个实例**。
-     *
-     * ★这是一个自己造出来的负面优化：以前这里每次都 addListener 一个新建的匿名对象，
-     *   而从不 removeListener。来回进出播放页几次之后，同一个事件（错误、vsize、首帧）
-     *   会回调 N 次 —— 表现为「播放失败连发好几次」「诊断 Toast 一次弹两三个」「日志成倍」，
-     *   还会让 handlePlayFailure 的 800ms 去抖形同虚设。
-     *   监听器不是一次性的，挂一次就够了。
-     */
+ */
     private var detailListener: androidx.media3.common.Player.Listener? = null
 
     private fun bindDetailListener(p: androidx.media3.common.Player) {
@@ -358,26 +291,10 @@ class MainActivity : Activity() {
     fun exitPlayLayer() {
         if (!playMode) return
         playMode = false
-        // ★★原版 VideoActivity.exitFullscreen() 全文只有两句：
-        //     mBinding.video.setForeground(selector_video);
-        //     mBinding.video.setLayoutParams(mFrameParams);
-        //   只把容器缩回小窗、换焦点框。**不暂停、不换 player、不摘画面、不重挂 surface。**
-        //
-        //   旧实现在这里 takePlayer → releaseSurface → attachPreviewTo：
-        //   每退出一次就把视频输出断开重接一次，MediaCodec 的输出面要重建，
-        //   最后一帧留着、音频独立继续 —— "小窗像暂停一样、只有声音"；
-        //   这条链上任何一步失败，就是"再点集数进不去"。
-        //   现在整条链删除，画面从头到尾没有人动过。
-        // 同上：退出只切 alpha，不碰 visibility（否则整屏变透明 → 黑一帧）
         showPlayLayerView(false)
         showDetailLayer(true)
         runCatching { setPreviewVisible(true) }
         videoFrameToMini()
-        // ★焦点必须落到**当前那一集的格子**上，而不是列表容器本身。
-        //   只把焦点给 RecyclerView 时，TV 上能拿到的只有容器：方向键会先"捡回焦点"，
-        //   确认键则完全没有落点 —— 现场就是「返回后选集怎么点都没反应、什么都选不了」。
-        //   列表刚由 GONE 变 VISIBLE 的同一帧内 isShown 还没刷新，requestFocus 会失败，
-        //   所以整体挪到下一帧（post），并且先滚到该集所在行再取它的子视图。
         runCatching {
             val rv = findDetail<RecyclerView>(R.id.detailList)
             val idx = playingIdx
@@ -435,16 +352,13 @@ class MainActivity : Activity() {
         playContainer = findViewHost(R.id.playLayer)
         videoFrame = findViewHost(R.id.videoFrame)
         // ★画面由官方 PlayerView 承载，它内部那个 SurfaceView 才是真正的渲染目标。
-        videoSurface = (findViewHost(R.id.playerView) as androidx.media3.ui.PlayerView)
-            .videoSurfaceView as android.view.SurfaceView
+        videoSurface = findViewHost(R.id.videoSurface)
         frameParams = videoFrame.layoutParams
         subtitleView = findViewHost(R.id.subtitleView)
 
         detailRoot = layoutInflater.inflate(R.layout.activity_detail_layer, detailLayer, false)
         detailLayer.addView(detailRoot)
 
-        // ★从历史 / 直播 / 网页推送进来时带 play_mode=true：直接落在播放层。
-        //   单 Activity 之后必须补的入口 —— 以前是 PlayActivity 自己 onCreate 就起播。
         if (intent?.getBooleanExtra("play_mode", false) == true) {
             MpvDebug.log("[boot] play_mode 直进播放层")
             detailLayer.post { runCatching { showPlayLayer(intent!!) } }
@@ -456,12 +370,6 @@ class MainActivity : Activity() {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
                 surfaceValid = true
                 MpvDebug.log("[sv2] created（全屏播放页专用） ${videoSurface.width}x${videoSurface.height}")
-                // ★只在播放页把 surface 交出去。详情页期间这块 SurfaceView 是 GONE 的，
-                //   它一旦重新出现不应该抢走详情页小窗（小窗走 TextureView）。
-                // ★这里以前给引擎补一个裸 Surface（setVideoSurface(h.surface)）。
-                //   PlayerView 已经在按自己的 SurfaceView 维护输出，再塞一个裸 Surface 进去，
-                //   等于把"尺寸同步"这件事的来源换掉 —— 解码器拿到的是没人监听尺寸的 surface。
-                //   画面层现在只有 PlayerView 一个所有者，这一行不该存在。
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
                 MpvDebug.log("[sv2] changed $w x $ht")
@@ -598,7 +506,6 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** 显示影片信息 + 线路列表 */
     /**
      * 字幕样式 —— 原版 ExoUtil.applySubtitleStyle() 的等价实现。
      *   预设：白字 + 黑描边 + 透明底
@@ -618,8 +525,6 @@ class MainActivity : Activity() {
                 else
                     androidx.media3.exoplayer.DefaultRenderersFactory(this@MainActivity)
                 setRenderersFactory(rf.setEnableDecoderFallback(true))
-                // 与播放页同源，对齐原版 ExoUtil.buildLoadControl()：new DefaultLoadControl()。
-                // 之前按 exoBufferSec 把缓冲砍到 5s/10s 是负优化，已回滚（默认 50s）。
                 setLoadControl(androidx.media3.exoplayer.DefaultLoadControl())
                 val ts = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this@MainActivity)
                 ts.setParameters(
@@ -730,7 +635,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 详情报自动起播：优先上次看到的那一集，没有记录就第 1 集 */
     private fun autoPlayFromHistory() {
         if (autoStarted) return
         autoStarted = true
@@ -743,7 +647,6 @@ class MainActivity : Activity() {
         playInline(idx, auto = true)
     }
 
-    /** 显示当前线路的集数列表 */
     private fun renderEpisodes(line: PlayLine) {
         episodeSeq++          // 切线路/重渲染即作废上一轮异步展开
         episodes = line.episodes
@@ -762,7 +665,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 异步展开磁力/种子；返回空列表（无做种等）时保留原样，点进去由播放页直接解析 */
     private fun expandThunder(url: String) {
         Log.e("XingHuiTV", "[detail] 迅雷体系，开始展开 ${url.take(70)}")
         val seq = episodeSeq
@@ -789,13 +691,10 @@ class MainActivity : Activity() {
         }.apply { isDaemon = true }.start()
     }
 
-    /** 每次渲染线路自增，用于丢弃过期的异步展开结果 */
     private var episodeSeq = 0
 
-    /** 详情页自动起播只做一次（换线路/换源由各自逻辑负责） */
     private var autoStarted = false
 
-    /** 迅雷单条：等磁力/种子展开完成后再起播 */
     private var autoPlayAfterExpand = false
 
     /**
@@ -817,10 +716,6 @@ class MainActivity : Activity() {
             len > 4 -> 8
             else -> 10
         }
-        // 集数区高度是 match_parent，横向单行会把每个格子撑满整屏高，所以这里只做网格。
-        // 列数按名称长度自适应（原版 setEpisodeAdapter 的算法），不需要用户再选「选集样式」。
-        // ★「选集样式」设置（原版 select_episode：单行 / 多行）必须真的改变布局。
-        //   以前这里恒为网格，设置页那一格选了"单行"没有任何效果 —— 典型的空壳开关。
         val singleLine = runCatching { Settings(this).episodeStyle == 0 }.getOrDefault(false)
         rv.layoutManager = if (singleLine)
             androidx.recyclerview.widget.LinearLayoutManager(this, RecyclerView.HORIZONTAL, false)
@@ -844,7 +739,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 播放器框内起播浮层（原版 view_widget_vod 的 info），3 秒后自动收起 */
     private fun showVodInfo(title: String) {
         val info = findDetail<View>(R.id.vodInfo) ?: return
         val name = findDetail<TextView>(R.id.vodInfoTitle) ?: return
@@ -853,7 +747,6 @@ class MainActivity : Activity() {
         info.postDelayed({ info.visibility = View.GONE }, 3000)
     }
 
-    /** 填充播放源 tab：原版 flag 行就是同一站点的全部播放源（超级无敌4K / 高清4K / …） */
     private fun buildFlags(lines: List<PlayLine>) {
         val box = findDetail<android.widget.LinearLayout>(R.id.flagItems) ?: return
         box.removeAllViews()
@@ -883,7 +776,6 @@ class MainActivity : Activity() {
         markActiveFlag(currentLine?.name.orEmpty())
     }
 
-    /** 选中的源标黄（原版 setFlagActivated 的观感） */
     private fun markActiveFlag(name: String) {
         val box = findDetail<android.widget.LinearLayout>(R.id.flagItems) ?: return
         for (i in 0 until box.childCount) {
@@ -892,7 +784,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 切到指定源，保持当前集号接着播 */
     private fun switchToLine(line: PlayLine) {
         if (line.name == currentLine?.name) return
         currentLine = line
@@ -978,7 +869,6 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    /** 只展示 [start, start+GROUP_SIZE) 这一段集数；倒序时在该段内反向排列 */
     private fun showGroup(start: Int) {
         pairs.clear()
         if (episodes.isEmpty()) {
@@ -1022,7 +912,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 换源：在当前影片的各条播放线路之间轮换（对齐原版 onChange → 重新取播放地址） */
     private fun switchSource() {
         val v = vod ?: return
         val lines = v.parseLines()
@@ -1039,7 +928,6 @@ class MainActivity : Activity() {
         if (playingIdx >= 0) playInline(playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
     }
 
-    /** 当前线路的第 idx 集（对齐原版 setEpisodeActivated → onRefresh） */
     private fun playInline(idx: Int, auto: Boolean = false, depth: Int = 0, quiet: Boolean = false) {
         val v = vod ?: return
         val line = currentLine ?: v.parseLines().firstOrNull() ?: return
@@ -1054,7 +942,6 @@ class MainActivity : Activity() {
         setPreviewVisible(true)
         findDetail<View>(R.id.detailImage)?.visibility = View.GONE
         showVodInfo(ep.first)
-        // 「准备播放 X」这句是自造的，原版没有；返回列表重建时还会再弹一次，更没必要
         if (!quiet) Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
         // 续播：原版 VideoActivity 打开即 setPosition(Math.max(opening, history.position))。
         // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
@@ -1090,8 +977,6 @@ class MainActivity : Activity() {
                     handlePlayFailure(idx, auto, "解析失败：$err", depth)
                     return@runOnUiThread
                 }
-                // ExoPlayer 缺扩展模块时会抛 IllegalStateException（No suitable media source factory），
-                // 以前没兜住，换到 m3u8 源就直接闪退回主页。这里失败就转独立播放页走完整链路。
                 inlineUrl = url
                 val ok = runCatching {
                     // ★mediaId 必须显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」，
@@ -1112,7 +997,6 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** 从 playerContent 的 JSON 里取第一个可播地址（url 可能是字符串/扁平数组/对象） */
     private fun extractPlayUrl(play: String): String {
         if (play.isBlank()) return ""
         runCatching {
@@ -1143,7 +1027,6 @@ class MainActivity : Activity() {
         return ""
     }
 
-    /** 转独立播放页（完整链路兜底） */
     private fun openPlayPage(idx: Int) {
         val v = vod ?: return
         val line = currentLine ?: return
@@ -1170,18 +1053,6 @@ class MainActivity : Activity() {
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
         })
-        // ★这里**故意不做** overridePendingTransition(0, 0)。
-        //
-        // 上一版做过，而且放错了位置（放在 startActivity 之前，按官方定义属于空操作）。
-        // 现在连「放对位置」也不做了，原因有三：
-        //   1) 转场动画要保留 —— 它不是黑屏的原因，它是**掩盖**黑屏的那层东西。
-        //      播放页窗口出现时 SurfaceView 的 surface 还没有内容（黑），有淡入就是「淡入一段黑」，
-        //      没有动画就是「整屏瞬间黑住」。原版一直是系统默认转场，从没关过。
-        //   2) 腾讯云开发者社区实证：overridePendingTransition(0, 0) 本身就会导致跳转短暂黑屏，
-        //      正确做法是换回真实 anim，或者干脆用系统默认。
-        //   3) 关掉动画还会让新窗口的输入焦点提前到来，这时按键语义还没挂好，
-        //      更容易出现「进去按 ← 没反应」—— 保留动画反而给了首帧和焦点一个缓冲。
-        // 结论：系统默认转场 + DetailActivity 不做任何 overridePendingTransition。
     }
 
     /**
@@ -1216,7 +1087,6 @@ class MainActivity : Activity() {
         box.requestFocus()
     }
 
-    /** 退出全屏：恢复小窗与其它区域（原版退出全屏走返回键，这里同样） */
     private fun exitInlineFullscreen() {
         if (!inlineFullscreen) return
         inlineFullscreen = false
@@ -1259,31 +1129,16 @@ class MainActivity : Activity() {
             val handled = runCatching { playLayer?.onHostKeyEvent(event) ?: false }.getOrDefault(false)
             if (handled) return true
         }
-        // ★★详情页返回键：这里以前**没有任何 BACK 分支**。
-        //   后果：详情页全屏预览看片时按返回，事件直接落到默认处理 = finish 整个页面，
-        //   用户看到的是"全屏看片按一下返回，直接回主页了"，而不是像原版那样先回小窗。
-        //   原版 VideoActivity 的返回键第一层就是 exitFullscreen()，这一层从不退出页面。
-        //   select_small_window_back_key 两档：0=返回（退出全屏）、1=焦点移动（不退出）。
-        if (!playMode && event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) {
-                if (inlineFullscreen) {
-                    val backMode = runCatching { Settings(this).smallWindowBackKey }.getOrDefault(0)
-                    if (backMode == 0) {
-                        exitInlineFullscreen()
-                    } else {
-                        // 「焦点移动」：不退出全屏，把焦点交给集数列表（原版同语义）
-                        findDetail<android.view.View>(R.id.detailList)?.requestFocus()
-                    }
-                } else {
-                    return super.dispatchKeyEvent(event)
-                }
-            }
-            return true
-        }
         val menu = event.keyCode == KeyEvent.KEYCODE_MENU
         if (inlineFullscreen && menu) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                openPlayPageFromCurrent()
+            val fire = event.action == KeyEvent.ACTION_UP ||
+                (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
+            if (fire) {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastMenuTriggerMs > 600) {
+                    lastMenuTriggerMs = now
+                    openPlayPageFromCurrent()
+                }
             }
             return true
         }
@@ -1300,7 +1155,6 @@ class MainActivity : Activity() {
         return super.onKeyUp(keyCode, event)
     }
 
-    /** 把当前正在播的这一集原样交给独立播放页 */
     private fun openPlayPageFromCurrent() {
         val v = vod ?: return
         val line = currentLine ?: return
@@ -1329,7 +1183,6 @@ class MainActivity : Activity() {
         // 同上：不做 overridePendingTransition(0, 0)，理由见 openPlayPage 里的说明。
     }
 
-    /** 点集数 / 点小窗：直接进全屏播放层，播第 idx 集（原版点集数即进全屏） */
     private fun openPlayPageAt(idx: Int) {
         val v = vod ?: return
         val line = currentLine ?: return
@@ -1354,20 +1207,30 @@ class MainActivity : Activity() {
             // ★同集：把已经在播的地址交过去，播放层直接接管这一路（不重载）。
             //   不同集（小窗在播别的集）：留空，播放层照常解析新的一集。
             putExtra("pre_url", reusableUrl)
+            // ★这是原版 VideoActivity.onItemClick 的语义：
+            //     if (shouldEnterFullscreen(item)) return;   ← item.isSelected() 时**只放大容器**
+            //     selectEpisode(item, true);                  ← 否则才换集
+            //   原版从来不去比对"当前播的是不是这个地址"，它相信的是**宿主的意图**：
+            //   这一集是不是我正在播的那一集。我们把这条意图显式传下去，
+            //   播放层就不再靠 url 字符串比较来猜（那是脆弱的一环：代理化/重定向/头部差异都会让它失配）。
+            if (wasPlayingThis) putExtra("attach_only", true)
         })
     }
 
     override fun onBackPressed() {
         if (playMode) { exitPlayLayer(); return }
-        // 全屏时返回键先退全屏，不直接退出页面（对齐原版 mKeyDown 的返回语义）
+        // 全屏时返回键先退全屏，不直接退出页面（对齐原版 mKeyDown 的返回语义）。
+        // 这里接 select_small_window_back_key 两档（原版）：
+        //   0 = 返回（退出全屏）  1 = 焦点移动（不退出全屏，焦点交给集数列表）
         if (inlineFullscreen) {
-            exitInlineFullscreen()
+            val backMode = runCatching { Settings(this).smallWindowBackKey }.getOrDefault(0)
+            if (backMode == 0) exitInlineFullscreen()
+            else findDetail<android.view.View>(R.id.detailList)?.requestFocus()
             return
         }
         super.onBackPressed()
     }
 
-    /** 把内嵌播放器当前进度写回历史（原版 updateHistory 里 setPosition 那条） */
     private fun saveInlinePosition() {
         val v = vod ?: return
         val ep = episodes.getOrNull(playingIdx) ?: return
@@ -1389,11 +1252,7 @@ class MainActivity : Activity() {
      * mpv 内核不申请音频焦点，EXO 内核离开焦点也不一定立刻停，
      * 所以不能指望系统帮忙，必须自己停。
      */
-    /**
-     * 进播放页前直接释放内嵌预览。
-     * 只 pause 不 release 时，详情页这一路 ExoPlayer（含解码器、缓冲）会和播放页那一路同时活着，
-     * 2GB 的盒子上等于两套解码器常驻；这也是「两个声音」的结构性来源之一。
-     * 返回时用 buildInlinePlayer() + inlineUrl 就地重建，不再重新解析接口。
+/**
      */
     /**
      * 进播放页前的收尾：暂停预览、把画面层摘掉，但**保留** ExoPlayer 实例。
@@ -1408,12 +1267,7 @@ class MainActivity : Activity() {
      * 若播放页期间进程被回收导致实例没了，onResume 里的 `player ?: buildInlinePlayer()`
      * 会自动退回原来的重建路径。
      */
-    /**
-     * 进播放页前的"交接"。
-     * ★原版没有这个动作：小窗与全屏是同一个 PlayerView、同一个播放器，进全屏只改 LayoutParams。
-     *   这里以前 pause + detachSurfaceFrom()（= setPlayer(null)），
-     *   正是"画面冻住、只剩声音"的直接来源：视频输出被摘掉，音频轨独立继续。
-     *   现在什么都不做。
+/**
      */
     private fun detachInlinePlayback() {
         Log.i("XingHuiTV", "[detail] 进播放页：播放器与画面都不动，只切容器")
@@ -1429,8 +1283,6 @@ class MainActivity : Activity() {
     }
 
     private fun pauseInlinePlayback() {
-        // ★两颗内核都要停：小窗播的是哪颗由设置决定，不能只认 EXO。
-        //   以前这里只 pause 了 player（EXO），内核选 mpv 时这一行等于空操作。
         runCatching {
             val m = playLayer?.mpvInstance() ?: return@runCatching
             runCatching { m.setBackground(true) }
@@ -1448,12 +1300,6 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        // ★★ 无条件交给播放层，不能再有 `if (playMode)` 这道门。
-        //   原因：mpv 内核在**详情页小窗**状态下也是活着的（内核选 mpv 时，小窗播的就是它），
-        //   而 playMode 在"从播放页退回详情页"那一刻就已经是 false。
-        //   于是离开详情页时这里整个被跳过 → 只有 pauseInlinePlayback() 停了 EXO，
-        //   mpv 那一路继续出声 —— 现场就是「退回详情页/回主页，声音还在播」。
-        //   onHostPause() 内部是幂等的，两颗内核都会 pause，并 setBackground(true)。
         runCatching { playLayer?.onHostPause() }
 
         // 退到后台、按返回、切播放页，都先落一次进度；否则只有正常看完才记得住
@@ -1500,11 +1346,6 @@ class MainActivity : Activity() {
                 // 跳转前 was GONE（见 openPlayPage 的说明），回来先恢复可见，
                 // 否则重建预览时画面在窗外、小窗是黑的
                 runCatching { setPreviewVisible(true) }
-                // ★从播放页回来先把「全屏预览」复位。
-                //   进播放页的两条路（小窗全屏 enterInlineFullscreen、转独立播放页 openPlayPage）
-                //   都会把 inlineFullscreen 置为 true 并**一直保留**，而它只在详情页自己的返回键里
-                //   才会复位。于是从播放页按返回时，看到的是「铺满整页的预览」，还得再按一次返回
-                //   才回到详情页 —— 这就是"要按两次"的结构性来源（原版没有内嵌预览，没有这个状态）。
                 if (inlineFullscreen) runCatching { exitInlineFullscreen() }
             }
             // ★画面层要在这里就挂回去：下面「换过集」那条分支会直接 playInline() 后 return，
@@ -1569,11 +1410,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        // ★★ 无条件销毁，同样不能有 `if (playMode)`。
-        //   以前详情页状态（playMode=false）退出时根本不会调 onHostDestroy →
-        //   mpv 实例、它的 surface、以及 saveExecutor 全部泄漏，
-        //   而且 mpv 那条音频轨会跟着进程一直响下去（越进几次越明显，因为每个泄漏实例都在放）。
-        //   onHostDestroy 内部只摘自己的定时任务、落盘、release 内核，对已退场的播放层是幂等安全的。
         runCatching { playLayer?.onHostDestroy() }
 
         saveInlinePosition()
@@ -1582,7 +1418,6 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    /** 简介全文弹窗（支持点击链接），对应原项目 DescDialog */
     private fun showDescDialog() {
         val v = vod ?: return
         val dlg = Dialog(this)
@@ -1606,7 +1441,6 @@ class MainActivity : Activity() {
         Toast.makeText(this, if (fav) "已收藏" else "已取消收藏", Toast.LENGTH_SHORT).show()
     }
 
-    /** 收藏态：文字固定「收藏」，靠图标切换（原版 keep 就是 off/on 两个矢量，实心星表示已收藏） */
     private fun applyFavState(fav: Boolean) {
         val btn = findDetail<TextView>(R.id.btnFav) ?: return
         btn.text = "收藏"
