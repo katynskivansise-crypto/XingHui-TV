@@ -167,6 +167,32 @@ class MainActivity : Activity() {
      * 与原版一致 —— VideoActivity 就是把 mBinding.video 的 LayoutParams 在
      * 400x225 与 MATCH_PARENT 之间来回换，画面本身一直没动过。
      */
+    /**
+     * 宿主持有的线路与集列表（只读口，给播放层用）。
+     *
+     * ★原版依据：5.6.0 `VideoActivity` 的集列表一直挂在 Flag 对象上，
+     *   `setEpisodeAdapter(getFlag().getEpisodes())`（`:1266` / `:1275` / `:1303` / `:1347`）
+     *   四处都是直接取，**从不重新请求详情**。详情与播放是同一个 Activity 的两个形态，
+     *   所以集列表天然一直在手。
+     *
+     *   我们是「详情层 → 播放层」同一 Activity 内切层，宿主里已经有这份列表（还可能是 expandThunder
+     *   展开过的那一份），播放层没有理由再去解析一遍 vod 详情。
+     *   之前播放层的 vodLines 只在自己 fetchAndPlay 里赋值，而复用进入（attach_only / pre_url 命中）
+     *   根本不走那条路径 —— 结果进页面时 vodLines 永远是空，上下集直接 return、选集报"未获取线路"。
+     */
+    internal fun hostLines(): List<PlayLine> {
+        val v = vod ?: return emptyList()
+        val lines = runCatching { v.parseLines() }.getOrDefault(emptyList()).toMutableList()
+        if (lines.isEmpty()) return emptyList()
+        val cur = currentLine ?: return lines
+        val idx = lines.indexOfFirst { it.name == cur.name }
+        // 集数以详情页正在展示的那一份为准（磁力/种子被展开后，line.episodes 还是原始未展开的那份）
+        if (idx >= 0 && episodes.isNotEmpty()) lines[idx] = PlayLine(lines[idx].name, episodes)
+        return lines
+    }
+
+    internal fun hostFlagName(): String = currentLine?.name.orEmpty()
+
     private fun videoFrameToMini() {
         // ★原版 VideoActivity.exitFullscreen() 就这一句：
         //     mBinding.video.setLayoutParams(mFrameParams);
@@ -1182,16 +1208,10 @@ class MainActivity : Activity() {
             if (handled) return true
         }
         val menu = event.keyCode == KeyEvent.KEYCODE_MENU
-        if (inlineFullscreen && menu) {
-            val fire = event.action == KeyEvent.ACTION_UP ||
-                (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
-            if (fire) {
-                val now = android.os.SystemClock.uptimeMillis()
-                if (now - lastMenuTriggerMs > 600) {
-                    lastMenuTriggerMs = now
-                    openPlayPageFromCurrent()
-                }
-            }
+        // 对齐 KeyUtil.isMenuKey（:43）：只认 ACTION_UP，到了就执行，不做时间去重。
+        // 原来这里是「UP 或 DOWN 首发 + 600ms 去重」，属于自创，已去掉。
+        if (inlineFullscreen && menu && event.action == KeyEvent.ACTION_UP) {
+            openPlayPageFromCurrent()
             return true
         }
         return super.dispatchKeyEvent(event)

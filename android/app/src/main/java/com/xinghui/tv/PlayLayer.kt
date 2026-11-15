@@ -1983,6 +1983,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         return false
     }
 
+    /** 居中提示是否可见 —— 对应原版 onBackInvoked 里的 `isVisible(mBinding.widget.center)`。 */
+    private fun centerShown(): Boolean = runCatching {
+        findViewById<View>(R.id.playCenter)?.let { it.alpha > 0.01f } ?: false
+    }.getOrDefault(false)
+
     private fun barShown(): Boolean {
         val b = controlBar ?: return false
         // 常驻 VISIBLE 之后，"显示中"只能按 alpha 判（同一个函数在 showControl/hideControl/按键
@@ -2860,9 +2865,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     // ===== 左右键快进/快退（原版 CustomKeyDownVod：按住累加，松开 250ms 后一次跳） =====
     private val SEEK_STEP_MS = 10_000L
-    private val SEEK_REPEAT_GAP_MS = 300L
-    private var lastSeekRepeatAt = 0L
-    private var seekTicks = 0
     private var seekBaseMs = 0L          // 按下方向键那一刻的位置
     private var seekAccumMs = 0L         // 按住期间累计的偏移
     private var seekingByKey = false
@@ -3014,30 +3016,17 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun handleSeekKey(dir: Long, event: KeyEvent) {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
-                val nowMs = android.os.SystemClock.uptimeMillis()
                 if (!seekingByKey) {
                     seekingByKey = true
                     seekBaseMs = currentPosMs()
                     seekAccumMs = 0L
-                    lastSeekRepeatAt = 0L
-                    seekTicks = 0
                 }
-                // T1 的 key repeat 实测 40~60ms 一个。原样按「每来一个 DOWN 加 10s」累加，
-                // 真机上一次 2 秒的按住会累到 27 次 → 一下跳掉 4 分半（现场 base=49021 accum=270000）。
-                // 这里两件事：① repeat 事件按 300ms 节流（SEEK_REPEAT_GAP_MS 原来只声明没接线）；
-                //            ② 台阶越按越大（前 3 阶 10s，之后 20s），长按仍然能快速走远，但不再失控。
-                val stepped = event.repeatCount == 0 ||
-                    nowMs - lastSeekRepeatAt >= SEEK_REPEAT_GAP_MS
-                var step = 0L
-                if (stepped) {
-                    lastSeekRepeatAt = nowMs
-                    seekTicks++
-                    step = if (seekTicks <= 3) SEEK_STEP_MS else SEEK_STEP_MS * 2
-                    seekAccumMs += dir * step
-                }
+                // 对齐原版 CustomKeyDownVod.java:83 / :87 —— 每来一个 ACTION_DOWN 就 ±INTERVAL_SEEK（10s），
+                // 不节流、不台阶递增。原来这里是「repeat 300ms 节流 + 前 3 阶之后翻倍」，
+                // 属于为了压住 T1 高频 repeat 加的补偿，已按原版要求去掉。
+                seekAccumMs += dir * SEEK_STEP_MS
                 MpvDebug.log(
-                    "[key] 快进起手 dir=$dir step=$step accum=${seekAccumMs}ms ticks=$seekTicks" +
-                        " repeat=${event.repeatCount} 计入=$stepped dur=${durNow()}ms bar=${barShown()}"
+                    "[key] 快进 dir=$dir accum=${seekAccumMs}ms repeat=${event.repeatCount} dur=${durNow()}ms bar=${barShown()}"
                 )
                 // 夹在 [0, dur] 里：原版会开到越界再靠 seekTo 夹，我们提前夹，提示上的时间才不会出现负数。
                 // ★未起播（dur=0）时不能夹：那时 seekBaseMs 恒为 0，夹下界会把 -10000 直接变成 0，
@@ -3283,14 +3272,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }
 
         when (event.keyCode) {
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY,
-            KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> {
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    MpvDebug.log("[key] 媒体键 kc=${event.keyCode} → 暂停/继续")
-                    togglePlayPause()
-                }
-                return true
-            }
             // ★只接 MEDIA_FAST_FORWARD / MEDIA_REWIND，且**只在抬起时**触发一次 ——
             //   原版 KeyUtil.isMediaFastForward(:59) / isMediaRewind(:55) 都带 isActionUp。
             //   之前把 MEDIA_NEXT / MEDIA_PREVIOUS 也绑成快进快退，等于把原版的
@@ -3308,52 +3289,21 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         val shown = barShown()
         val loading = preStart()
 
-        // 返回键：对齐原版 onBackPressed:1834 的优先级 —— 控制条 → 居中提示 → 退出页面。
-        // 之前 BACK 只在"控制条隐藏"的分支里处理，控制条正显示着按返回会直接把播放页关掉。
-        // ★BACK 的 DOWN/UP 都接（部分遥控器只发 DOWN，只认 UP 时第一下等于被吞）。
-        //   500ms 内只处理一次，正常成对的事件不会双触发，这就是"按两次才退出"的来源。
-        if (event.keyCode == KeyEvent.KEYCODE_BACK &&
-            (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
-        ) {
-            val nowMs = System.currentTimeMillis()
-            if (nowMs - lastBackMs < 500) return true
-            lastBackMs = nowMs
-            // 一次返回直接回详情页 —— 不再"先收控制条"。
-            // 原因：收条那一刻画面必然要重新合成一次，这家 ROM 上会露出根布局黑底（黑一下），
-            // 而且第一次按返回看起来"什么都没发生"，还得再按一次才退出。
-            // 控制条的显隐留给菜单键（isMenuKeyCode 分支里就是"可见就收、不可见就出"），
-            // 返回键只做一件事：退出播放页。
-            // ★不再收条：既然这一下就要 finish，先收条只是多一次窗口合成
-            //（这家 ROM 上正是那一次合成会露出黑底）。与 5.6 的差别：5.6 分三层，
-            // 我们按你的要求合成一跳。
-            // 第三层：真的退出。不走 super —— 各 ROM 对 KEYCODE_BACK 的默认处理不一致，
-            // 有的会先给 Activity 一次 onKeyDown/onKeyUp 往返（部分机型伴随窗口重建、画面回到首帧），
-            // 有的直接 finish。这里先落盘进度再自己 finish，行为确定。
-            // ★退场时强制落盘 + 先补建历史行：详情页小窗就是靠这一条位置续播的
+        // 返回键：对齐原版 onBackInvoked（5.6.0 :6336）的分层顺序
+        //   ① lutQuick.hideIfVisible()  → 我们没有 LUT 快捷面板，跳过
+        //   ② 控制条可见              → hideControl()
+        //   ③ 居中提示可见            → hideCenter()
+        //   ④ 全屏                    → exitFullscreen()（我们播放层本身即全屏 → 退出播放层）
+        //   ⑤ 其余                    → finishVideoPlayback（saveHistory(true) + stopPlayback）
+        // ★只认 ACTION_UP，对齐 dispatchKeyEvent:5966 的 `isActionUp && isBackKey`。
+        //   原来这里是 DOWN/UP 双接 + 500ms 去重，属于自创，已去掉。
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+            if (barShown()) { hideControl(); return true }
+            if (centerShown()) { hidePlayCenter(); return true }
             leaving = true
             runCatching { savePosition(force = true, reason = "退场") }
-            // 现场对照：不呼出控制条直接返回 → 干净；呼出过控制条再返回 → 黑一下。
-            // 差别只有一处：条显示时焦点落在条上的按钮里，条隐藏时焦点在根布局。
-            // 退场时若还握着"条内焦点"，窗口要再做一次焦点遍历/重绘，这一帧就会露黑。
-            // 所以退场前先把焦点收回根布局、把控制条收掉，动作全在同一个输入帧里完成，
-            // 不产生第二帧合成。
-            val cf = host.currentFocus
-            val cfId = cf?.id
-            runCatching { cf?.clearFocus() }
-            runCatching {
-                val ok = rootView?.requestFocus()
-                MpvDebug.log("[key] back 退场前收回焦点 from=$cfId to=root ok=$ok")
-            }
-            runCatching {
-                controlBar?.visibility = View.GONE
-                controlBar?.alpha = 0f
-                (controlBar as? android.view.ViewGroup)?.descendantFocusability =
-                    android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            }
             MpvDebug.log("[key] back 退出播放页 pos=" + currentPosMs() + " shown=" + shown)
             onExit()
-            // 关掉 Activity 转场动画：老 ROM 上退场动画那 200~300ms 里窗口先被清成背景色，
-            // 看起来就是"黑一下再回详情页"。0,0 直接切过去，详情页立刻接管。
             runCatching { host.overridePendingTransition(0, 0) }
             return true
         }
@@ -3367,17 +3317,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 val cur = host.currentFocus
                 val inBar = cur != null && cur.id != 0 && isInsideBar(cur)
                 if (inBar) {
-                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                        val next = runCatching {
-                            cur!!.focusSearch(if (isLeftKey(event)) View.FOCUS_LEFT else View.FOCUS_RIGHT)
-                        }.getOrNull()
-                        if (next != null && next !== cur) runCatching { next.requestFocus() }
-                        MpvDebug.log(
-                            "[key] 条内焦点移动 ${if (isLeftKey(event)) "←" else "→"} 从=${cur!!.id}" +
-                                " 到=${next?.id} now=${host.currentFocus?.id}"
-                        )
-                    }
-                    return true
+                    // 5.6.0 控制条内的 ←→ 没有任何代码，全靠原生焦点系统在按钮间移动。
+                    // 原来这里手动 focusSearch 属于自创，已去掉，交回原生。
+                    return false
                 }
                 MpvDebug.log("[key] 条显示但焦点不在条内 → 快进/快退 kc=${event.keyCode} focus=${cur?.id}")
                 handleSeekKey(if (isLeftKey(event)) -1L else 1L, event)
@@ -3418,12 +3360,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                         " text=" + ((v as? TextView)?.text?.toString() ?: "") +
                         " clickable=${v?.isClickable} hasClick=$hasClick"
                 )
-                // 焦点落在没有点击响应的标签/容器上时，原版什么也不会发生，用户看到的就是
-                // "按 OK 没反应"。这种空档直接当成暂停/继续，控件本身有点击的仍交给它自己处理。
-                if (!hasClick) {
-                    togglePlayPause()
-                    return true
-                }
+                // 5.6.0 没有这个 fallback：OK 在控制条上一律交给控件自己处理，
+                // 落在没有 click 的标签上就是什么都不发生。原来这里兜底 togglePlayPause 属于自创，已去掉。
+                // hasClick 只留给上面那行日志用。
             }
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 MpvDebug.log(
@@ -3519,14 +3458,37 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun switchEpisode(delta: Int) {
         // 直播直链没有「集」的概念，直接忽略（原版同样不提示）
         if (directUrl.isNotBlank()) return
+        ensureLines()
         val line = if (vodLines.isNotEmpty()) vodLines.firstOrNull { it.name == flag } ?: vodLines.first() else return
         val eps = line.episodes
         if (eps.isEmpty()) return
         val cur = eps.indexOfFirst { it.second == epUrl }
+        // ★找不到当前集就不动。原来这里 cur=-1 会被算成 next=0，按「下一集」直接跳到第 1 集，
+        //   表现就是"按了上下集乱跳/像没反应"。原版 checkPrev/checkNext 也是拿当前 Episode 对象
+        //   在本线路里取索引，取不到就只做按钮置灰，不跳。
+        if (cur < 0) {
+            MpvDebug.log("[ep] 当前集不在本线路（flag=$flag），不跳转")
+            return
+        }
         val next = if (delta > 0) (cur + 1).coerceAtMost(eps.lastIndex) else (cur - 1).coerceAtLeast(0)
         // 到头了就停在原地（原版 checkPrev/checkNext 只做按钮置灰，不弹提示）
         if (next == cur) return
         Thread { resolvePlay(line.name, eps[next].second) }.start()
+    }
+
+    /**
+     * 线路/集列表补齐：先看本层有没有，没有就从宿主要。
+     *
+     * 原版集列表一直在 Flag 对象上（`getFlag().getEpisodes()`），从不二次请求；
+     * 我们复用进入时不走 fetchAndPlay，所以必须在这里补，否则上下集/选集全废。
+     */
+    private fun ensureLines() {
+        if (vodLines.isNotEmpty()) return
+        val fromHost = runCatching { host.hostLines() }.getOrDefault(emptyList())
+        if (fromHost.isEmpty()) return
+        vodLines = fromHost
+        if (flag.isBlank()) flag = host.hostFlagName().ifBlank { fromHost.firstOrNull()?.name.orEmpty() }
+        MpvDebug.log("[lines] 从宿主补线路 ${fromHost.size} 条 flag=$flag")
     }
 
     private fun applySpeed() {
@@ -3552,6 +3514,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun openEpisodes() {
+        ensureLines()
         if (vodLines.isEmpty()) {
             showPlayError("暂未获取到线路信息（请稍候再点选集）")
             return
@@ -3778,12 +3741,35 @@ private class VodKeyMap(private val listener: Listener) {
     private var hold = 0L
     private var changeSpeed = false
 
-    fun hasEvent(e: KeyEvent): Boolean = when (e.keyCode) {
-        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
-        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
-        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> true
-        else -> false
-    }
+    /**
+     * ★同义键必须逐字对齐 KeyUtil（5.6.0 `utils/KeyUtil.java`）：
+     *     isEnterKey :16  = DPAD_CENTER | ENTER | SPACE | NUMPAD_ENTER
+     *     isUpKey    :20  = DPAD_UP | CHANNEL_UP | PAGE_UP | MEDIA_PREVIOUS
+     *     isDownKey  :24  = DPAD_DOWN | CHANNEL_DOWN | PAGE_DOWN | MEDIA_NEXT
+     *     isLeftKey  :27  = DPAD_LEFT
+     *     isRightKey :31  = DPAD_RIGHT
+     *   原版 CustomKeyDownVod 用的就是这几组判定，所以遥控器上的「上一页/下一页/上一曲/下一曲」
+     *   在控制条隐藏（最常用形态）时和方向键等价。
+     *   这里原来写的是裸 DPAD_*，那些同义键在条隐藏时一个都进不来 —— 表现为「按了没反应」，
+     *   而条一呼出来（走的是另一条分支）又都灵，正是最难查的那种症状。
+     */
+    private fun isEnter(kc: Int): Boolean = kc == KeyEvent.KEYCODE_DPAD_CENTER ||
+        kc == KeyEvent.KEYCODE_ENTER || kc == KeyEvent.KEYCODE_SPACE || kc == KeyEvent.KEYCODE_NUMPAD_ENTER
+
+    private fun isUp(kc: Int): Boolean = kc == KeyEvent.KEYCODE_DPAD_UP ||
+        kc == KeyEvent.KEYCODE_CHANNEL_UP || kc == KeyEvent.KEYCODE_PAGE_UP ||
+        kc == KeyEvent.KEYCODE_MEDIA_PREVIOUS
+
+    private fun isDown(kc: Int): Boolean = kc == KeyEvent.KEYCODE_DPAD_DOWN ||
+        kc == KeyEvent.KEYCODE_CHANNEL_DOWN || kc == KeyEvent.KEYCODE_PAGE_DOWN ||
+        kc == KeyEvent.KEYCODE_MEDIA_NEXT
+
+    private fun isLeft(kc: Int): Boolean = kc == KeyEvent.KEYCODE_DPAD_LEFT
+
+    private fun isRight(kc: Int): Boolean = kc == KeyEvent.KEYCODE_DPAD_RIGHT
+
+    fun hasEvent(e: KeyEvent): Boolean =
+        isLeft(e.keyCode) || isRight(e.keyCode) || isUp(e.keyCode) || isDown(e.keyCode) || isEnter(e.keyCode)
 
     fun reset() { hold = 0L }
 
@@ -3791,19 +3777,18 @@ private class VodKeyMap(private val listener: Listener) {
         val down = e.action == KeyEvent.ACTION_DOWN
         val up = e.action == KeyEvent.ACTION_UP
         when {
-            down && e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT -> { hold -= STEP; listener.onSeeking(hold) }
-            down && e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT -> { hold += STEP; listener.onSeeking(hold) }
-            up && (e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) -> {
+            down && isLeft(e.keyCode) -> { hold -= STEP; listener.onSeeking(hold) }
+            down && isRight(e.keyCode) -> { hold += STEP; listener.onSeeking(hold) }
+            up && (isLeft(e.keyCode) || isRight(e.keyCode)) -> {
                 ui.removeCallbacks(commit); ui.postDelayed(commit, 250L)
             }
-            up && e.keyCode == KeyEvent.KEYCODE_DPAD_UP -> {
+            up && isUp(e.keyCode) -> {
                 if (changeSpeed) listener.onSpeedEnd() else listener.onKeyUp()
                 changeSpeed = false
             }
-            up && e.keyCode == KeyEvent.KEYCODE_DPAD_DOWN -> listener.onKeyDown()
-            up && (e.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || e.keyCode == KeyEvent.KEYCODE_ENTER ||
-                e.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) -> listener.onKeyCenter()
-            e.isLongPress && e.keyCode == KeyEvent.KEYCODE_DPAD_UP && !changeSpeed -> {
+            up && isDown(e.keyCode) -> listener.onKeyDown()
+            up && isEnter(e.keyCode) -> listener.onKeyCenter()
+            e.isLongPress && isUp(e.keyCode) && !changeSpeed -> {
                 listener.onSpeedUp(); changeSpeed = true
             }
         }
