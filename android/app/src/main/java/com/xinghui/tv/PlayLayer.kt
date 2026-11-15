@@ -231,7 +231,12 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   只看它永远判不出"已经在播"，于是每次都老老实实重新解析一遍 ——
         //   这就是"原版进详情页就开始加载、点进播放界面却要再转一次圈"的差别。
         val preUrl = a.getStringExtra("pre_url").orEmpty()
-        val runningUrl = runCatching { player?.currentMediaItem?.mediaId.orEmpty() }.getOrDefault("")
+        // ★取 localConfiguration.uri 作主判据：mediaId 只有在小窗起播时显式设过才有值，
+        //   而 uri 是 setMediaItem 就存在的。两者取先到的非空值，避免任何一侧漏设导致永远判不中。
+        val runningUrl = runCatching {
+            val item = player?.currentMediaItem ?: return@runCatching ""
+            item.localConfiguration?.uri?.toString().orEmpty().ifBlank { item.mediaId }
+        }.getOrDefault("")
         // ★内核为 mpv 时不能复用：详情页小窗那一路上宿主 EXO 起的，播放页要交 mpv，
         //   直接把 EXO 的媒体项当成"已在播"接过去就是黑屏。这种跨内核只能老实加载一次。
         //   （要让 mpv 用户也做到"零加载"，得让详情页小窗直接跑 mpv —— 那是下一步，不在本包。）
@@ -376,12 +381,19 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         root = host.layoutInflater.inflate(R.layout.activity_play_layer, parent, false)
         parent.addView(root)
         MpvDebug.log("[perf] bind(inflate)=${SystemClock.uptimeMillis() - tCreate}ms")
-        // 屏显（原版 `play_display` 那一条）：关掉后播放页不显示常驻信息层
-        // （clock / netspeed / duration / 底部 1dp 进度条）。默认开启。
+        // 屏显（原版 `play_display`）：**逐元素**按掩码显隐，不是一整个开关。
+        //    bit0 片名 / bit1 时钟 / bit2 网速 / bit3 总时长 / bit4 底部 1dp 进度条
         runCatching {
-            val on = Settings(host).display == 1
-            root?.findViewById<android.view.View>(R.id.displayOverlay)?.visibility =
-                if (on) android.view.View.VISIBLE else android.view.View.GONE
+            val mask = Settings(host).displayMask
+            fun vis(v: android.view.View?, bit: Int) {
+                v?.visibility = if ((mask and (1 shl bit)) != 0) android.view.View.VISIBLE
+                else android.view.View.GONE
+            }
+            vis(root?.findViewById(R.id.playTitle), 0)
+            vis(root?.findViewById(R.id.clock), 1)
+            vis(root?.findViewById(R.id.netspeed), 2)
+            vis(root?.findViewById(R.id.playDuration), 3)
+            vis(root?.findViewById(R.id.bottomProgress), 4)
         }
         // 根容器当画面容器用（原版 @id/video 的等价物）：可聚焦，收控制条时焦点回这里
         rootView = root

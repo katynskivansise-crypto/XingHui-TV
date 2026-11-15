@@ -1041,7 +1041,9 @@ class MainActivity : Activity() {
                 // 以前没兜住，换到 m3u8 源就直接闪退回主页。这里失败就转独立播放页走完整链路。
                 inlineUrl = url
                 val ok = runCatching {
-                    player?.setMediaItem(MediaItem.Builder().setUri(url).build())
+                    // ★mediaId 必须显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」，
+                    //   不设的话 mediaId 恒为空串，进入播放页的复用判据永远不成立 → 每次都重新加载。
+                    player?.setMediaItem(MediaItem.Builder().setUri(url).setMediaId(url).build())
                     player?.prepare()
                     if (resumeMs > 1000) player?.seekTo(resumeMs)
                     player?.play()

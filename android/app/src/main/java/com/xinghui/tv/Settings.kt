@@ -123,10 +123,14 @@ class Settings(context: Context) {
         get() = prefs.getInt("search_ui", 0)
         set(value) = prefs.edit().putInt("search_ui", value).apply()
 
-    /** 屏显：0=关，1=开（播放页常驻信息层；原版 play_display） */
-    var display: Int
-        get() = prefs.getInt("display", 1)
-        set(value) = prefs.edit().putInt("display", value).apply()
+    /**
+     * 屏显元素掩码 —— 原版「屏显」是一个**入口**（点了进去选显示哪些），不是一个开关。
+     *    bit0 片名 / bit1 时钟 / bit2 网速 / bit3 总时长 / bit4 底部 1dp 进度条
+     * 默认 0b11111 = 五项全显示（原版 view_widget_display.xml 默认也确实全在）。
+     */
+    var displayMask: Int
+        get() = prefs.getInt("display_mask", 0b11111)
+        set(value) = prefs.edit().putInt("display_mask", value and 0b11111).apply()
 
     /** 首页源锁定：0=关，1=开（锁定当前站源不被推荐覆盖；原版 setting_home_site_lock） */
     var homeSiteLock: Int

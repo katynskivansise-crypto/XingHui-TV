@@ -78,9 +78,9 @@ class SettingsCustomActivity : Activity() {
         bindCycle(R.id.cusSearchUi, R.id.valCusSearchUi, SEARCH_UI,
             { settings.searchUi }, { settings.searchUi = it })
 
-        // ---- 屏显：播放页常驻信息层（clock / netspeed / duration / 1dp 进度条）----
-        bindSwitch(R.id.cusDisplay, R.id.valCusDisplay,
-            { settings.display == 1 }, { settings.display = if (it) 1 else 0 })
+        // ---- 屏显：原版是一个**入口**（点进去选显示哪些元素），不是开关 ---- 
+        findViewById<View>(R.id.cusDisplay)?.setOnClickListener { showDisplayDialog() }
+        renderDisplayValue()
 
         // ---- 最近观看：首页推荐位用播放历史还是站点推荐 ----
         bindSwitch(R.id.cusHomeHistory, R.id.valCusHomeHistory,
@@ -154,6 +154,38 @@ class SettingsCustomActivity : Activity() {
             set(!get())
             render()
         }
+    }
+
+    // ---------------- 屏显 ----------------
+
+    /** 原版 view_widget_display.xml 的五组元素，顺序与布局里的层级一致 */
+    private fun displayItems() = arrayOf("片名", "时钟", "网速", "总时长", "底部进度条")
+
+    private fun renderDisplayValue() {
+        val mask = settings.displayMask
+        val items = displayItems()
+        val names = items.filterIndexed { i, _ -> (mask and (1 shl i)) != 0 }
+        findViewById<TextView>(R.id.valCusDisplay)?.text = when {
+            names.isEmpty() -> "全部隐藏"
+            names.size == items.size -> "全部显示"
+            else -> names.joinToString("+")
+        }
+    }
+
+    private fun showDisplayDialog() {
+        val items = displayItems()
+        val checked = BooleanArray(items.size) { (settings.displayMask and (1 shl it)) != 0 }
+        AlertDialog.Builder(this)
+            .setTitle("屏显")
+            .setMultiChoiceItems(items, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("确定") { _, _ ->
+                var mask = 0
+                checked.forEachIndexed { i, on -> if (on) mask = mask or (1 shl i) }
+                settings.displayMask = mask
+                renderDisplayValue()
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     // ---------------- 语言 ----------------
