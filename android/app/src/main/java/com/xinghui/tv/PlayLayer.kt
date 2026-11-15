@@ -97,8 +97,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * ★以前这段在 bind() 末尾，而 bind() 第二次进入直接 return ——
      *   结果"回详情页后再点集数"既不解析也不起播，表现就是「进不去播放页」。
      */
-    private fun startPlayback() {
-        showPlayProgress("进页面解析")
+    /**
+     * @param reuseUrl 非空表示**这一路已经在播**（详情页小窗正在播的就是它）。
+     *        此时只接管界面状态，不重新拉站点详情、不重新 setMediaSource ——
+     *        重新加载必然走 IDLE→BUFFERING→READY，用户看到的就是"每次点开播放界面都重新加载一次"。
+     *        这是原版 enterFullscreen() 的语义：播放器与媒体项都不动，只换容器。
+     */
+    private fun startPlayback(reuseUrl: String = "") {
+        if (reuseUrl.isBlank()) showPlayProgress("进页面解析")
         // ★输入环境探针（只打一次，几乎零开销）。
         //   Android 官方文档明确：开启无障碍/触摸探索后，D-pad 事件不会传给开发者定义的方向键处理器，
         //   而是被无障碍服务拿走用于移动无障碍焦点 —— 这是"应用收不到方向键、菜单键却照常到达"的一个真实成因。
@@ -137,7 +143,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         findViewById<TextView>(R.id.btnScale).setOnClickListener { toggleScale() }
         // 上一集/下一集（对齐原项目 control.prev/next → checkPrev/checkNext）
         findViewById<View>(R.id.btnPrev).setOnClickListener { switchEpisode(-1) }
-        findViewById<View>(R.id.btnPlayPause).setOnClickListener { togglePlayPause() }
         findViewById<View>(R.id.btnNext).setOnClickListener { switchEpisode(1) }
         // 清晰度切换（对齐原项目 QualityAdapter/setQualityActivated）
         findViewById<View>(R.id.btnQuality).setOnClickListener { toggleQuality() }
@@ -150,6 +155,19 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   于是这部片从来没被写进历史 —— 现场就是 row=false 但 total=9。
         if (historyKey.isNotBlank()) recordHistory()
 
+        // ★复用分支：小窗那一路上来就是 READY，这里只补齐界面与状态，绝不重设媒体项。
+        if (reuseUrl.isNotBlank()) {
+            activeUrl = reuseUrl
+            lastPlayedUrl = reuseUrl
+            startGen++
+            hidePlayProgress()
+            updateDecodeText()
+            updatePlayerText()
+            setKeepScreenOn(true)
+            // 片头/片尾/倍速这些是"按片记忆"的界面状态，上面已经读过，这里不用再改播放器
+            MpvDebug.log("[play] 复用已在播的一路，不重新加载 url=${reuseUrl.take(48)} pos=${currentPosMs()}ms")
+            return
+        }
         // 直播直链：直接播放；影片：先拉详情拿线路（供选集面板），再解析播放
         if (directUrl.isNotBlank()) {
             // 手机推送（push_mode）有两种来源：
@@ -206,6 +224,20 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         val playerBroken = player?.playerError != null
         if (wasAttached && sameEpisode && activeUrl.isNotBlank() && !playerBroken) {
             MpvDebug.log("[play] 同集再入：跳过解析与重载 url=${activeUrl.take(48)}")
+            return
+        }
+        // ★★小窗已经在播这一路 → 进播放页只接管界面，不重新解析、不重新加载。
+        //   判据用宿主播放器**当前媒体项**而不是本层的 activeUrl：首次进播放页时 activeUrl 还是空的，
+        //   只看它永远判不出"已经在播"，于是每次都老老实实重新解析一遍 ——
+        //   这就是"原版进详情页就开始加载、点进播放界面却要再转一次圈"的差别。
+        val preUrl = a.getStringExtra("pre_url").orEmpty()
+        val runningUrl = runCatching { player?.currentMediaItem?.mediaId.orEmpty() }.getOrDefault("")
+        // ★内核为 mpv 时不能复用：详情页小窗那一路上宿主 EXO 起的，播放页要交 mpv，
+        //   直接把 EXO 的媒体项当成"已在播"接过去就是黑屏。这种跨内核只能老实加载一次。
+        //   （要让 mpv 用户也做到"零加载"，得让详情页小窗直接跑 mpv —— 那是下一步，不在本包。）
+        if (preUrl.isNotBlank() && runningUrl == preUrl && !playerBroken && contentReady() && !isMpvMode()) {
+            MpvDebug.log("[play] 小窗已在播，接管界面不重载 url=${preUrl.take(48)}")
+            startPlayback(reuseUrl = preUrl)
             return
         }
         startPlayback()
@@ -344,6 +376,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         root = host.layoutInflater.inflate(R.layout.activity_play_layer, parent, false)
         parent.addView(root)
         MpvDebug.log("[perf] bind(inflate)=${SystemClock.uptimeMillis() - tCreate}ms")
+        // 屏显（原版 `play_display` 那一条）：关掉后播放页不显示常驻信息层
+        // （clock / netspeed / duration / 底部 1dp 进度条）。默认开启。
+        runCatching {
+            val on = Settings(host).display == 1
+            root?.findViewById<android.view.View>(R.id.displayOverlay)?.visibility =
+                if (on) android.view.View.VISIBLE else android.view.View.GONE
+        }
         // 根容器当画面容器用（原版 @id/video 的等价物）：可聚焦，收控制条时焦点回这里
         rootView = root
         // 对齐原版 VideoActivity:614「进页面就把焦点放到画面容器」：
@@ -467,7 +506,12 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 }
             }
         }
-        findViewById<TextView>(R.id.playTitle).text = vodName.ifBlank { "播放中" }
+        findViewById<TextView>(R.id.playTitle).apply {
+            text = vodName.ifBlank { "播放中" }
+            // 原版 title 用 ellipsize=marquee；TextView 的 marquee 只有 isSelected=true 才会滚
+            // （或持有焦点时滚）。TV 上这里不抢焦点，所以用 isSelected 打开。
+            isSelected = true
+        }
         // 顶部标题条也用 alpha 表显隐：它的 GONE↔VISIBLE 会带来一次 layout pass
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = 0f }
 
@@ -1060,15 +1104,17 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }
     }
 
-    /** 清晰度按钮：多清晰度才显示，单清晰度隐藏 */
+    /**
+     * 清晰度按钮：**恒隐藏**。
+     *
+     * 原版控制条里没有这枚按钮 —— 它的清晰度网格 `@id/quality` 在详情页的面板里（activity_video.xml），
+     * 与「线路 flag 行」并列。这里保留 id 与切换逻辑，只为将来把入口挪到详情页时不用重建按钮；
+     * 控制条上不再出现它，观感与原版一致。
+     */
     private fun updateQualityBtn() {
         val btn = findViewById<TextView>(R.id.btnQuality)
-        if (qualities.size > 1) {
-            btn.visibility = View.VISIBLE
-            btn.text = "清晰度 ${qualities[qualityIdx].first}"
-        } else {
-            btn.visibility = View.GONE
-        }
+        btn.visibility = View.GONE
+        if (qualities.size > 1) btn.text = "清晰度 ${qualities[qualityIdx].first}"
     }
 
     /** 播放地址请求头；取播放接口返回的 Result.header（UA/Referer/Cookie 等） */
@@ -1614,6 +1660,22 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     /** 倍速：点击循环档位（对齐原项目 onSpeed()/addSpeed()） */
+    /**
+     * 原版 control.action.speed 是 CustomUpDownView：↑ → onSpeedAdd()、↓ → onSpeedSub()，
+     * 每次 ±0.25f（5.6.0 VideoActivity:3240/3246）。点击仍走 toggleSpeed()（原版长按 toggleSpeed）。
+     * 我们的档位表是 0.5~2.0 六档、步长恰好 0.25，所以在档位间移动即可，行为与原版一致。
+     */
+    private fun adjustSpeed(dir: Int) {
+        val idx = (speedIdx + dir).coerceIn(0, speedSteps.size - 1)
+        if (idx == speedIdx) return
+        speedIdx = idx
+        val sp = speedSteps[idx]
+        if (isMpvMode()) runCatching { mpv?.setSpeed(sp) }
+        else runCatching { player?.setPlaybackSpeed(sp) }
+        findViewById<TextView>(R.id.btnSpeed).text = String.format(java.util.Locale.US, "%.2f", sp)
+        MpvDebug.log("[bar] 速度 ↑↓ → ${sp}")
+    }
+
     private fun toggleSpeed() {
         speedIdx = (speedIdx + 1) % speedSteps.size
         applySpeed()
@@ -3100,7 +3162,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /** 暂停/继续的界面同步（居中图标 + 常亮）：两条内核共用，避免两边各写一份走偏 */
     private fun applyPauseUi(pausing: Boolean) {
-        findViewById<android.widget.TextView>(R.id.btnPlayPause)?.text = if (pausing) "继续" else "暂停"
+        // ★原版控制条没有播放/暂停按钮：暂停态只体现在居中 playCenter（图标 + 时间），
+        //   按钮文字不需要同步。OK 键仍走 togglePlayPause()，行为不变。
         if (pausing) {
             setKeepScreenOn(false)
             showPlayCenter()
@@ -3376,12 +3439,52 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      */
     private var progressTick: Runnable? = null
 
+    /** 收包速率采样点（上一次的值与时刻）；-1 表示还没采到 */
+    private var rxSample = -1L
+    private var rxSampleAt = 0L
+
+    /**
+     * 实时网速文本（原版 view_widget_display 的 `@id/netspeed`，右下角 16sp）。
+     *
+     * 用 TrafficStats 的本应用收包字节差分算真实下载速率——这正是原版那一栏的语义。
+     * 不用 player.bandwidthEstimate：那是媒体3 的**带宽估算**，缓冲满时会掉到 0，
+     * 与原版"一直在动"的网速不是一回事。
+     */
+    private fun trafficText(): String {
+        val rx = runCatching {
+            android.net.TrafficStats.getUidRxBytes(android.os.Process.myUid())
+        }.getOrDefault(-1L)
+        if (rx < 0) return ""
+        val now = android.os.SystemClock.uptimeMillis()
+        val prev = rxSample
+        val prevAt = rxSampleAt
+        rxSample = rx
+        rxSampleAt = now
+        if (prev < 0 || prevAt == 0L || now <= prevAt) return ""
+        val bps = (rx - prev).coerceAtLeast(0L) * 1000.0 / (now - prevAt)
+        return when {
+            bps >= 1048576.0 -> String.format(java.util.Locale.US, "%.1f MB/s", bps / 1048576.0)
+            bps >= 1024.0 -> String.format(java.util.Locale.US, "%.0f KB/s", bps / 1024.0)
+            else -> ""
+        }
+    }
+
     private fun startProgressTicker() {
         progressTick?.let { uiHandler.removeCallbacks(it) }
         // 视图引用只取一次：findViewById 每次都要遍历视图树，而这段 Runnable 是每秒一直在跑的
         val bar = findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)
         val posText = findViewById<TextView>(R.id.timePos)
         val durText = findViewById<TextView>(R.id.timeDur)
+        // ★原版 @id/display 的常驻信息层：时钟/网速/总时长/底部 1dp 进度条，每秒都要刷新，
+        //   引用同样只取一次（findViewById 会遍历视图树）。
+        val clockTv = findViewById<TextView>(R.id.clock)
+        val netTv = findViewById<TextView>(R.id.netspeed)
+        val totalTv = findViewById<TextView>(R.id.playDuration)
+        val bottomPb = findViewById<android.widget.ProgressBar>(R.id.bottomProgress)
+        val progText = findViewById<TextView>(R.id.playProgressText)
+        // 原版 utils/Clock.java：Clock.create(view) 默认 format("HH:mm:ss")，1 秒一次。
+        // API 25 没有 java.time，用 SimpleDateFormat。
+        val clockFmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
         val tick = object : Runnable {
             override fun run() {
                 val pos: Long
@@ -3402,6 +3505,16 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 bar?.setPosition(pos)
                 posText?.text = fmtTime(pos)
                 durText?.text = fmtTime(dur)
+                // ── 原版 view_widget_display.xml 的四件常驻信息 ──
+                clockTv?.text = clockFmt.format(java.util.Date())
+                totalTv?.text = if (dur > 0) fmtTime(dur) else "--:--"
+                if (dur > 0 && bottomPb != null) {
+                    bottomPb.progress = ((pos * 100) / dur).coerceIn(0L, 100L).toInt()
+                }
+                // 网速同一份采样喂两个地方：右下角 netspeed + 转圈下面的 traffic
+                val sp = trafficText()
+                netTv?.text = sp
+                if (progressShown) progText?.text = sp.ifBlank { "加载中" }
                 // 片尾：原版 onTimeChanged 的 ending + position >= duration → checkNext()
                 // 原版这一步没有任何提示，直接切下一集（之前那句 Toast 属于画蛇添足，已删）
                 if (endingMs > 0 && dur > 0 && !endingDone && pos + endingMs >= dur) {
@@ -3666,6 +3779,19 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 }
                 MpvDebug.log("[key] 条显示但焦点不在条内 → 快进/快退 kc=${event.keyCode} focus=${cur?.id}")
                 handleSeekKey(if (isLeftKey(event)) -1L else 1L, event)
+                return true
+            }
+            // 原版 CustomUpDownView 的三枚（speed / 字幕 / 片头 / 片尾）都在这里接上下键：
+            if (fid == R.id.btnSpeed && (isUpKey(event) || isDownKey(event))) {
+                if (event.action == KeyEvent.ACTION_DOWN) adjustSpeed(if (isUpKey(event)) 1 else -1)
+                return true
+            }
+            // 字幕：原版 setUpListener/setDownListener 都指向同一个 onSubtitleClick（5.6.0:680/681），
+            // 也就是上下键都等于"点一下字幕按钮"，只有两个方向对称才算对齐。
+            if (fid == R.id.btnTrackText && (isUpKey(event) || isDownKey(event))) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    openTrack(androidx.media3.common.C.TRACK_TYPE_TEXT)
+                }
                 return true
             }
             if ((fid == R.id.btnOpening || fid == R.id.btnEnding) && (isUpKey(event) || isDownKey(event))) {

@@ -90,6 +90,67 @@ class Settings(context: Context) {
         get() = prefs.getInt("small_window_back_key", 0)
         set(value) = prefs.edit().putInt("small_window_back_key", value).apply()
 
+    // ---- 补齐原版 activity_setting_custom.xml 的其余可调项（19 项里除「首页菜单键」以外全在，
+    //      首页菜单键按用户明确要求不恢复；DNS 也不做，固定走系统 DNS）----
+
+    /** 语言：0=英文，1=简体中文，2=繁体中文（原版 select_language） */
+    var language: Int
+        get() = prefs.getInt("language", 1)
+        set(value) = prefs.edit().putInt("language", value).apply()
+
+    /** 播放倍速默认值：0~6，对应原版 exo_controls_playback_speeds（0.25/0.5/0.75/正常/1.25/1.5/2） */
+    var playSpeed: Int
+        get() = prefs.getInt("play_speed", 3)
+        set(value) = prefs.edit().putInt("play_speed", value).apply()
+
+    /**
+     * 长按倍速（原版 player_speed）：**1.0 与 3.0 两档**。
+     * 依据 5.0.8 SettingCustomActivity：这一行挂的是 setOnLongClickListener，
+     * 长按后回写 R(1.0f) / R(3.0f) 两个值 —— 所以它不是开关，是「长按期间用哪个倍速」。
+     * 1.0 = 长按不加速（等价关闭）。
+     */
+    var pressSpeed: Float
+        get() = prefs.getFloat("press_speed", 1.0f).let { if (it >= 3.0f) 3.0f else 1.0f }
+        set(value) = prefs.edit().putFloat("press_speed", if (value >= 3.0f) 3.0f else 1.0f).apply()
+
+    /** 首页UI：0=简洁风格，1=TVBox 风格（原版 select_home_ui） */
+    var homeUi: Int
+        get() = prefs.getInt("home_ui", 0)
+        set(value) = prefs.edit().putInt("home_ui", value).apply()
+
+    /** 搜索UI：0=横向，1=纵向（原版 select_search_ui） */
+    var searchUi: Int
+        get() = prefs.getInt("search_ui", 0)
+        set(value) = prefs.edit().putInt("search_ui", value).apply()
+
+    /** 屏显：0=关，1=开（播放页常驻信息层；原版 play_display） */
+    var display: Int
+        get() = prefs.getInt("display", 1)
+        set(value) = prefs.edit().putInt("display", value).apply()
+
+    /** 首页源锁定：0=关，1=开（锁定当前站源不被推荐覆盖；原版 setting_home_site_lock） */
+    var homeSiteLock: Int
+        get() = prefs.getInt("home_site_lock", 0)
+        set(value) = prefs.edit().putInt("home_site_lock", value).apply()
+
+    /** 首页按钮：0=隐藏，1=显示（首页右侧功能按钮组；原版 setting_home_buttons） */
+    var homeButtons: Int
+        get() = prefs.getInt("home_buttons", 1)
+        set(value) = prefs.edit().putInt("home_buttons", if (value == 0) 0 else 1).apply()
+
+    /** AI 去广告：0=关，1=开（原版 setting_remove_ad，默认 true=开启） */
+    var removeAd: Int
+        get() = prefs.getInt("remove_ad", 1)
+        set(value) = prefs.edit().putInt("remove_ad", value).apply()
+
+    // ---- 各档位中文标签（对齐原版 res/values-zh-rCN/arrays.xml）----
+    fun languageLabel(): String = LANGUAGE_LABELS.getOrElse(language) { "简体中文" }
+    fun episodeStyleLabel(): String = if (episodeStyle == 0) "单行" else "多行"
+    fun playSpeedLabel(): String = PLAY_SPEED_LABELS.getOrElse(playSpeed) { "正常" }
+    fun onOffLabel(v: Int): String = if (v == 0) "关闭" else "开启"
+    fun homeUiLabel(): String = if (homeUi == 0) "简洁风格" else "TVBox风格"
+    fun searchUiLabel(): String = if (searchUi == 0) "横向" else "纵向"
+
     // ==== 播放核心：EXO / mpv 两套参数彼此独立 ====
     // 两个内核支持的东西不一样，参数不能共用一个键：
     // EXO（media3）走 RenderersFactory / resizeMode / MediaSource 那一套；
@@ -220,6 +281,12 @@ class Settings(context: Context) {
 
     companion object {
         private const val KEY_MPV_FAST = "mpv_fast_profile"
+        /** 语言（原版 select_language） */
+        val LANGUAGE_LABELS = arrayOf("英文", "简体中文", "繁体中文")
+        /** 播放倍速（原版 exo_controls_playback_speeds） */
+        val PLAY_SPEED_LABELS = arrayOf("0.25 倍", "0.5 倍", "0.75 倍", "正常", "1.25 倍", "1.5 倍", "2 倍")
+        const val SPEED_STEPS = "0.25,0.5,0.75,1.0,1.25,1.5,2.0"
+        val SPEED_VALUES = floatArrayOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val KERNEL_EXO = "exo"
         const val KERNEL_MPV = "mpv"
 

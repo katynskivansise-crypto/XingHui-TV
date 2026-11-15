@@ -2,29 +2,44 @@ package com.xinghui.tv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
+import java.util.Locale
 
 /**
- * 个性设置子页（排版照原版 SettingCustomActivity）。
+ * 个性设置子页 —— 条目逐项对齐原版 `res/layout/activity_setting_custom.xml`（19 项）。
  *
- * 原则：**每一行都必须有真实、可感知的作用**。我们只维持一套首页 UI，
- * 所以原版「首页风格（简洁/TVBox 两套）」这一项在我们这里没有意义，直接不放；
- * 同样，我们没有悬浮小窗、没有播放页信息栏、原版 getSearchUI() 本身也是零消费点，
- * 对应几项一并去掉，不留「未实现」占位。
+ * 已经按原版证据落定的取值域（`res/values-zh-rCN/arrays.xml`）：
+ *   语言       select_language               英文 / 简体中文 / 繁体中文
+ *   图片尺寸   select_size                   小 / 中 / 大 / 特大
+ *   选集样式   select_episode                单行 / 多行
+ *   播放倍速   exo_controls_playback_speeds  0.25~2 共 7 档
+ *   首页UI     select_home_ui                简洁风格 / TVBox风格
+ *   搜索UI     select_search_ui              横向 / 纵向
+ *   全屏菜单键 select_fullscreen_menu_key    控制栏 / 选集
+ *   小窗返回键 select_small_window_back_key  返回 / 焦点移动
+ * 其余为二值开关；「长按倍速」按 5.0.8 的 setOnLongClickListener 回写 R(1.0f)/R(3.0f) 定为两档。
  *
- * 2026-11 再收一轮：**海报 / 收藏 / 首页菜单键 / 首页历史 / 历史** 这五行也去掉 ——
- * 它们都是原版才有的可调项，我们不需要在这里控制：
- *   - 海报、首页历史：固定开启（Settings 里的字段与消费点保持不变，只是不再给开关）
- *   - 首页菜单键：固定「设置页面」（MainActivity.dispatchKeyEvent 里兜底，见那边注释）
- *   - 历史、收藏：清空入口挪走，各自页面里本来就有删除交互
+ * 两项按用户裁决不恢复：
+ *   - 首页菜单键（原来那一格已删，MainActivity 里固定走「设置页面」）
+ *   - DNS/DoH（固定走系统 DNS，不做选择）
  */
 class SettingsCustomActivity : Activity() {
 
     private lateinit var settings: Settings
+
+    private val SIZE = arrayOf("小", "中", "大", "特大")
+    private val EPISODE = arrayOf("单行", "多行")
+    private val HOME_UI = arrayOf("简洁风格", "TVBox风格")
+    private val SEARCH_UI = arrayOf("横向", "纵向")
+    private val FULLSCREEN_KEY = arrayOf("控制栏", "选集")
+    private val SMALL_BACK = arrayOf("返回", "焦点移动")
+    private val PRESS_SPEED = arrayOf("1.0 倍", "3.0 倍")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,39 +47,81 @@ class SettingsCustomActivity : Activity() {
         WallpaperStore.apply(this)
         settings = Settings(this)
 
-        val SIZE = arrayOf("小", "中", "大", "特大")
-        val FULLSCREEN_KEY = arrayOf("控制栏", "选集")
-        // ---- 图片尺寸：首页列数（MainActivity.uiColumns / ProductColumn.of）----
+        // ---- 语言：切换后立刻重建当前页（系统 Locale，影响 DateFormat / 系统控件）----
+        bindCycle(R.id.cusLanguage, R.id.valCusLanguage, Settings.LANGUAGE_LABELS,
+            { settings.language }, { settings.language = it; applyLanguage(it) })
+
+        // ---- 图片尺寸：首页列数（MainActivity.uiColumns）----
         bindCycle(R.id.cusSize, R.id.valCusSize, SIZE,
             { settings.uiSize }, { settings.uiSize = it })
 
-        // ---- 无痕：PlayActivity.recordHistory / setPosition 三处拦写 ----
+        // ---- 选集样式：详情页集数网格单行/多行 ----
+        bindCycle(R.id.cusEpisode, R.id.valCusEpisode, EPISODE,
+            { settings.episodeStyle }, { settings.episodeStyle = it })
+
+        // ---- 无痕模式：不写播放历史/进度 ----
         bindSwitch(R.id.cusIncognito, R.id.valCusIncognito,
             { settings.isIncognito }, { settings.isIncognito = it })
 
-        // ---- 全屏菜单键：PlayActivity:1291 ----
+        // ---- 播放倍速默认值（7 档）----
+        bindCycle(R.id.cusPlaySpeed, R.id.valCusPlaySpeed, Settings.PLAY_SPEED_LABELS,
+            { settings.playSpeed }, { settings.playSpeed = it })
+
+        // ---- 长按倍速：1.0 / 3.0 两档 ----
+        bindCycle(R.id.cusPressSpeed, R.id.valCusPressSpeed, PRESS_SPEED,
+            { if (settings.pressSpeed >= 3.0f) 1 else 0 },
+            { settings.pressSpeed = if (it == 1) 3.0f else 1.0f })
+
+        // ---- 首页UI / 搜索UI ----
+        bindCycle(R.id.cusHomeUi, R.id.valCusHomeUi, HOME_UI,
+            { settings.homeUi }, { settings.homeUi = it })
+        bindCycle(R.id.cusSearchUi, R.id.valCusSearchUi, SEARCH_UI,
+            { settings.searchUi }, { settings.searchUi = it })
+
+        // ---- 屏显：播放页常驻信息层（clock / netspeed / duration / 1dp 进度条）----
+        bindSwitch(R.id.cusDisplay, R.id.valCusDisplay,
+            { settings.display == 1 }, { settings.display = if (it) 1 else 0 })
+
+        // ---- 最近观看：首页推荐位用播放历史还是站点推荐 ----
+        bindSwitch(R.id.cusHomeHistory, R.id.valCusHomeHistory,
+            { settings.isHomeHistory }, { settings.isHomeHistory = it })
+
+        // ---- 全屏菜单键 ----
         bindCycle(R.id.cusFullscreenKey, R.id.valCusFullscreenKey, FULLSCREEN_KEY,
             { settings.fullscreenMenuKey }, { settings.fullscreenMenuKey = it })
 
-        // ---- 聚合搜索：SearchActivity，关时只请求当前站 ----
+        // ---- 首页源锁定 ----
+        bindSwitch(R.id.cusHomeSiteLock, R.id.valCusHomeSiteLock,
+            { settings.homeSiteLock == 1 }, { settings.homeSiteLock = if (it) 1 else 0 })
+
+        // ---- 小窗返回键 ----
+        bindCycle(R.id.cusSmallWindowBackKey, R.id.valCusSmallWindowBackKey, SMALL_BACK,
+            { settings.smallWindowBackKey }, { settings.smallWindowBackKey = it })
+
+        // ---- 首页按钮组显隐 ----
+        bindSwitch(R.id.cusHomeButtons, R.id.valCusHomeButtons,
+            { settings.homeButtons == 1 }, { settings.homeButtons = if (it) 1 else 0 })
+
+        // ---- 聚合搜索 ----
         bindSwitch(R.id.cusAggSearch, R.id.valCusAggSearch,
             { settings.aggregatedSearch }, { settings.aggregatedSearch = it })
 
-        // ---- 嗅探内核：原版两档（系统 / X5 WebView），X5 是闭源 SDK 约 20MB，
-        //      与「APK 32MB」红线冲突，只内置系统 WebView —— 单档只读，点击不变化 ----
+        // ---- AI 去广告（原版默认开启）----
+        bindSwitch(R.id.cusRemoveAd, R.id.valCusRemoveAd,
+            { settings.removeAd == 1 }, { settings.removeAd = if (it) 1 else 0 })
+
+        // ---- 重置 App ----
+        findViewById<View>(R.id.cusReset)?.setOnClickListener { confirmReset() }
+
+        // ---- 嗅探内核：原版两档（系统 / X5 WebView），X5 是闭源 SDK 约 20MB，只内置系统 WebView ----
         findViewById<TextView>(R.id.valCusParseWebview)?.text = "系统"
         findViewById<View>(R.id.cusParseWebview)?.setOnClickListener { /* 单档，无切换 */ }
 
-        // ---- 缓存目录：写 thunder_cache_dir，Path.thunderCache() 派生迅雷下载目录 ----
+        // ---- 迅雷缓存目录 ----
         showCacheDir()
         findViewById<View>(R.id.cusCacheDir)?.setOnClickListener { pickCacheDir() }
-
     }
 
-    /**
-     * 点击循环切换。usable 为 null 表示全部档位可用，否则只在给定档位之间轮转
-     * （首页菜单键用这个跳过我们还没有实现的 0/2/6 三档）。
-     */
     private fun bindCycle(
         rowId: Int, valId: Int, options: Array<String>,
         get: () -> Int, set: (Int) -> Unit,
@@ -99,19 +156,54 @@ class SettingsCustomActivity : Activity() {
         }
     }
 
-    // ---------------- 缓存目录 ----------------
+    // ---------------- 语言 ----------------
+
+    private fun applyLanguage(idx: Int) {
+        val loc = when (idx) {
+            0 -> Locale.ENGLISH
+            2 -> Locale.TRADITIONAL_CHINESE
+            else -> Locale.SIMPLIFIED_CHINESE
+        }
+        Locale.setDefault(loc)
+        val cfg = Configuration(resources.configuration)
+        cfg.setLocale(loc)
+        resources.updateConfiguration(cfg, resources.displayMetrics)
+        recreate()
+    }
+
+    // ---------------- 重置 ----------------
+
+    private fun confirmReset() {
+        AlertDialog.Builder(this)
+            .setTitle("重置 App")
+            .setItems(arrayOf("重置设置（保留数据）", "重置并清空全部数据")) { _, which ->
+                if (which == 0) {
+                    getSharedPreferences("xinghui_prefs", MODE_PRIVATE).edit().clear().apply()
+                    Toast.makeText(this, "设置已重置，请重新进入 App", Toast.LENGTH_LONG).show()
+                    finish()
+                } else {
+                    runCatching { File(filesDir.parentFile, "").deleteRecursively() }
+                    getSharedPreferences("xinghui_prefs", MODE_PRIVATE).edit().clear().apply()
+                    runCatching { cacheDir.deleteRecursively() }
+                    Toast.makeText(this, "已清空全部数据，请重新进入 App", Toast.LENGTH_LONG).show()
+                    finishAffinity()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    // ---------------- 迅雷缓存目录 ----------------
 
     private fun thunderCacheDir(): String =
         runCatching { com.github.catvod.utils.Prefers.getString("thunder_cache_dir", "") }.getOrDefault("")
 
-    /** 原版这一行直接回显 pref 原值（默认空串）；空串时显示实际生效目录，避免用户看不出落在哪 */
     private fun showCacheDir() {
         val saved = thunderCacheDir()
         findViewById<TextView>(R.id.valCusCacheDir)?.text =
             saved.ifBlank { applicationContext.cacheDir.absolutePath }
     }
 
-    /** 原版 CacheDirDialog 的候选就是 getCacheDir() + 全部 getExternalCacheDirs() */
     private fun cacheCandidates(): List<File> {
         val out = mutableListOf<File>()
         out += applicationContext.cacheDir
@@ -127,7 +219,7 @@ class SettingsCustomActivity : Activity() {
             d.absolutePath + (if (free > 0) "（剩余 ${AppCache.format(free)}）" else "")
         }
         AlertDialog.Builder(this)
-            .setTitle("缓存目录")
+            .setTitle("迅雷缓存目录")
             .setItems(labels.toTypedArray()) { _, which -> applyCacheDir(dirs[which]) }
             .setNegativeButton("取消", null)
             .show()
@@ -143,7 +235,7 @@ class SettingsCustomActivity : Activity() {
         val free = runCatching { dir.usableSpace }.getOrDefault(0L)
         Toast.makeText(
             this,
-            "已切换到 ${dir.absolutePath}" + (if (free > 0) "（剩余 ${AppCache.format(free)}）" else "") +
+            "已切换到 " + dir.absolutePath + (if (free > 0) "（剩余 ${AppCache.format(free)}）" else "") +
                 "\n新任务生效，已下载的文件不会自动搬移",
             Toast.LENGTH_LONG
         ).show()

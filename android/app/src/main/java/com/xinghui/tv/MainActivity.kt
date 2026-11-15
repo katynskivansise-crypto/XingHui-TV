@@ -1246,6 +1246,9 @@ class MainActivity : Activity() {
             putExtra("vod_pic", v.vodPic)
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
+            // ★小窗正在播的就是这一集（全屏预览时菜单键转播放页）：把地址一起交过去，
+            //   播放层据此**复用**这一路，不重新解析、不重新加载。
+            putExtra("pre_url", inlineUrl)
         })
         // 同上：不做 overridePendingTransition(0, 0)，理由见 openPlayPage 里的说明。
     }
@@ -1255,6 +1258,10 @@ class MainActivity : Activity() {
         val v = vod ?: return
         val line = currentLine ?: return
         val ep = episodes.getOrNull(idx) ?: line.episodes.getOrNull(idx) ?: return
+        // ★点的是不是"小窗此刻正在播的那一集"——决定播放层要不要复用现成的这一路。
+        //   必须在 playingIdx 被改写之前取。
+        val wasPlayingThis = idx == playingIdx
+        val reusableUrl = if (wasPlayingThis) inlineUrl else ""
         playingIdx = idx
         runCatching { adapter.setActive("E:$idx") }
         inlineLeaveFullscreen = inlineFullscreen
@@ -1268,6 +1275,9 @@ class MainActivity : Activity() {
             putExtra("vod_pic", v.vodPic)
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
+            // ★同集：把已经在播的地址交过去，播放层直接接管这一路（不重载）。
+            //   不同集（小窗在播别的集）：留空，播放层照常解析新的一集。
+            putExtra("pre_url", reusableUrl)
         })
     }
 

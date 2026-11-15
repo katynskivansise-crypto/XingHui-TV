@@ -302,6 +302,9 @@
                     android:textSize="18sp"
                     android:text="" />
             </LinearLayout>
+            <!-- DoH/DNS：按用户裁决**保留这一格但不可选**，固定显示「系统」（走系统默认 DNS）。
+                 原版这里是 doh_name 四档（系统/腾讯/阿里/360）+ doh_url 四组地址；
+                 我们不做选择，所以 focusable 保持 false、点击无响应。 -->
             <LinearLayout
                 android:id="@+id/entryDoh"
                 android:layout_width="0dp"

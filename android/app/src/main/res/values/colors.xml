@@ -9,9 +9,12 @@
     <color name="black_50">#80000000</color>
     <!-- 原版 selector_text 用到的色名（原版由依赖库提供，这里补同值） -->
     <color name="blue_500">#FF2196F3</color>
+    <!-- 时间栏四色（原版 view_control_seek.xml 的 app:xxx_color 直接取这几支） -->
+    <color name="blue_200">#ff90caf9</color>
+    <color name="grey_500">#ff9e9e9e</color>
+    <color name="yellow_500">#ffffeb3b</color>
     <color name="grey_600">#FF757575</color>
     <color name="grey_700">#FF616161</color>
-    <color name="text">#FFFFFFFF</color>
     <color name="amber_300">#ffffd54f</color>
     <color name="black_05">#0d000000</color>
     <color name="black_80">#cc000000</color>

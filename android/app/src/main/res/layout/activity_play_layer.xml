@@ -37,6 +37,68 @@
          播放页现在只有一套画面层，任何地方都不再需要第二块 surface 或第二块视图。 -->
 
 
+    <!-- ═══ 常驻信息层：对齐原版 activity_video.xml 里 include 的 @id/display
+         （res/layout/view_widget_display.xml）。这一层在原版里是 FrameLayout(@id/video) 内部的第一层
+         覆盖物，**不跟控制条显隐**，默认就是可见的：
+             clock     右上角 20sp / tnum / Shadow —— 每秒走一次的时钟 HH:mm:ss（原版 Clock.create 默认格式）
+             netspeed  右下角 16sp / tnum / Shadow —— 实时网速
+             duration  左下角 16sp / tnum / Shadow —— 总时长
+             progressbar 贴底 1dp 横向条 —— 播放进度（不用呼出控制条也能看到走到哪）
+         原版小窗形态下这几个会被缩在 400x225 里；我们的播放层只在全屏时挂载，所以等同全屏常驻。 -->
+    <RelativeLayout
+        android:id="@+id/displayOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/transparent">
+
+        <TextView
+            android:id="@+id/clock"
+            style="@style/Shadow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:layout_marginTop="16dp"
+            android:layout_marginEnd="16dp"
+            android:fontFeatureSettings="tnum"
+            android:textColor="@color/white"
+            android:textSize="20sp" />
+
+        <TextView
+            android:id="@+id/netspeed"
+            style="@style/Shadow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:layout_alignParentBottom="true"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="16dp"
+            android:fontFeatureSettings="tnum"
+            android:textColor="@color/white"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/playDuration"
+            style="@style/Shadow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_alignParentBottom="true"
+            android:layout_marginStart="16dp"
+            android:layout_marginBottom="16dp"
+            android:fontFeatureSettings="tnum"
+            android:textColor="@color/white"
+            android:textSize="16sp" />
+
+        <ProgressBar
+            android:id="@+id/bottomProgress"
+            style="?android:progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_alignParentBottom="true"
+            android:max="100"
+            android:progress="0" />
+    </RelativeLayout>
+
     <!-- 起播/缓冲指示：对齐原版 view_widget_vod.xml 的 @id/progress
          （LinearLayout 居中，内含 view_progress 的 ProgressBar + traffic 网速文本）。
          原版靠 Player.STATE_BUFFERING -> showProgress()、STATE_READY -> hideProgress() 切换；
@@ -123,20 +185,24 @@
     </LinearLayout>
 
     <!-- 片名：原版顶部 info（view_widget_vod），跟随控制条显隐 -->
+    <!-- 照原版 view_widget_vod.xml 的 @id/top → @id/title：
+         20sp（不是 16sp）、单行 marquee 滚动、marginStart 16 / marginTop 16 / marginEnd 100（右侧给浮层留位）、
+         style=Shadow（阴影描边，**不用半透明背景色块**）。
+         之前这里是 16sp + #66000000 圆角底色，属于自造样式，观感与原版不同。 -->
     <TextView
         android:id="@+id/playTitle"
-        android:layout_width="wrap_content"
+        android:layout_width="fill_parent"
         android:layout_height="wrap_content"
         android:layout_marginStart="16dp"
         android:layout_marginTop="16dp"
-        android:background="#66000000"
-        android:paddingStart="12dp"
-        android:paddingTop="6dp"
-        android:paddingEnd="12dp"
-        android:paddingBottom="6dp"
+        android:layout_marginEnd="100dp"
+        android:ellipsize="marquee"
+        android:marqueeRepeatLimit="marquee_forever"
+        android:singleLine="true"
         android:text="播放中"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp" />
+        android:textColor="@color/white"
+        android:textSize="20sp"
+        style="@style/Shadow" />
 
     <!-- 底部控制条 -->
     <LinearLayout
@@ -184,19 +250,8 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/btnPlayPause"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginEnd="12dp"
-                android:background="@drawable/selector_text"
-                android:focusable="true"
-                android:focusableInTouchMode="true"
-                android:nextFocusDown="@id/timeBar"
-                android:text="暂停"
-                android:textColor="@color/white"
-                android:textSize="14sp" />
-
+            <!-- ★原版控制条里没有「暂停」按钮：暂停/继续走 OK 键，暂停时屏幕中央弹 playCenter
+                 （view_widget_vod 的 @id/center，我们已照它还原）。这里按原版删掉这一枚。 -->
             <TextView
                 android:id="@+id/btnNext"
                 android:layout_width="wrap_content"
@@ -205,9 +260,12 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
+                android:nextFocusLeft="@id/btnLoop"
                 android:text="下集"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -218,9 +276,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="上集"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -231,9 +291,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="选集"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -244,9 +306,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="刷新"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -257,9 +321,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="EXO"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -270,9 +336,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="硬解"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -283,9 +351,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="1.00"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -296,9 +366,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="原始"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -309,9 +381,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="字幕"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -322,9 +396,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="音轨"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -335,9 +411,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="视轨"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -348,9 +426,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="片头"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -361,9 +441,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="片尾"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <!-- 弹幕未接入：原版按站点是否支持弹幕显隐，无源时不显示。
@@ -377,9 +459,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="弹幕搜索"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
             <TextView
@@ -390,12 +474,17 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
+                android:nextFocusRight="@id/btnNext"
                 android:text="循环"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp" />
 
-            <!-- 清晰度：原版控制条没有独立按钮，多清晰度时才显示（保留功能） -->
+            <!-- ★清晰度：原版控制条**没有**这枚按钮（它的清晰度网格 @id/quality 在详情页面板里）。
+                 这里保留 id 与逻辑、但恒为 gone —— 控制条观感与原版一致，
+                 入口下一步按原版挪到详情页（等同原生 @id/quality 的位置）。 -->
             <TextView
                 android:id="@+id/btnQuality"
                 android:layout_width="wrap_content"
@@ -404,9 +493,11 @@
                 android:background="@drawable/selector_text"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
+                android:maxLines="1"
+                android:maxEms="12"
                 android:nextFocusDown="@id/timeBar"
                 android:text="清晰度"
-                android:textColor="@color/white"
+                android:textColor="@color/text"
                 android:textSize="14sp"
                 android:visibility="gone" />
 
@@ -425,10 +516,16 @@
                 android:id="@+id/timePos"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:fontFeatureSettings="tnum"
                 android:text="00:00"
                 android:textColor="@color/white"
                 android:textSize="16sp" />
 
+            <!-- 照原版 view_control_seek.xml 的 @id/timeBar 逐项补齐：
+                 四色 + 水平焦点自循环（左右键在条内挪进度，不跑出去）。
+                 原版：played/scrubber = blue_500(#2196F3)、buffered = blue_200(#90CAF9)、
+                       unplayed = grey_500(#9E9E9E)。
+                 之前没设这四项，DefaultTimeBar 走的是库默认灰阶，已播段不是蓝的 —— 观感差别很明显。 -->
             <androidx.media3.ui.DefaultTimeBar
                 android:id="@+id/timeBar"
                 android:layout_width="0dp"
@@ -438,12 +535,20 @@
                 android:layout_weight="1"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
-                android:nextFocusUp="@id/btnPlayPause" />
+                android:nextFocusLeft="@id/timeBar"
+                android:nextFocusRight="@id/timeBar"
+                android:nextFocusUp="@id/btnNext"
+                android:nextFocusDown="@id/timeBar"
+                app:buffered_color="@color/blue_200"
+                app:played_color="@color/blue_500"
+                app:scrubber_color="@color/blue_500"
+                app:unplayed_color="@color/grey_500" />
 
             <TextView
                 android:id="@+id/timeDur"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:fontFeatureSettings="tnum"
                 android:text="00:00"
                 android:textColor="@color/white"
                 android:textSize="16sp" />

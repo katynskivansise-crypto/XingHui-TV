@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 逐字节照原版 res/color/text.xml：控制条按钮文字在"激活/选中/勾选"时变黄(#FFEB3B)，
+     其余为白。原版 Control 样式里 android:textColor 就是 @color/text，
+     之前这里把它简化成 values/colors.xml 里的纯白常量，于是激活态文字永远不变色，
+     这是控制条观感最明显的偏差。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/yellow_500" android:state_activated="true" />
+    <item android:state_selected="true" android:color="@color/yellow_500" />
+    <item android:state_checked="true" android:color="@color/yellow_500" />
+    <item android:color="@color/white" />
+</selector>

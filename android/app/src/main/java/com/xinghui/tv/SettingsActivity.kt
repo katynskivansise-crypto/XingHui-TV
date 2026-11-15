@@ -263,6 +263,7 @@ class SettingsActivity : Activity() {
         findViewById<TextView>(R.id.valPlayerPage)?.text = settings.kernelLabel()
         findViewById<TextView>(R.id.valDanmuPage)?.text = "关闭"
         findViewById<TextView>(R.id.valCustomPage)?.text = settings.uiSizeLabel()
+        // DoH：保留这一格但不可选，固定显示「系统」——DNS 走系统默认，不做选择
         findViewById<TextView>(R.id.valDoh)?.text = "系统"
 
         val backup = backupFile()

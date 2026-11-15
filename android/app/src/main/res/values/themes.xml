@@ -45,4 +45,12 @@
         <!-- <item name="android:windowDisablePreview">true</item> -->
         <!-- <item name="android:windowAnimationStyle">@null</item> -->
     </style>
+    <!-- 原版 res/values/styles.xml:1969 的 Shadow：顶部片名/分辨率用阴影保证在亮画面上可读，
+         不使用半透明背景块。之前我们给 playTitle 加的是 #66000000 色块，与原版观感不同。 -->
+    <style name="Shadow">
+        <item name="android:shadowColor">#b0000000</item>
+        <item name="android:shadowDx">1.5</item>
+        <item name="android:shadowDy">1.5</item>
+        <item name="android:shadowRadius">2.0</item>
+    </style>
 </resources>
