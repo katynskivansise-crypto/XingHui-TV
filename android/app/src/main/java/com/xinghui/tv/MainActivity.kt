@@ -225,6 +225,33 @@ class MainActivity : Activity() {
      * 焦点这一侧用 FOCUS_BLOCK_DESCENDANTS 挡住：alpha=0 但视图还在，
      * 不挡的话方向键会落进看不见的层里。
      */
+    /**
+     * 详情页加载指示 —— 逐条对齐原版 `showProgress()`（5.6.0:3448）与 `ProgressLayout.b(1)`。
+     *
+     * 原版 `getPlayer()` 里 `mViewModel.playerContent(...)` 之后**紧跟** `showProgress()`：
+     * 圈立刻亮，同时把整页内容设成 INVISIBLE（不是压黑）。
+     * 我们的详情页以前没有这一层 —— 界面先出来、解析在后台 Thread 里跑，看着就是"秒开"。
+     *
+     * 用 alpha 而不是 visibility：detailLayer 的显隐本来就用 alpha 管（showDetailLayer）。
+     */
+    private fun showDetailProgress() {
+        if (playMode) return
+        runCatching {
+            findViewById<View>(R.id.detailProgress)?.visibility = View.VISIBLE
+            detailLayer.alpha = 0f
+        }
+        MpvDebug.log("[detail] 加载圈 ON")
+    }
+
+    /** 对应原版 5.6.0:5497 `case Player.STATE_READY: hideProgress();` —— 灭圈时机是 READY，不是首帧。 */
+    private fun hideDetailProgress() {
+        runCatching {
+            findViewById<View>(R.id.detailProgress)?.visibility = View.GONE
+            if (!playMode) detailLayer.alpha = 1f
+        }
+        MpvDebug.log("[detail] 加载圈 OFF")
+    }
+
     private fun showDetailLayer(show: Boolean) {
         detailLayer.alpha = if (show) 1f else 0f
         detailLayer.descendantFocusability = if (show)
@@ -299,9 +326,15 @@ class MainActivity : Activity() {
     private fun bindDetailListener(p: androidx.media3.common.Player) {
         detailListener?.let { runCatching { p.removeListener(it) } }
         val listener = object : androidx.media3.common.Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                // 原版 5.6.0:5497 `case Player.STATE_READY: hideProgress();`
+                if (playbackState == androidx.media3.common.Player.STATE_READY) hideDetailProgress()
+            }
+
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 // 原版没有错误去重（5.6.0 无 errorCount/playFail，5.0.8 无 800 常量）：
                 // 一次起播只由 App.post(runnable, TIMEOUT_PLAY) 的起播窗口兜底，错误回调照常处理。
+                hideDetailProgress()
                 Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，走自动换源")
                 handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
                     reason = "播放器错误 ${error.errorCodeName}", depth = 0)
@@ -559,7 +592,10 @@ class MainActivity : Activity() {
                 //   小窗永远不起播 —— 表现就是「详情页秒开、小窗没画面、进播放页才加载」。
                 autoStarted = false
                 autoPlayAfterExpand = false
-                playingIdx = 0
+                // ★必须是 -1，不能是 0。
+                //   renderEpisodes 里的历史定位守的是 `if (playingIdx < 0)`（对齐原版 seamless:1311）；
+                //   这里一旦先写成 0，那条定位永远不会执行，详情页就永远停在第 1 集。
+                playingIdx = -1
                 renderLines()
             }
         }.start()
@@ -697,23 +733,46 @@ class MainActivity : Activity() {
     private fun autoPlayFromHistory() {
         if (autoStarted) return
         autoStarted = true
-        val v0 = vod
-        val hKey = HistoryStore.keyOf(v0?.vodId.orEmpty(), v0?.vodName.orEmpty(), episodes.getOrNull(playingIdx)?.second)
-        val last = runCatching { HistoryStore(this).lastEpUrl(hKey) }.getOrDefault("")
-        val idx = episodes.indexOfFirst { it.second.isNotBlank() && it.second == last }
-            .takeIf { it >= 0 } ?: 0
+        // playingIdx 已在 renderEpisodes 里按历史定位（对齐原版 seamless:1311），这里直接用。
+        // 原来那段是「拿 episodes.getOrNull(playingIdx) 拼历史 key」，而 playingIdx 此时恒为 -1，
+        // 拼出来的 key 与写入时的 key 不是同一串 → 永远查不到 → 永远回落第 0 集。
+        val idx = playingIdx.coerceAtLeast(0)
         Log.e("XingHuiTV", "[detail] 自动起播 idx=$idx 共${episodes.size}集")
         playInline(idx, auto = true)
+    }
+
+    /**
+     * 历史里「上次打开的那一集」在本次集列表里的下标，对应 5.6.0 `seamless:1311` 的 `flag.find(...)`。
+     *
+     * 原版靠 `Episode.selected` 标志 + `EpisodeAdapter.getPosition()`（找不到返回 0），
+     * 所以定位这一步必须发生在列表渲染**之前**。
+     */
+    private fun resolveHistoryEpisode(): Int {
+        val v0 = vod ?: return 0
+        val key = HistoryStore.keyOf(v0.vodId, v0.vodName)
+        val last = runCatching { HistoryStore(this).lastEpUrl(key) }.getOrDefault("")
+        if (last.isBlank()) return 0
+        val idx = episodes.indexOfFirst { it.second == last }
+        MpvDebug.log("[detail] 历史集定位 key=${key.take(24)} hit=$idx/${episodes.size}")
+        return if (idx >= 0) idx else 0
     }
 
     private fun renderEpisodes(line: PlayLine) {
         episodeSeq++          // 切线路/重渲染即作废上一轮异步展开
         episodes = line.episodes
+        // 对齐原版 seamless(Flag)（5.6.0:1311）：列表渲染之前先把「上次打开的那一集」定位出来。
+        // 原版是 setEpisodeAdapter → seamless(find) → selectEpisode(toggle + notifyItemChanged) 两段式；
+        // 我们原来把定位挪到了 autoPlayFromHistory 里，而那时 applyEpisodeGrid/showGroup 已经拿着
+        // playingIdx 的初值 -1 刷过一遍、之后再没有回刷 —— 于是在第 N 集，详情页永远显示第 1 集。
+        if (playingIdx < 0) playingIdx = resolveHistoryEpisode()
         // 原版这一行是线路 tab（超级无敌4K / 高清4K / …），选中项标黄
         markActiveFlag(line.name)
         applyEpisodeGrid()
+        // 对齐原版 updateEpisodeWindow：当前集在第几页就显示第几页，不能固定第 0 页（原来这里是 showGroup(0)）。
+        // ★必须在 rebuildGroups() 之前改 —— 分页标签的黄色高亮是按 activeSection 上色的，晚一步就涂错。
+        if (episodes.size > GROUP_SIZE && playingIdx >= 0) activeSection = playingIdx / GROUP_SIZE
         rebuildGroups()
-        showGroup(0)
+        showGroup(activeSection * GROUP_SIZE)
         // 迅雷体系：磁力/ed2k/thunder/种子在详情阶段就展开成文件列表
         // （对齐原版 player/Source.parse → Thunder.Parser.call）。
         // 种子解析要等元信息，可能要几秒，所以放后台线程，回来后替换集数列表。
@@ -876,6 +935,7 @@ class MainActivity : Activity() {
         }
         // 走完最后一条线路：原版继续 checkSearch 跨站搜索，本工程暂不做跨站
         Log.e("XingHuiTV", "[detail] 全部 ${lines.size} 条线路均失败")
+        hideDetailProgress()
         if (auto) {
             Toast.makeText(this, "所有线路都播放失败，可手动换源", Toast.LENGTH_SHORT).show()
         } else {
@@ -943,6 +1003,17 @@ class MainActivity : Activity() {
         }
         adapter.notifyDataSetChanged()
         adapter.setActive(if (playingIdx >= 0) "E:$playingIdx" else null)
+        // 对齐原版 scrollToEpisode（5.6.0:1362）：当前集必须滚进可视区。
+        // 只标 activated 不滚动的话，第 41 集往后用户看到的仍是第 1 页。
+        if (playingIdx in from until to) {
+            findDetail<RecyclerView>(R.id.detailList)?.post {
+                runCatching {
+                    val rv = findDetail<RecyclerView>(R.id.detailList) ?: return@runCatching
+                    val pos = if (epOrder) to - 1 - playingIdx else playingIdx - from
+                    rv.scrollToPosition(pos.coerceAtLeast(0))
+                }
+            }
+        }
     }
 
     private var showLines = true
@@ -995,6 +1066,10 @@ class MainActivity : Activity() {
             ?: line.episodes.getOrNull(idx)
             ?: run { Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}"); return }
         playingIdx = idx
+        // 起手日志：真机 /debug 里看这一行有没有 ——
+        //   有 → 小窗起播链路在跑，后面卡在解析/下发；
+        //   没有 → autoPlayFromHistory 被闸门挡掉了。
+        MpvDebug.log("[detail] 小窗起播 idx=$idx ep=${ep.first} line=${line.name} auto=$auto")
         // 集数格里标出"当前这一集"（原版 setEpisodeActivated）
         adapter.setActive("E:$idx")
         setPreviewVisible(true)
@@ -1013,6 +1088,8 @@ class MainActivity : Activity() {
         runCatching {
             HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)
         }
+        // 对齐原版 showProgress：解析请求发出时圈就该亮。quiet 是"从播放页回来静默恢复小窗"，不显示。
+        if (!quiet) showDetailProgress()
         Thread {
             var url = ""
             var err = ""
