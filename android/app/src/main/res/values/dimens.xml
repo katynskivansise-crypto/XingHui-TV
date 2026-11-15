@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- navigation_empty_icon.xml 引用了这个 dimen（它是 leanback 生成物，本工程不用 leanback）。
+         保留该文件期间必须提供此值，否则 aapt2 报 resource dimen/design_navigation_icon_size not found。
+         删除 navigation_empty_icon.xml 后本条目可一并移除。 -->
+    <dimen name="design_navigation_icon_size">24dp</dimen>
+</resources>

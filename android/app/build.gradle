@@ -7,15 +7,19 @@ android {
     namespace 'com.xinghui.tv'
     // Compose 已移除：它是空挂载（0 个 @Composable、0 处 androidx.compose 引用、0 个 ComposeView），
     // 曾经只挂在 build.gradle 里（插件 + BOM + ui + material3 + tv-material）从未产出界面。
-    // 现在约束 compileSdk 的是 core-ktx 1.19.1 的 aar-metadata（要求 >=37）；
-    // AGP 9.5 支持的最高 API 级别正是 37。targetSdk 保持 36（运行时行为不变）。
-    // 若把 core-ktx 降到 1.17.0，compileSdk 可回 36 —— 但那需要另一轮验证，暂不动。
-    compileSdk 37
+    //
+    // compileSdk 必须是 36，不是 37：
+    //   sdkmanager 的 platform 包最高只到 android-36（37 尚未发布，只有 android-canary-*）。
+    //   而 core-ktx 1.19.1 的 aar-metadata 硬性要求 minCompileSdk=37，两者不可同时满足，
+    //   所以 core-ktx 固定 1.18.0（它要求 minCompileSdk=36）。
+    //   等 platform 37 正式发布后，再把 core-ktx 与 compileSdk 一起升。
+    compileSdk 36
 
     defaultConfig {
         applicationId "com.xinghui.tv"
-        minSdk 23   // 由依赖下限决定：core-ktx 1.19.1 与 recyclerview 1.4.0 的 minSdk 都是 23
-                    // （media3/appcompat/profileinstaller 只要 21，不是约束项）。与 Compose 无关。
+        minSdk 23   // 由 core-ktx 1.18.0 决定：它的 AndroidManifest 写 minSdkVersion=23。
+                    // recyclerview 1.4.0 只要 21，media3/appcompat/profileinstaller 更低，都不是约束项。
+                    // 与 Compose 无关。
         targetSdk 36
         versionCode 1
         versionName "0.1.0"
@@ -57,7 +61,7 @@ dependencies {
 
     // org.json / logger 已移除：前者 Android framework 内置（外部 jar 会被 BootClassLoader 抢先，永远用不上），
     // 后者 2017 停维护且全项目仅 2 处调用，改用 android.util.Log。
-    implementation 'androidx.core:core-ktx:1.19.1'
+    implementation 'androidx.core:core-ktx:1.18.0'   // 1.19.x 要求 compileSdk 37，见上
     implementation 'androidx.appcompat:appcompat:1.8.0'
     implementation 'androidx.recyclerview:recyclerview:1.4.0'
     // ★UI 基础：列表与网格一律 RecyclerView（androidx.recyclerview 1.4.0）。

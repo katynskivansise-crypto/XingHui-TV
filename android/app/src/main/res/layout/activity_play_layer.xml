@@ -69,7 +69,7 @@
     </LinearLayout>
 
     <!-- 暂停时居中提示：对齐原版 view_widget_vod.xml 的 @id/center。
-         结构完全照抄：外形 LinearLayout（圆角半透明黑 background=@drawable/shape_widget，padding=16dp），
+         结构按原版规格还原：外形 LinearLayout（圆角半透明黑 background=@drawable/shape_widget，padding=16dp），
          上面 56dp 的 action 图标（暂停时是 ic_widget_play，语义为「按 OK 继续播放」），
          下面一行「当前位置 / 总时长」，16sp 白字，斜杠两侧各 4dp。
          原版时机：onPaused() 时 showInfoAndCenter()（全屏才显示），onPlay() 时 hideCenter()。 -->
