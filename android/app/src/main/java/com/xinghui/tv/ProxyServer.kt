@@ -84,11 +84,6 @@ object ProxyServer {
                         // 调试通道：手机浏览器打开 http://盒子IP:9978/debug
                         // 只给排查用，播放页 UI 一行不加、不弹任何提示
                         path == "/debug" -> {
-                            // 诊断档位：/debug?x=1..4，一次装包即可做 A/B（界面零改动、不弹提示）
-                            session.parameters["x"]?.firstOrNull()?.toIntOrNull()?.let { x ->
-                                MpvDebug.experiment = x.coerceIn(0, 8)
-                                MpvDebug.log("[exp] 档位切换为 ${MpvDebug.experiment}")
-                            }
                             newFixedLengthResponse(
                                 Response.Status.OK, "text/plain; charset=utf-8",
                                 MpvDebug.dump() + "\n" + crashTail()

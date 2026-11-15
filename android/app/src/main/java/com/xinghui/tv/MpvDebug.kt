@@ -22,8 +22,6 @@ object MpvDebug {
      *   2 = 菜单键什么都不做（连控制条都不呼出），用于判断黑屏是否与控制条有关
      * 一次装包就能在手机浏览器切换，省掉反复打包。
      */
-    @Volatile
-    var experiment: Int = 0
 
     private const val MAX = 200
 

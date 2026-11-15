@@ -170,7 +170,7 @@ class Settings(context: Context) {
         get() = prefs.getInt("exo_buffer", 5).coerceIn(1, 15)
         set(value) = prefs.edit().putInt("exo_buffer", value.coerceIn(1, 15)).apply()
 
-    // ==== mpv 缩放算法（官方 MPVView.kt:48-59 的 video_scale / video_downscale / video_tscale）====
+    // ==== mpv 缩放算法（官方 MPVView.kt 的 video_scale / video_downscale / video_tscale；该库不在两份源码内，行号无法核对）====
     // 官方做法是「偏好里取字符串，空则不下发」，空 = 走 mpv 编译默认（bilinear）。
     // 我们照抄这个语义：默认空串，只有用户选过才下发。
     // 实测 libmpv.so 里硬编码 scale=bilinear / dscale=bilinear，所以默认档就是 bilinear。

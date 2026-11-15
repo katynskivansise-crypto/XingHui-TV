@@ -15,11 +15,11 @@ import androidx.media3.ui.SubtitleView
  *
  *   PlayerView 内部带着一套自己的状态机，我们控制不了、也不该控制：
  *     · setVisibility(v) 会连带把内部 SurfaceView 置成同一可见性
- *       （PlayerView.java:616-620）→ 老 ROM 上就是 surface 销毁重建；
+ *       （PlayerView.java）→ 老 ROM 上就是 surface 销毁重建；
  *     · player 为 null 或 tracks 为空时 closeShutter()，盖一块不透明黑
- *       （PlayerView.java:1399/1406/1417/1475）→ player=null 那一瞬必然黑；
+ *       （PlayerView.java/1406/1417/1475）→ player=null 那一瞬必然黑；
  *     · 没有渲染目标时解码器转去 placeholderSurface，那块面上什么都不画
- *       （MediaCodecVideoRenderer.java:158/802-808）；
+ *       （MediaCodecVideoRenderer.java/802-808）；
  *     · 它自己还会维护 artwork / buffering / error 三个内部视图，与我们的浮层重复。
  *
  * 这里改用三个官方公开类，行为等价、契约干净：
@@ -143,17 +143,6 @@ class VideoHost(
      * 代价是一次 surfaceDestroyed→surfaceCreated，画面会黑一帧 —— 换内核本来就是重操作，
      * 原项目也接受这个代价。**不要**把它用在呼条、改布局这类轻动作上。
      */
-    fun recreateSurface() {
-        // ★surfaceView 现在是 PlayerView 的子 View，不能再从父容器摘出来（会破坏 PlayerView 结构）。
-        //   官方 PlayerView 没有公开的「重建 surface」接口，等价做法是 detach → attach：
-        //   原项目用的是 setRender 切两次（RENDER_SURFACE ↔ RENDER_TEXTURE）来逼一次重建，
-        //   我们只有一个渲染目标，就用 setPlayer(null) → 下一帧 setPlayer(p) 逼近同样效果。
-        val p = bound
-        setPlayer(null)
-        MpvDebug.log("[surf] 重建 surface owner=$owner")
-        surfaceView.post { if (bound == null && p != null) setPlayer(p) }
-    }
-
     private val forwarder = object : SurfaceHolder.Callback {
         override fun surfaceCreated(h: SurfaceHolder) {
             if (owner == Owner.NATIVE) runCatching { nativeAttach?.invoke(h) }

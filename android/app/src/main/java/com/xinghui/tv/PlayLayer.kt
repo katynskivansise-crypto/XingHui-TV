@@ -150,7 +150,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         if (reuseUrl.isNotBlank()) {
             activeUrl = reuseUrl
             lastPlayedUrl = reuseUrl
-            startGen++
             hidePlayProgress()
             updateDecodeText()
             updatePlayerText()
@@ -237,13 +236,22 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   就直接接管 —— 不再做 url 字符串比较。原版 VideoActivity.shouldEnterFullscreen
         //   用的是 item.isSelected()，从头到尾没有比对过地址。
         val attachOnly = a.getBooleanExtra("attach_only", false)
-        if (attachOnly && hasContent && !playerBroken && !isMpvMode()) {
-            if (src != null && player !== src) {
+        // ★原版 shouldEnterFullscreen(Episode item) 的判据只有 item.isSelected()：
+        //   点的是「此刻这一集」就进全屏，从不判断"是否已经有画面"。
+        //   这里同样不能拿 hasContent 当门槛 —— 小窗那一路可能还在解析中，
+        //   把同一颗实例接管过来、等它自己到位，才是"进全屏不重新加载、不回片头"。
+        if (attachOnly && src != null && !playerBroken && !isMpvMode()) {
+            if (player !== src) {
                 player = src
                 runCatching { session.adoptExo(src) }
             }
-            MpvDebug.log("[play] attach_only：宿主正在播这一集，只接管界面 url=${preUrl.take(48)}")
-            startPlayback(reuseUrl = if (preUrl.isNotBlank()) preUrl else runningUrl)
+            if (hasContent) {
+                MpvDebug.log("[play] attach_only：宿主正在播这一集，只接管界面 url=${preUrl.take(48)}")
+                startPlayback(reuseUrl = if (preUrl.isNotBlank()) preUrl else runningUrl)
+            } else {
+                MpvDebug.log("[play] attach_only：宿主仍在解析这一集，接管实例并等待其到位")
+                awaitHostEpisode(src, preUrl)
+            }
             return
         }
         if (preUrl.isNotBlank() && runningUrl == preUrl && !playerBroken && hasContent && !isMpvMode()) {
@@ -258,6 +266,50 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             return
         }
         startPlayback()
+    }
+
+    /**
+     * 接管「宿主还在解析」的那一集。
+     *
+     * 原版进全屏从不发起第二次解析：它把同一次加载的结果从小窗直接放大到全屏。
+     * 所以这里只等待 —— 宿主那颗实例一旦出现媒体项（onMediaItemTransition，
+     * 这是 media3 里"媒体项到位"的唯一官方信号），立刻按"已在播"接管界面；
+     * 宿主报错、或等不到结果，才回落到本层自己的解析。
+     */
+    private fun awaitHostEpisode(src: androidx.media3.common.Player, fallbackUrl: String) {
+        showPlayProgress("继续加载")
+        var settled = false
+        var listener: androidx.media3.common.Player.Listener? = null
+        var timeout: Runnable? = null
+
+        fun settle(url: String, byTimeout: Boolean) {
+            if (settled) return
+            settled = true
+            listener?.let { runCatching { src.removeListener(it) } }
+            timeout?.let { t -> runCatching { rootView?.removeCallbacks(t) } }
+            MpvDebug.log("[play] 接管小窗结果 url=${url.take(48)} timeout=$byTimeout")
+            if (url.isNotBlank()) startPlayback(reuseUrl = url) else startPlayback()
+        }
+
+        val l = object : androidx.media3.common.Player.Listener {
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                val u = mediaItem?.localConfiguration?.uri?.toString().orEmpty()
+                    .ifBlank { mediaItem?.mediaId.orEmpty() }
+                if (u.isNotBlank()) settle(u, false)
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                MpvDebug.log("[play] 小窗那一路失败，改由本层解析 ${error.errorCodeName}")
+                settle("", false)
+            }
+        }
+        listener = l
+        runCatching { src.addListener(l) }
+        // 宿主解析可能根本没回来（站点慢 / 失败但未报错）—— 兜底仍由本层解析，
+        // 只是这条路只在等不到时才走，正常情况不会触发第二次加载。
+        timeout = Runnable { if (!settled) settle(fallbackUrl, true) }
+        // 超时对齐原版 Constant.TIMEOUT_PLAY（15 秒），不是自创的 8 秒
+        timeout?.let { t -> runCatching { rootView?.postDelayed(t, 15_000) } }
     }
 
     /**
@@ -392,7 +444,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }
         // 根容器当画面容器用（原版 @id/video 的等价物）：可聚焦，收控制条时焦点回这里
         rootView = root
-        // 对齐原版 VideoActivity:614「进页面就把焦点放到画面容器」：
+        // 对齐原版 5.6.0 VideoActivity.java:1141「进页面就把焦点放到画面容器」：
         // 有焦点时这条 ROM 上按键分发最稳，也是控制条收起时的落点。
         // 进页面这一拍的实际焦点状态写进 /debug：进页面到按菜单键之前，
         // 如果这里是 cur=-1 且 winFocus=false，就说明"按键无效"是窗口/焦点这一层没接上，
@@ -447,7 +499,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         session.setExoBuilder { h -> rebuildPlayerInternal(h) }
         MpvDebug.log(
             "[boot] build=tk17 layer=aspect+surface+subtitle sdk=${android.os.Build.VERSION.SDK_INT}" +
-                " 档位=${MpvDebug.experiment} host=${if (videoHost != null) "ok" else "null"}"
+                " host=${if (videoHost != null) "ok" else "null"}"
         )
 
         enableKeepContent()
@@ -475,7 +527,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         if (!isMpvMode()) {
             val tExo0 = SystemClock.uptimeMillis()
             player = ExoPlayer.Builder(host).build().also { p ->
-                // 对齐原版 Players.java:155：setAudioAttributes(AudioAttributes.DEFAULT, !isPlayWithOthers())
+                // 对齐原版 Players.java：setAudioAttributes(AudioAttributes.DEFAULT, !isPlayWithOthers())
                 // 原版默认 play_with_others=false → 第二参数 true = 请求音频焦点。
                 // 少了这一步，详情页小窗和播放页互不压制，就是「两个不同的声音」。
                 p.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
@@ -516,8 +568,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         findViewById<View>(R.id.playTitle)?.let { it.visibility = View.VISIBLE; it.alpha = 0f }
 
         applyImmersive()
-        // 窗口形态实验档（3/4），非 3/4 时什么都不做
-        applyWindowShapeExperiment()
         // 原版播放页没有返回按钮（VideoActivity 靠系统返回键），这里同样不摆
         // 控制条按钮全部绑定（结构照原版 view_control_vod.xml）
         val tBar0 = SystemClock.uptimeMillis()
@@ -548,7 +598,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 val posNow = runCatching { player?.currentPosition ?: -1L }.getOrDefault(-1L)
                 val playingNow = runCatching { player?.isPlaying }.getOrNull()
                 MpvDebug.log("[sv2] created ${h.surfaceFrame.width()}x${h.surfaceFrame.height()} gen=$surfGen " +
-                    "kernel=${if (isMpvMode()) "mpv" else "exo"} startGen=$startGen pos=${posNow}ms playing=$playingNow mpvPos=${mpvPos}ms")
+                    "kernel=${if (isMpvMode()) "mpv" else "exo"} pos=${posNow}ms playing=$playingNow mpvPos=${mpvPos}ms")
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, hh: Int) {
                 MpvDebug.log("[sv2] changed ${w}x$hh fmt=$f kernel=${if (isMpvMode()) "mpv" else "exo"}")
@@ -660,7 +710,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             //   parse=1 且两者都没有 → 嗅探（type=0，需 WebView）
             val playUrlRaw = obj.optString("playUrl", "")
             sitePlayUrl = playUrlRaw
-            // 原版 Result.jx：接口明确要求走外部解析（VideoActivity:568 的第二个条件）
+            // 原版 Result.jx：接口明确要求走外部解析（5.6.0 Result.java:332/336 —— needParse = getParse()==1 || getJx()==1）
             try { siteJx = obj.optInt("jx", 0) } catch (_: Exception) { siteJx = 0 }
             when {
                 // json: 前缀 → 当 type=1 直接跑（原版 Parse.get(1, url.substring(5))）
@@ -943,10 +993,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 另外起播前（checkCast 里非投屏时）也先盖一层 progressLayout。
      * 我们照同一套时机：解析开始、首次缓冲、seek 后都显示，就绪/播完/失败时收起。
      */
-    private var progressShown = false
 
     private fun showPlayProgress(reason: String = "其它") {
-        progressShown = true
         // 转圈是谁点亮的 —— 这是区分「EXO 真的重新缓冲」与「我们自己误亮」的唯一依据
         MpvDebug.log(
             "[prog] 转圈 显示 来源=$reason state=${runCatching { player?.playbackState }.getOrNull()}" +
@@ -971,7 +1019,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun hidePlayProgress() {
-        progressShown = false
         // 同上：只降 alpha，不动 visibility（不动窗口绘制区域）
         runOnUiThread { findViewById<View>(R.id.playProgress)?.alpha = 0f }
     }
@@ -979,14 +1026,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     /**
      * 是否还在"起播前"（画面没出来）。
      *
-     * 只判 contentReady() 不够：EXO 一 prepare 就有 duration，`ready` 立刻变 true，
-     * 但那一刻还在 BUFFERING、屏幕上只有转圈 —— 而用户恰恰是在这段里按 OK 的。
-     * 所以再加一条"转圈还亮着"。
+     * 判据只有一条：内核里有没有内容（contentReady()）。
+     * 原版对应 VideoActivity.onKeyCenter:6280 的 player().isEmpty() 分支：
+     * 空 → onRefresh()（重新起播）；非空 → 暂停/播放。
      */
-    // ★判据只用"内核里有没有内容"，不再把 progressShown 掺进来。
-    //   掺进来的后果：EXO 每次 seek 都会进 BUFFERING → showPlayProgress() → preStart() 变 true →
-    //   这一段时间按 OK 只记 pendingPauseIntent、永不 toggle —— 也就是「刚快进完按暂停没反应」。
-    //   BUFFERING 只是缓冲，不是"起播前"，暂停/继续在这个阶段本来就该有效。
     private fun preStart(): Boolean = !contentReady()
 
     private fun onPlayFail(msg: String) {
@@ -1176,13 +1219,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                         uiHandler.postDelayed(autoHide, IMM_HIDE_MS)
                     }
                 }
-                // 起播前用户按过快进：这里才是真正能定位的时刻，先补跳它，再谈续播点
-                if (pendingJumpMs >= 0) {
-                    val at = pendingJumpMs
-                    pendingJumpMs = -1
-                    p.seekTo(at)
-                    MpvDebug.log("[key] 起播前快进生效 → ${at}ms")
-                }
                 if (pendingSeek <= 0) return
                 val target = pendingSeek
                 pendingSeek = 0
@@ -1267,7 +1303,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     /**
-     * 对齐原版 Players.java:605：headers 没带 UA 时补上用户设置的 UA。
+     * 对齐原版 Players.java：headers 没带 UA 时补上用户设置的 UA。
      * 注释见调用点——media3 默认 UA 是 "ExoPlayerLib/1.3.1"，多数采集站/CDN 见它直接 403。
      * 抽成函数是为了让切档路径（toggleQuality）复用同一份判定，而不是各自写一遍。
      */
@@ -1280,7 +1316,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             Toast.makeText(host, "未解析到播放地址", Toast.LENGTH_LONG).show()
             return
         }
-        // 对齐原版 Players.java:605：
+        // 对齐原版 Players.java：
         //   for (Map.Entry<String, String> header : headers.entrySet())
         //       if (HttpHeaders.USER_AGENT.equalsIgnoreCase(header.getKey())) return headers;
         //   headers.put(HttpHeaders.USER_AGENT, Setting.getUa());
@@ -1289,7 +1325,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // 原版走 OkHttpDataSource，继承的是用户设置的 UA，所以不会踩这个坑。
         val effHeaders = withUa(headers)
         activeUrl = url
-        startGen++
         // ★★回写宿主：播放页里切集（上一集/下一集、播完自动下一集）必须让详情页知道现在播的是哪一集。
         //   不回写的后果是一整条错位链：
         //     · exitPlayLayer 里 scrollToPosition(playingIdx) 与焦点恢复都把用户带回「进入时那一集」
@@ -1308,13 +1343,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         val sameEpisodeAgain = url == lastPlayedUrl
         val atSrc = when {
             resumeOverride >= 0 -> "强制"
-            pendingJumpMs >= 0 -> "快进"
             sameEpisodeAgain -> "续接当前"
             else -> "历史"
         }
         val at = when {
             resumeOverride >= 0 -> resumeOverride
-            pendingJumpMs >= 0 -> pendingJumpMs
             // ★同集再次起播：用当前真实位置，绝不回头读磁盘上的旧续播点
             sameEpisodeAgain -> currentPosMs()
             else -> maxOf(openingMs, marks[2])
@@ -1325,16 +1358,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }.getOrNull()
         val atArg = when {
             resumeOverride >= 0 -> "resumeOverride=$resumeOverride"
-            pendingJumpMs >= 0 -> "pendingJumpMs=$pendingJumpMs"
             else -> "hist=${marks[2]}"
         }
         resumeOverride = -1
-        pendingJumpMs = -1
         pendingSeek = at
         startPosMs = at
         lastSavedPos = 0
         MpvDebug.log(
-            "[play] 起播 gen=$startGen 来源=$atSrc($atArg) 调用=$atFrom url=${url.take(48)} 续播点=${at}ms " +
+            "[play] 起播 来源=$atSrc($atArg) 调用=$atFrom url=${url.take(48)} 续播点=${at}ms " +
                 "(hist=${marks[2]} opening=${openingMs} ending=${endingMs}) " +
                 HistoryStore(host).probe(historyKey, epUrl)
         )
@@ -1353,9 +1384,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         val itemBuilder = MediaItem.Builder().setUri(url).setMediaId(url)
         // 字幕轨：对齐原版 ExoUtil.getMediaItem → setSubtitleConfigurations(getSubtitleConfigs(subs))
         if (activeSubs.isNotEmpty()) itemBuilder.setSubtitleConfigurations(activeSubs)
-        // 起播前按过暂停：媒体项照样装载，但不自动播（与正常暂停的观感一致）
-        val wantPlay = pendingPauseIntent != true
-        pendingPauseIntent = null
+        // 原版起播即播（onRefresh → getPlayer），没有"起播前按暂停"这条通道
+        val wantPlay = true
         val item = itemBuilder.build()
         // ★优先走 MediaSource 路径：headers 跟着这一条媒体项走，播放器实例不动。
         //   失败（例如工厂构造异常）才退回 session 的 setMediaItem 路径。
@@ -1468,10 +1498,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             )
         builder.setMediaSourceFactory(buildSourceFactory(headers, extractors))
         val built = builder.build().also {
-            // 官方 Players.java:158 setHandleAudioBecomingNoisy(true)：
+            // 官方 Players.java setHandleAudioBecomingNoisy(true)：
             // HDMI / 蓝牙音频突然断开时自动暂停，而不是继续无声播放。
             it.setHandleAudioBecomingNoisy(true)
-            // 同 onCreate：音频焦点必须请求（原版 Players.java:155 同一句）
+            // 同 onCreate：音频焦点必须请求（原版 Players.java 同一句）
             it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
             it.setPlaybackSpeed(speedSteps[speedIdx])
         }
@@ -1721,32 +1751,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      */
 
     /**
-     * 黑闪取证：16ms 一拍，连续 1.1 秒，只在状态发生变化时打一行。
-     * 目的是在"按菜单那一瞬间"抓到到底是哪个状态翻了 —— 快门 / 画面层 / 窗口 / 播放器。
-     */
-    private var flickLast = ""
-    private fun armFlickSampler(tag: String) {
-        flickLast = ""
-        val total = 68
-        for (i in 0 until total) {
-            uiHandler.postDelayed({
-                if (isFinishing || isDestroyed) return@postDelayed
-                val st = runCatching {
-                    "host=${videoHost?.visibility} " +
-                        "sv=${currentSurface()?.visibility}/${currentSurface()?.alpha} " +
-                        "mpv=${mpv != null}/${mpv?.let { runCatching { it.isPausedActual() }.getOrNull() }} " +
-                        "bar=${controlBar?.visibility} win=${window?.decorView?.windowVisibility} " +
-                        "exo=${player?.isPlaying}"
-                }.getOrElse { "?" }
-                if (st != flickLast) {
-                    flickLast = st
-                    MpvDebug.log("[flick] $tag +${i * 16}ms $st")
-                }
-            }, (i * 16).toLong())
-        }
-    }
-
-    /**
      * 打开官方接口 keepContentOnPlayerReset（media3 1.3.1 自带，不是分叉专有）。
      *
      * 官方 PlayerView.updateForCurrentTrackSelections()：
@@ -1782,27 +1786,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 也就是「用户意图先成立，内核就绪再执行」。我们之前是直接 `player?.seekTo` / `mpv ?: return`，
      * 起播前这几秒既没有内核、也没有媒体项，按键全部打空 —— 表现为「刚进页面暂停/快进失效」。
      *
-     * pendingPauseIntent: null = 未操作；true = 用户要求暂停；false = 用户要求继续
-     * pendingJumpMs:      >=0 表示用户起播前按过快进，就绪后跳到这里
+     * resumeOverride: 换内核 / 重建播放器后强制回到这一位置。
+     * 出处：5.6.0 PlayerManager.java:218 pendingSwitchPositionMs（:1407-1409 记录、:1481 复用）。
+     * 起播前的暂停/快进意图原版没有对应机制（pendingPause/pendingSeek 全 0 命中），
+     * 原版由 dispatchKeyEvent 的 service() != null 直接挡掉：不记账、不补发。
      */
-    private var pendingPauseIntent: Boolean? = null
-    private var pendingJumpMs = -1L
+
 
     private fun contentReady(): Boolean = session.hasContent()
-
-    private fun unusedContentReady(): Boolean =
-        if (isMpvMode()) mpvLoaded && mpv != null
-        else runCatching {
-            // ★不能用 duration > 0 当就绪判据。
-            //   m3u8 / 切片源的 duration 在 media3 里可能整场都是 C.TIME_UNSET
-            //   （= Long.MIN_VALUE），`> 0` 永远不成立 → 一直判成"没就绪" →
-            //   togglePlayPause 的 EXO 分支被 `if (p != null && ready)` 挡掉，
-            //   只记意图不下发 pause()/play()，表现就是"按 OK 暂停无效"，
-            //   而且快进快退也会被记成"起播前意图"，要等起播后才补跳。
-            //   就绪的正确判据是媒体项已 attach 且播放器离开了 IDLE（BUFFERING / READY 都算）。
-            val p = player ?: return@runCatching false
-            p.mediaItemCount > 0 && p.playbackState != androidx.media3.common.Player.STATE_IDLE
-        }.getOrDefault(false)
 
     /**
      * 建（或复用）mpv 原生实例。
@@ -1900,18 +1891,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         session.releaseExo()
         player = null
         handOver("mpv", "releaseExo 已解绑并释放，下一步 attach 给 mpv")
-        // ★方案「六、第 2 步」：换内核必须换一块干净 Surface。
-        //   依据是原项目 PlayerManager.java:1522-1523 的注释原文：
-        //     "A Surface used by a CPU renderer stays connected after decoder release.
-        //      A different player needs a new Surface before its GPU/codec can connect."
-        //   而 switchPlayer() 里 resetVideoSurface 是**写死 true** 的。
-        //   具体动作就是 recreateSurface()：摘掉再加回，逼出一次 destroyed→created。
-        //   不做这一步，mpv 的 GPU 会挂在"EXO 刚用过、还带着残留"的那块面上 —— 表现就是切过去闪退。
-        //   代价是黑一帧，原项目同样接受（换内核本来就是重操作）。
+        // 换内核只做"交还输出面"。原版 PlayerManager.java:1522-1523 那句"不同 player 需要新 Surface"
+        // 针对的是 PlayerView 的 render 模式切换；我们是单一常驻 SurfaceView + 单一渲染目标，
+        // 旧内核 release 后 surface 本身没变。原先那步"重建 surface"实际只是 setPlayer(null)→setPlayer(p)，
+        // 并没有真的换面，只会白黑一帧。
         runCatching {
             videoHost?.releaseOwner()
-            videoHost?.recreateSurface()
-            MpvDebug.log("[kernel] 换到 mpv：releaseOwner + recreateSurface 已执行")
+            MpvDebug.log("[kernel] 换到 mpv：releaseOwner 已执行（输出面沿用常驻 SurfaceView）")
         }
         // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
         val surface = currentSurface()
@@ -1934,9 +1920,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         mpvPos = startMs
         mpvDur = 0
         setKeepScreenOn(true)
-        val startPaused = pendingPauseIntent == true
-        // 意图只消费一次：留着的话下一次换集也会被按成暂停
-        pendingPauseIntent = null
+        val startPaused = false
         m.play(
             url, headers, startMs, activeSubs.map { it.uri.toString() },
             // 起播前按过暂停就带下去，别让内核自己解暂停
@@ -2140,13 +2124,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   用户看到的就是「第一次按菜单黑约 1 秒」。
         //   常驻 VISIBLE + alpha=0 让这两件事都在页面创建、画面还没出来时一次性付掉，
         //   之后呼条/收条只剩改 alpha（纯重绘，不动布局、不动挖洞区域）。
-        if (MpvDebug.experiment == 8) {
-            controlBar?.visibility = View.GONE
-            controlBar?.alpha = 1f
-        } else {
-            controlBar?.visibility = View.VISIBLE
-            controlBar?.alpha = 0f
-        }
+        controlBar?.visibility = View.VISIBLE
+        controlBar?.alpha = 0f
         // 三层覆盖层统一初始化：全部 VISIBLE + alpha=0。
         // 它们都只在"显隐"上变化，不参与布局，alpha=0 时纯透明但仍占着绘制区域 —— 这正是要的：
         // 窗口的"有绘制内容区域"从第一帧起就是固定的，之后呼条 / 转圈 / 暂停图标出现都只是重绘。
@@ -2155,8 +2134,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             findViewById<View>(R.id.playCenter)?.let { it.visibility = View.VISIBLE; it.alpha = 0f }
         }
         MpvDebug.log("[bar] 控制条初值 vis=${if (controlBar?.visibility == View.VISIBLE) "VISIBLE" else "GONE"} " +
-            "alpha=${controlBar?.alpha} 形态=" +
-            (if (MpvDebug.experiment == 8) "GONE/VISIBLE（档位8：旧形态）" else "常驻VISIBLE/alpha 显隐"))
+            "alpha=${controlBar?.alpha} 常驻VISIBLE/alpha 显隐")
         // ★nextFocus 链必须在页面创建时就建好。
         //   原来它只在 showControl() 里 post 一次，也就是说"第一次按菜单之前"，
         //   actionLayout 里 17 个按钮的 nextFocusLeftId/nextFocusRightId 全是 0 ——
@@ -2286,11 +2264,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             startMpv(url, activeHeaders, at)
         } else {
             Toast.makeText(host, "已切换到 EXO", Toast.LENGTH_SHORT).show()
-            // 同上：mpv → EXO 也要换一块干净 Surface（原项目 switchPlayer 两个方向都 reset）
             runCatching {
                 videoHost?.releaseOwner()
-                videoHost?.recreateSurface()
-                MpvDebug.log("[kernel] 换到 EXO：releaseOwner + recreateSurface 已执行")
+                MpvDebug.log("[kernel] 换到 EXO：releaseOwner 已执行（输出面沿用常驻 SurfaceView）")
             }
             mpv?.release()
             mpv = null
@@ -2421,75 +2397,15 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun isMenuKeyCode(code: Int): Boolean = code == KeyEvent.KEYCODE_MENU
 
     /**
-     * 菜单键动作（原版 VideoActivity:1686-1687 两分支）：
+     * 菜单键动作（原版 5.0.8 VideoActivity.java:5630-5641 两分支：c.P()==0 → o0(true)/X0(i0()) 切条，==1 → t0():6195 弹选集）：
      * Setting.getFullscreenMenuKey() == 0 → onToggle() 切控制栏显隐
      * == 1 → onEpisodes() 弹选集并收起控制栏
      */
-    private var lastMenuKeyMs = 0L
-    private var pendingMenu = false
-    private var pendingKeyCode = 0
-    private val flushPendingKeyRun = Runnable { flushPendingKey() }
 
-    private val userKeys = setOf(
-        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER,
-        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
-        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND,
-    )
-
-    /**
-     * 补执行被挂起的那一下。
-     * 用合成的 DOWN+UP 一对事件走原来的处理函数，语义与正常按键完全一致
-     * （handleSeekKey 的起手/提交两段都在，不是另写一条捷径）。
-     */
-    private fun flushPendingKey() {
-        val kc = pendingKeyCode
-        if (kc == 0) return
-        pendingKeyCode = 0
-        MpvDebug.log("[key] 补执行挂起 kc=$kc winNow=${runCatching { window.decorView.hasWindowFocus() }.getOrNull()}")
-        runCatching {
-            val down = KeyEvent(KeyEvent.ACTION_DOWN, kc)
-            val up = KeyEvent(KeyEvent.ACTION_UP, kc)
-            when (kc) {
-                KeyEvent.KEYCODE_DPAD_LEFT -> { handleSeekKey(-1, down); handleSeekKey(-1, up) }
-                KeyEvent.KEYCODE_DPAD_RIGHT -> { handleSeekKey(1, down); handleSeekKey(1, up) }
-                else -> togglePlayPause()
-            }
-        }
-    }
     private var lastBackMs = 0L
 
     private fun fireMenuKeyOnce() {
-        val now = System.currentTimeMillis()
-        if (now - lastMenuKeyMs < 400) return
-        lastMenuKeyMs = now
-        // ★窗口就绪闸门。
-        //
-        // 真机 tk6 日志（13:23:36 / 13:25:23 / 13:27:02 三次进页面完全同构）：
-        //   [key] kc=82 focus=-1 bar=false ready=false      ← 菜单到达
-        //   [bar] 呼出完成 nowFocus=DefaultTimeBar          ← 呼条在这一拍就做完了
-        //   [sv2] created / changed 1920x1080
-        //   [life] onResume ... decor=0x0                   ← 此刻窗口还没完成首次布局
-        //   [ui] 进页面焦点 ... cur=-1 winFocus=false       ← 焦点被清空
-        //   [ui] 窗口焦点 hasFocus=true decor=1920x1080     ← 窗口才真正就绪
-        //   [win] 窗口拿到焦点
-        //
-        // 也就是：**第一次按菜单永远落在"窗口首次 attach→布局→获焦"这一拍里**，
-        // 而后续每一次按键窗口都已稳定 —— 这就是"只有第一次"的全部来源。
-        // 呼条本身要新增一个图层并重算挖洞区域，它叠在窗口自身的首次合成上，
-        // 两者合成到同一帧，屏幕必然空一拍（黑），缓过来之后才继续出帧（转圈）。
-        //
-        // 处理：不丢弃这次意图，也不硬抢窗口，而是等窗口就绪后立刻执行（毫秒级，用户无感）。
-        // 这样呼条发生在稳定窗口上，不再与首次布局叠加。
-        if (!windowReady()) {
-            pendingMenu = true
-            MpvDebug.log("[key] 菜单推迟到窗口就绪 decor=${window?.decorView?.width}x${window?.decorView?.height}" +
-                " winFocus=${runCatching { window?.decorView?.hasWindowFocus() }.getOrNull()}")
-            // 兜底：万一窗口迟迟不获焦（例如被别的窗口挡住），500ms 后照常呼出，绝不吞键
-            uiHandler.postDelayed({
-                if (pendingMenu) { pendingMenu = false; handleMenuKey() }
-            }, 500)
-            return
-        }
+        // 原版没有去重也没有窗口闸门：KeyUtil.isMenuKey 只认 ACTION_UP，到了就执行（onToggle:3426）
         handleMenuKey()
     }
 
@@ -2528,49 +2444,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     // ---------- EXO 三秒黑屏探针（只写 /debug，不改任何 UI 与播放行为） ----------
 /**
      */
-
-    // ---------- 窗口形态实验档（3 / 4）：验证「整窗不透明」是不是黑屏的成因 ----------
-    /**
-     * 原版窗口：主题 windowBackground=@null，根布局没有背景 —— 窗口里除了画面那一格，
-     * 其余区域是「什么都不画」，透明区是干净的。
-     * 我们两处都是不透明黑（主题 @android:color/black + 根 FrameLayout @android:color/black），
-     * 整块窗口 surface 全不透明。SurfaceView 是放在窗口 surface 之下、靠「挖洞」露出来的，
-     * 洞一旦因为任何一次重排被系统算错，露出来的就是这层黑 —— 声音继续、画面消失，
-     * 按返回触发一次彻底重建才恢复。原版没有这层黑，所以同样算错也看不出问题。
-     *
-     * 档位 3：只把窗口背景置空（根布局黑底保留）
-     * 档位 4：窗口背景置空 + 根布局黑底也去掉（最接近原版的窗口形态）
-     * 两个档位都需要**退出播放页再进**才生效（onCreate 才执行到这里）。
-     * 副作用：画面四周的留边会露出窗口壁纸（原版就是这个样子），属于预期。
-     */
-    private fun applyWindowShapeExperiment() {
-        /**
-         * ★默认路径：**什么都不做**，窗口形态完全交给主题（Theme.TVBox：windowBackground=@null、
-         * windowDisablePreview=true、无 windowAnimation）。这是官方形态，也是原版形态。
-         *
-         * 只在显式档位上保留实验能力，默认一个字符都不改窗口：
-         *   3 / 4 / 6 / 7 —— 仅用于对照取证，需要退出播放页再进
-         */
-        val exp = MpvDebug.experiment
-        if (exp == 7) {
-            runCatching { window.setFormat(android.graphics.PixelFormat.OPAQUE) }
-            runCatching { rootView?.setBackgroundColor(android.graphics.Color.BLACK) }
-            MpvDebug.log("[exp7] 实验档：不透明黑窗口 + 黑根布局")
-            return
-        }
-        if (exp == 3 || exp == 4) {
-                if (exp == 4) runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-            MpvDebug.log("[exp$exp] 实验档：仅清背景")
-            return
-        }
-        if (exp == 6) {
-            runCatching { window.setFormat(android.graphics.PixelFormat.TRANSLUCENT) }
-            runCatching { rootView?.setBackgroundColor(android.graphics.Color.TRANSPARENT) }
-            MpvDebug.log("[exp6] 实验档：窗口 TRANSLUCENT + 根布局透明")
-            return
-        }
-        MpvDebug.log("[exp$exp] 窗口形态走主题默认，不做任何运行时改动")
-    }
 
     private fun handleMenuKey() {
         val toEpisodes = Settings(host).fullscreenMenuKey == 1
@@ -2629,7 +2502,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
        只在每满 1 秒打一行，播放中零额外开销。 */
     private var frameLastLog = 0L
     private var surfGen = 0
-    private var startGen = 0
     private var lastSurfCreateAt = 0L
 
     // ★/debug 快照是在 NanoHttpd 线程里跑的函数式调用，直接读 EXO 会抛
@@ -2654,12 +2526,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun showControl(focusId: Int = 0, withTitle: Boolean = false) {
-        // 诊断档位 2：菜单键完全不呼出控制条。用来判断黑屏到底跟控制条有没有关系——
-        // 如果这个档位下按菜单仍然黑，那问题就不在控制条上，别再往这里改。
-        if (MpvDebug.experiment == 2) {
-            MpvDebug.log("[exp2] 菜单按下，按档位要求不呼出控制条 isMpv=${isMpvMode()}")
-            return
-        }
         // ★wasShown 必须在这里取：常驻 VISIBLE 之后 barShown() 只看 alpha，
         //   下面马上就把 alpha 抬到 1，若在那之后再判就恒为"已显示"，每次呼条都被幂等分支吞掉。
         val wasShown = barShown()
@@ -2714,11 +2580,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.timeBar)
                 ?.setPosition(currentPosMs())
         }
-        // 诊断档位 1：呼出控制条但不 requestFocus（原版是 requestFocus 的，这里只为做 A/B）
         var focusOk = false
-        if (MpvDebug.experiment != 1) {
-            focusOk = runCatching { findViewById<View>(target)?.requestFocus() == true }.getOrDefault(false)
-        }
+        focusOk = runCatching { findViewById<View>(target)?.requestFocus() == true }.getOrDefault(false)
         MpvDebug.log(
             "[bar] 呼出完成 alpha=${controlBar?.alpha} target=$target focusOk=$focusOk" +
                 " nowFocus=${host.currentFocus?.id}(${host.currentFocus?.javaClass?.simpleName})"
@@ -2730,7 +2593,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   不代表这一帧焦点已经在条里；下一按若走焦点系统（OK / 条内导航），就会打空。
         //   这里在下一帧补一次确认：只有在焦点仍为空或仍在根布局时才重试，避免把用户
         //   已经移进条内的焦点又拽回去。
-        if (!wasShown && MpvDebug.experiment != 1) {
+        if (!wasShown) {
             val want = target
             uiHandler.post {
                 val cur = host.currentFocus
@@ -2786,9 +2649,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                     " barAlpha=${controlBar?.alpha} → root ok=${host.currentFocus === rootView}"
             )
         }
-        // 默认形态：只降 alpha。GONE 会让窗口层绘制内容区域变化（还要多一轮 measure/layout），
-        // 而这一帧正是"收条黑一下"的来源。档位 8 才是旧的 GONE 形态。
-        if (MpvDebug.experiment == 8) controlBar?.visibility = View.GONE
+        // 原版 hideControl 只有 alpha 动作；GONE 会让窗口层绘制内容区域变化（多一轮 measure/layout）
         controlBar?.alpha = 0f
         findViewById<View>(R.id.playTitle)?.alpha = 0f
         runCatching {
@@ -2914,42 +2775,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }
     }
 
-    private var treeDumped = 0
-    private fun dumpPanelTree(tag: String) {
-        if (treeDumped >= 3) return
-        treeDumped++
-        runCatching {
-            val root = window.decorView
-            fun walk(v: View, d: Int) {
-                if (d > 6) return
-                val id = runCatching {
-                    if (v.id == View.NO_ID) "-" else resources.getResourceEntryName(v.id)
-                }.getOrDefault("?")
-                val bgCls = if (v.background == null) "-" else v.background.javaClass.simpleName
-                val opaque = runCatching { v.javaClass.getMethod("isOpaque").invoke(v) as Boolean }.getOrNull()
-                MpvDebug.log("[panel] $tag ${"  ".repeat(d)}${v.javaClass.simpleName} id=$id " +
-                    "vis=${v.visibility} alpha=${v.alpha} bg=$bgCls opaque=$opaque size=${v.width}x${v.height}")
-                if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i), d + 1)
-            }
-            walk(root, 0)
-            runCatching {
-                val id = runCatching { resources.getIdentifier("exo_shutter", "id", packageName) }.getOrDefault(0)
-                if (id != 0) {
-                    val sh = findViewById<View>(id)
-                    MpvDebug.log("[panel] $tag ★快门 exo_shutter vis=${sh?.visibility} alpha=${sh?.alpha} " +
-                        "bg=${sh?.background?.javaClass?.simpleName} size=${sh?.width}x${sh?.height} " +
-                        "shown=${sh?.isShown}")
-                }
-                val pv = host.findViewById<View>(R.id.videoFrame)
-                MpvDebug.log("[panel] $tag ★playView vis=${pv?.visibility} alpha=${pv?.alpha} " +
-                    "bg=${pv?.background?.javaClass?.simpleName} size=${pv?.width}x${pv?.height}")
-            }
-            MpvDebug.log("[panel] $tag 窗口 hasFocus=${root.hasWindowFocus()} winVis=${root.windowVisibility} " +
-                "svShown=${currentSurface()?.isShown} svAlpha=${currentSurface()?.alpha} " +
-                "decorBg=${root.background?.javaClass?.simpleName}")
-        }
-    }
-
     private fun focusRoot(reason: String) {
         var v: View? = rootView
         if (v == null) {
@@ -3023,7 +2848,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun togglePlayPause() {
         val wasPlaying = session.isPlaying()
         session.toggle()
-        pendingPauseIntent = null
         val nowPaused = !session.isPlaying()
         applyPauseUi(nowPaused)
         MpvDebug.log(
@@ -3157,8 +2981,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         if (dur > 0L) target = target.coerceAtMost(dur)
         MpvDebug.log("[key] 媒体键 seek dir=$dir → target=${target}ms dur=${dur}ms")
         if (!contentReady()) {
-            pendingJumpMs = target
-            showJumpCenter(target)
+            // 原版 VideoActivity.dispatchKeyEvent:5974 用 service() != null 挡掉未就绪的按键：
+            // 不记账、不补发、不提示。
+            MpvDebug.log("[key] 内核未就绪，媒体键 seek 不处理 target=$target")
             return
         }
         seekBaseMs = currentPosMs()
@@ -3344,12 +3169,12 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 // 网速同一份采样喂两个地方：右下角 netspeed + 转圈下面的 traffic
                 val sp = trafficText()
                 netTv?.text = sp
-                if (progressShown) progText?.text = sp.ifBlank { "加载中" }
+                progText?.text = sp.ifBlank { "加载中" }
                 if (endingMs > 0 && dur > 0 && !endingDone && pos + endingMs >= dur) {
                     endingDone = true
                     if (directUrl.isBlank()) switchEpisode(1)
                 }
-                // 原版 Clock.java:66 是 1000ms
+                // 原版 Clock.java:25 是 1000ms
                 uiHandler.postDelayed(this, 1000)
             }
         }
@@ -3460,30 +3285,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // 直接打在这一拍上。这就是"必须先按一次菜单之后所有键才正常"的全部来源：
         // 那一下菜单把窗口的首次合成代价付掉了，之后窗口一直稳，键就一直灵。
         //
-        // 处理：把闸门推广到所有操作键。未就绪时挂起（500ms 兜底），窗口获焦后立刻补执行。
-        // 不吞键、不加提示、不改任何视觉。
-        if (!windowReady() && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
-            event.keyCode in userKeys
-        ) {
-            pendingKeyCode = event.keyCode
-            MpvDebug.log("[key] 窗口未就绪，挂起 kc=${event.keyCode}")
-            uiHandler.removeCallbacks(flushPendingKeyRun)
-            uiHandler.postDelayed(flushPendingKeyRun, 500)
-            return true
-        }
         // 控制条可见时先确保焦点在条内：起播/表面变化会把焦点抢回根布局，
         // 那一瞬间开始方向键与 OK 就全落在根上，看起来就是"没反应"。
-        // 菜单键（对齐原版 VideoActivity.dispatchKeyEvent:1686-1687 + KeyUtil.isMenuKey:35）
+        // 菜单键（对齐原版 5.0.8 VideoActivity.java:5630-5641 两分支 + KeyUtil.isMenuKey:43）
         //   Setting.fullscreenMenuKey == 0 → onToggle()：控制栏显隐
         //   == 1 → onEpisodes()：弹选集并收起控制栏
         if (isMenuKeyCode(event.keyCode)) {
-            // 原版只认 ACTION_UP。这里 DOWN/UP 都接、400ms 内只算一次：
-            // 只发 UP 的遥控器能响应，只发 DOWN 的也能响应，正常成对的不会双触发。
-            if (event.action == KeyEvent.ACTION_DOWN) {
-                if (event.repeatCount == 0) fireMenuKeyOnce()
-            } else if (event.action == KeyEvent.ACTION_UP) {
-                fireMenuKeyOnce()
-            }
+            // 对齐 KeyUtil.isMenuKey:43 —— 只认 ACTION_UP（isActionUp && KEYCODE_MENU）
+            if (event.action == KeyEvent.ACTION_UP) fireMenuKeyOnce()
             return true
         }
 
@@ -3646,12 +3455,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
                     if (loading) {
-                        // ★起播前按 OK：内核还是空的，toggle 一定是空操作。
-                        //   这里只把"起播后不要自动播"记下来（playUrl 里 wantPlay 读它），
-                        //   并复用原版居中提示给可见反馈。
-                        pendingPauseIntent = true
-                        MpvDebug.log("[key] 起播前 OK → 记 pendingPauseIntent bar=${barShown()}")
-                        showPlayCenter()
+                        // 原版 VideoActivity.onKeyCenter:6280 —— 空播放器 → onRefresh()：重新起播。
+                        // 三分支：isPlaying → onPaused；isEmpty → onRefresh；否则 → onPlay。
+                        MpvDebug.log("[key] 起播前 OK → 重新起播（原版 onKeyCenter 的 onRefresh 分支）")
+                        startPlayback()
                     } else {
                         togglePlayPause()
                     }
@@ -3794,17 +3601,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             (rootView ?: findViewById<View>(android.R.id.content))?.requestFocus()
         }
         if (hasFocus) {
-            // 窗口第一次就绪：把"进页面那一拍按下的菜单"补执行（见 fireMenuKeyOnce 的闸门说明）
-            if (pendingMenu) {
-                pendingMenu = false
-                MpvDebug.log("[key] 窗口就绪，补执行挂起的菜单")
-                handleMenuKey()
-            }
-            // 同理：窗口未就绪时按下的 ←→/OK 也在这里补执行（见 dispatchKeyEvent 的闸门说明）
-            if (pendingKeyCode != 0) {
-                uiHandler.removeCallbacks(flushPendingKeyRun)
-                flushPendingKey()
-            }
             // ★这里绝不能再调 setLocalFocus：窗口此刻已经持有焦点，再请求一次会让
             //   WindowManager 重新派发焦点事件 → 又进 onWindowFocusChanged → 无限循环。
             //   真机日志里就是 [ui] 窗口焦点 / [win] setLocalFocus 成对刷屏、每帧两条，
@@ -3831,7 +3627,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /**
      * 切后台：暂停**当前内核**并落盘。
-     * 对齐原版 VideoActivity:1826-1831（onPause → setBackground(true) + mPlayers.pause() + mClock.stop()）。
+     * 5.6.0 VideoActivity 实测没有覆写 onPause（全仓只有 onPaused:5788），这一段不是照搬原版，按官方 Player 契约实现：
      * 原版是统一暂停，不分内核；之前我们只 pause mpv，EXO 在后台会继续跑。
      */
     fun onHostPause() {
@@ -3849,7 +3645,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /**
      * 回到前台：恢复播放。
-     * 对齐原版 VideoActivity:1818-1823（onResume → setBackground(false) + onPlay()），
+     * 5.6.0 VideoActivity 实测没有覆写 onResume（全仓只有 onPaused:5788），所以这一段不是照搬原版，按官方 Player 契约实现：
      * 而 onPlay() 里做的是「加 FLAG_KEEP_SCREEN_ON + mPlayers.play()」。
      *
      * 之前整个 PlayActivity 没有 onResume：onPause 里 pause 过之后就再没人叫醒，
@@ -3909,7 +3705,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         mpv = null
         sniffer?.cancel()
         sniffer = null
-        runCatching { uiHandler.removeCallbacks(flushPendingKeyRun) }
         runCatching { videoHost?.releaseOwner() }
         // ★宿主那一份引用必须一起清。
         //   PlayLayer.player 与 host.player 是同一个实例（rebuildPlayerInternal 会回写），

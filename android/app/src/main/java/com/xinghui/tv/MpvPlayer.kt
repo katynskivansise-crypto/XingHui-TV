@@ -87,9 +87,6 @@ class MpvPlayer(
 
     private var inited = false
     private var surfaceReady = false
-    private var attachedSurface: android.view.Surface? = null
-    private var lastSurfaceW = 0
-    private var lastSurfaceH = 0
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
@@ -156,7 +153,6 @@ class MpvPlayer(
             } else if (surfaceReady) {
                 MpvDebug.log("[mpv] textureLost（TextureView 被回收）")
                 surfaceReady = false
-                attachedSurface = null
                 runCatching {
                     core.setPropertyString("vo", "null")
                     core.setOptionString("force-window", "no")
@@ -211,7 +207,6 @@ class MpvPlayer(
     private fun onSurfaceDestroyedForHost() {
         MpvDebug.log("[mpv] VideoHost 转发 surfaceDestroyed inited=$inited")
         surfaceReady = false
-        attachedSurface = null
         if (inited) runCatching { core.detachSurface() }
     }
 
@@ -264,10 +259,10 @@ class MpvPlayer(
                 core.setOptionString("target-colorspace-hint", "no")
             }
             core.setOptionString("ao", "audiotrack,opensles")
-            // 官方 MPVView.kt:97 无条件设。不设时安卓会把这条音频流当成普通/通知类，
+            // 官方 MPVView.kt 无条件设。不设时安卓会把这条音频流当成普通/通知类，
             // 表现为遥控器音量键调的是铃声而不是播放音量、HDMI/蓝牙音频路由也可能不对。
             core.setOptionString("audio-set-media-role", "yes")
-            // 官方 MPVView.kt:101 无条件设：蓝光盘里同一部片的多个 edition 合并成单轨，
+            // 官方 MPVView.kt 无条件设：蓝光盘里同一部片的多个 edition 合并成单轨，
             // 否则遇到这类源会多出一条轨道、选轨界面里看着莫名其妙。点播源基本遇不到，设了无害。
             core.setOptionString("flatten-editions", "yes")
             // 只让这些编码走硬解，其余走软解，避免 mediacodec 对不认识的编码直接报错
@@ -275,7 +270,7 @@ class MpvPlayer(
             // 硬解开关是 mpv 自己的偏好（官方 key hardware_decoding），和 EXO 的软/硬解各存各的
             val mpvSet = Settings(activity)
             core.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec" else "no")
-            // 官方 MPVView.kt:37-46 —— API 23+ 用 disp.mode.refreshRate 显式覆盖 display-fps。
+            // 官方 MPVView.kt —— API 23+ 用 disp.mode.refreshRate 显式覆盖 display-fps。
             // 不设的话 mpv 自己去"估"面板刷新率，估错会出现两件事：
             //   1) 渲染节拍与面板对不上（24fps 内容在 60Hz 面板上轻微抖、偶发吞帧）
             //   2) display-fps 未知时，render API 那条路径每帧都要按 target-time 保守等待
@@ -305,33 +300,33 @@ class MpvPlayer(
             core.setOptionString("ytdl", "no")
             core.setOptionString("cache", "yes")
             val cacheMb = if (mpvSet.mpvCacheMb in 32..64) mpvSet.mpvCacheMb else 64
-            // 用纯字节数而不是 "64MiB" 后缀：官方 MPVView.kt:104 就是 ${cacheMegs * 1024 * 1024}，
+            // 用纯字节数而不是 "64MiB" 后缀：官方 MPVView.kt 就是 ${cacheMegs * 1024 * 1024}，
             // 后缀写法依赖 mpv 的单位解析，一旦不被识别会静默忽略整条选项、缓存其实没生效。
             val cacheBytes = cacheMb * 1024 * 1024
             core.setOptionString("demuxer-max-bytes", "$cacheBytes")
-            // 官方 MPVView.kt:104-105 是 max-bytes 与 max-back-bytes 一起设的。
+            // 官方 MPVView.kt 是 max-bytes 与 max-back-bytes 一起设的。
             // 只设前向缓存时，往回拖/倒退播放会重新走网络，表现为卡一下。
             core.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
-            // 官方 MPVView.kt:114：播放位置由宿主自己管（我们记在 HistoryStore），
+            // 官方 MPVView.kt：播放位置由宿主自己管（我们记在 HistoryStore），
             // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
             core.setOptionString("save-position-on-quit", "no")
-            // 官方 MPVView.kt:98-99 用 tls-verify=yes + filesDir/cacert.pem。
+            // 官方 MPVView.kt 用 tls-verify=yes + filesDir/cacert.pem。
             // 我们没有这个 ca bundle，留 yes 会让 https 片源在证书链不全时直接失败，
             // 电视盒子场景（片源多变、证书不规范）取 no 更实用；只连片源，不涉及登录凭据。
             core.setOptionString("tls-verify", "no")
-            // 直通（官方 MpvPlayer.java:1778 `setOption("audio-spdif", config.audioSpdif())`）：
+            // 直通（官方 MpvPlayer.java `setOption("audio-spdif", config.audioSpdif())`）：
             //   AC3/EAC3/DTS 这类码流原样交给 HDMI，盒子不解码，功放才拿得到多声道。
             //   不设的话这些音轨会被 mpv 解成 PCM 立体声，听感直接降级。
             core.setOptionString("audio-spdif", "ac3,eac3,dts,dts-hd,truehd")
             // 字幕自动挂载（官方默认 fuzzy）：同名字幕文件/内嵌字幕自动识别，
             //   关掉的话 MKV 里的内嵌字幕要手动选，电视盒子上基本等于没有。
             core.setOptionString("sub-auto", "fuzzy")
-            // 官方 MPVView.kt:23 是无条件设 profile=fast（关掉 gradfun/deband 这类高成本滤镜）。
+            // 官方 MPVView.kt 是无条件设 profile=fast（关掉 gradfun/deband 这类高成本滤镜）。
             // 这里做成设置页开关：T1 这类低端芯片默认开，想拿画质细节时可以关掉。
             if (mpvSet.mpvFastProfile) {
                 core.setOptionString("profile", "fast")
             }
-            // 缩放算法（官方 MPVView.kt:48-59 的 video_scale / video_downscale / video_tscale）。
+            // 缩放算法（官方 MPVView.kt 的 video_scale / video_downscale / video_tscale）。
             // 官方只在偏好非空时下发，空就交给 mpv 默认；这里保持同样的语义。
             // 注意：1080p 片源在 1080p 输出上不触发缩放，这三个值对那种场景完全没作用；
             // 真正生效的是 4K→1080p（dscale）和 720p→1080p（scale）。
@@ -406,8 +401,6 @@ class MpvPlayer(
     }
 
     private fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        lastSurfaceW = width
-        lastSurfaceH = height
         MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format")
         if (!inited) return
         core.updateSurfaceSize(width, height)
@@ -416,9 +409,8 @@ class MpvPlayer(
     private fun onSurfaceDestroyed(holder: SurfaceHolder) {
         MpvDebug.log("[mpv] surfaceDestroyed(SurfaceView) inited=$inited")
         surfaceReady = false
-        attachedSurface = null
         if (inited) {
-            // 官方 BaseMPVView.surfaceDestroyed 原文（BaseMPVView.kt:98-103）：
+            // 官方 BaseMPVView.surfaceDestroyed 原文（BaseMPVView.kt）：
             //   MPVLib.setPropertyString("vo", "null")
             //   MPVLib.setPropertyString("force-window", "no")
             //   MPVLib.detachSurface()
@@ -444,11 +436,8 @@ class MpvPlayer(
     }
 
     private fun attachSurface(surface: Surface, width: Int, height: Int, first: Boolean) {
-        attachedSurface = surface
-        lastSurfaceW = width
-        lastSurfaceH = height
         runCatching {
-            // 官方 BaseMPVView.surfaceCreated 原文（BaseMPVView.kt:90-95）：
+            // 官方 BaseMPVView.surfaceCreated 原文（BaseMPVView.kt）：
             //   恢复视频输出 → setPropertyString("vo", voInUse)
             // 然后才是 attachSurface + android-surface-size（尺寸由 MpvCore 内部一并设好）。
             core.setPropertyString("vo", "gpu")
@@ -519,7 +508,6 @@ class MpvPlayer(
         // 否则释放后视图的可见性变化还会回调进来，把已经 destroy 的 libmpv 再 init 一遍
         // 已不再自注册 holderCallback（主权在 VideoHost），这里无需移除；
         // 保留一行解释，避免以后又有人加回去。
-        attachedSurface = null
         runCatching { (host as? android.view.TextureView)?.removeCallbacks(textureWatch) }
         runCatching { ownedSurface?.release() }
         ownedSurface = null
@@ -992,7 +980,7 @@ class MpvPlayer(
      * IllegalStateException —— 基类默认 handleSetTrackSelectionParameters 就是
      * "Missing implementation to handle COMMAND_SET_TRACK_SELECTION_PARAMETERS"。
      * 声明的集合必须与实现一一对应，这是契约，不是能力清单。
-     * （对齐原项目 androidx/media3/mpvplayer/MpvPlayer.java:139-158 的写法）
+     * （对齐原项目 androidx/media3/mpvplayer/MpvPlayer.java 的写法）
      */
     private val commands: Player.Commands = Player.Commands.Builder()
         .addAll(

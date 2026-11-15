@@ -271,10 +271,8 @@ class MainActivity : Activity() {
         detailListener?.let { runCatching { p.removeListener(it) } }
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                // 同一个错误可能连发，800ms 内只处理一次，避免疯狂切源
-                val now = System.currentTimeMillis()
-                if (now - lastErrorMs < 800) return
-                lastErrorMs = now
+                // 原版没有错误去重（5.6.0 无 errorCount/playFail，5.0.8 无 800 常量）：
+                // 一次起播只由 App.post(runnable, TIMEOUT_PLAY) 的起播窗口兜底，错误回调照常处理。
                 Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，走自动换源")
                 handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
                     reason = "播放器错误 ${error.errorCodeName}", depth = 0)
@@ -581,10 +579,10 @@ class MainActivity : Activity() {
                 )
             }
             .build().also {
-                // 官方 Players.java:158：HDMI / 蓝牙音频断开时自动暂停
+                // 官方 Players.java：HDMI / 蓝牙音频断开时自动暂停
                 it.setHandleAudioBecomingNoisy(true)
                 // 内嵌预览同样请求音频焦点：进播放页时播放页抢焦点，这一路会自动 LOSS → 暂停，
-                // 不再依赖手动 pauseInlinePlayback 兜底（原版 Players.java:155 同一句）。
+                // 不再依赖手动 pauseInlinePlayback 兜底（原版 Players.java 同一句）。
                 it.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
                 attachPreviewTo(it)
             }
@@ -832,7 +830,6 @@ class MainActivity : Activity() {
      * 我们之前只在 onPlayerError 里换源，而「解析返回空 url」「内核不支持该源」这两种
      * 失败发生在起播之前，根本触发不到 onPlayerError，所以自动换源永远不生效、只能手动点。
      */
-    private var lastErrorMs = 0L
     private fun handlePlayFailure(idx: Int, auto: Boolean, reason: String, depth: Int) {
         val v = vod ?: return
         val lines = v.parseLines()
@@ -981,7 +978,7 @@ class MainActivity : Activity() {
         val resumeMs = runCatching {
             HistoryStore(this).marks(HistoryStore.keyOf(v.vodId, v.vodName, ep.second), ep.second)[2]
         }.getOrDefault(0L)
-        // 对齐原版 VideoActivity:1269 —— 起播之前就把 History 建好，不看解析成败。
+        // 对齐原版 5.6.0 VideoActivity.java:3655（`mHistory = mHistory == null ? createHistory(item) : mHistory`，定义在 :3705；startPlayer 调用在 :1234）—— 起播之前就把 History 建好，不看解析成败。
         // 放在解析之后写的话，解析慢、解析失败、看两眼就退出，三种情况都不留记录。
         runCatching {
             HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)

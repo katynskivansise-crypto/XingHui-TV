@@ -130,6 +130,35 @@
             android:textSize="16sp" />
     </LinearLayout>
 
+    <!-- 播放失败提示：对齐原版 view_widget_vod.xml 的 @id/error（顺序在 center 之前）。
+         原版结构：LinearLayout 垂直居中、background=@drawable/shape_widget、
+         内含 56dp 的 @drawable/ic_widget_error 与 16sp 居中白字（@id/text）。
+         显隐沿用本页其它覆盖层的做法（常驻 VISIBLE + alpha），不切 GONE，避免改窗口绘制区域。 -->
+    <LinearLayout
+        android:id="@+id/playError"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:alpha="0"
+        android:background="@drawable/shape_widget"
+        android:gravity="center"
+        android:orientation="vertical">
+
+        <ImageView
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:contentDescription="@null"
+            android:src="@drawable/ic_widget_error" />
+
+        <TextView
+            android:id="@+id/playErrorText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:textColor="@color/white"
+            android:textSize="16sp" />
+    </LinearLayout>
+
     <!-- 暂停时居中提示：对齐原版 view_widget_vod.xml 的 @id/center。
          结构按原版规格还原：外形 LinearLayout（圆角半透明黑 background=@drawable/shape_widget，padding=16dp），
          上面 56dp 的 action 图标（暂停时是 ic_widget_play，语义为「按 OK 继续播放」），
