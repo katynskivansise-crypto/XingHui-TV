@@ -526,13 +526,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // 切回 EXO 时 rebuildPlayer() 会补建，所以这里可以省。
         if (!isMpvMode()) {
             val tExo0 = SystemClock.uptimeMillis()
-            player = ExoPlayer.Builder(host).build().also { p ->
-                // 对齐原版 Players.java：setAudioAttributes(AudioAttributes.DEFAULT, !isPlayWithOthers())
-                // 原版默认 play_with_others=false → 第二参数 true = 请求音频焦点。
-                // 少了这一步，详情页小窗和播放页互不压制，就是「两个不同的声音」。
-                p.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
-                session.adoptExo(p)
-            }
+            // ★只能走 rebuildPlayerInternal：它开头第一句就「宿主演的那一颗存在就复用」，
+            //   而且是唯一带全套配置的构建路径（RenderersFactory / TrackSelector / LoadControl / MediaSourceFactory）。
+            //   这里原来是裸 ExoPlayer.Builder(host).build()，等于绕过复用又新建了第二颗：
+            //   新那颗 takeExo 时把宿主那颗的画面层摘走（setPlayer(null)），但宿主那颗没人暂停 ——
+            //   声音继续放、新那颗还没媒体项，真机表现正是「只听见声音、画面冻在一帧」；
+            //   退出再进时宿主那颗还在、复用命中，才恢复正常。
+            player = rebuildPlayerInternal(activeHeaders)
             applyCaptionStyle()
             attachPlayerListeners()
             MpvDebug.log("[perf] ExoPlayer构建=${SystemClock.uptimeMillis() - tExo0}ms")
@@ -1470,13 +1470,19 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun rebuildPlayerInternal(headers: Map<String, String>): ExoPlayer? {
+        activeHeaders = headers
         val existing = host.player
         if (existing != null) {
             MpvDebug.log("[player] 复用宿主那一颗（headers 已下沉到 MediaSource），不新建")
-            activeHeaders = headers
+            // ★复用同样要接管：绑定画面层、挂监听、套字幕样式。
+            //   原来这里只 return existing，播放层拿到的是一个"别的层绑着 surface、监听也不在这"的实例。
+            //   原版全程只有一颗 player（mBinding.video 里那一个），小窗→全屏只改容器尺寸。
+            player = existing
+            session.adoptExo(existing)
+            applyCaptionStyle()
+            attachPlayerListeners()
             return existing
         }
-        activeHeaders = headers
         val builder = ExoPlayer.Builder(host)
         builder.setRenderersFactory(buildRenderersFactory())
         builder.setTrackSelector(buildTrackSelector())

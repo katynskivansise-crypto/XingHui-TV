@@ -971,7 +971,8 @@ class MainActivity : Activity() {
         setPreviewVisible(true)
         findDetail<View>(R.id.detailImage)?.visibility = View.GONE
         showVodInfo(ep.first)
-        if (!quiet) Toast.makeText(this, "准备播放 ${ep.first}", Toast.LENGTH_SHORT).show()
+        // 原版没有这条提示：VideoActivity.onItemClick 只做 shouldEnterFullscreen 判断与
+        // selectEpisode，任何一步都不弹 Toast。删掉（历史注释本就记着"这句是自造的"）。
         // 续播：原版 VideoActivity 打开即 setPosition(Math.max(opening, history.position))。
         // 这里只在「和上次是同一集」时才带位置（HistoryStore.position 内部会核对集地址），
         // 换集就是从 0 开始，不会出现点第 3 集跳到第 1 集进度的情况。
@@ -1022,7 +1023,11 @@ class MainActivity : Activity() {
                 }
                 // 画面绑定同样要在这里确认：小窗能出画面靠的是这块常驻 SurfaceView 上有播放器，
                 // 只 prepare 不绑定 = 只有声音、画面留在海报上。
-                if (!previewAttached()) attachPreviewTo(p)
+                // ★无条件重绑（setPlayer 内部 `old === p` 会短路，幂等）。
+                //   原来写的是 `if (!previewAttached())`，而 previewAttached 只判断
+                //   `surfaceConsumer != null`，不判断是不是**这一颗** —— 一旦玩家实例换过，
+                //   这句就误判成"已绑"，新实例一个 surface 都没拿到：只有声音、画面留在旧帧上。
+                attachPreviewTo(p)
                 val ok = runCatching {
                     // mediaId 显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」。
                     p.setMediaItem(MediaItem.Builder().setUri(url).setMediaId(url).build())
