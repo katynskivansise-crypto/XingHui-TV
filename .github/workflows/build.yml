@@ -17,7 +17,8 @@ on:
 env:
   RUST_VERSION: stable
   JAVA_VERSION: 17
-  ANDROID_COMPILE_SDK: 37
+  # 36 是 sdkmanager 当前发布的最高 platform（37 只有 canary，不可用于稳定构建）
+  ANDROID_COMPILE_SDK: 36
   # build-tools 独立于 compileSdk 选版本：它只负责 aapt2、zipalign、apksigner。
   ANDROID_BUILD_TOOLS: 36.0.0
   ANDROID_NDK_VERSION: 26.1.10909125
