@@ -176,6 +176,26 @@ class PlaybackSession(
         }.getOrDefault(false)
     }
 
+    /**
+     * EXO 起播（MediaSource 版）。
+     * ★与 playExo 的区别：headers 已经在 MediaSource 的 DataSource 里，播放器实例不重建。
+     *   这是"同一颗播放器、只换这一条媒体项"的正确做法（原版 Players.java 同构）。
+     */
+    fun playExoSource(
+        source: androidx.media3.exoplayer.source.MediaSource,
+        startMs: Long,
+        autoPlay: Boolean,
+    ): Boolean {
+        val p = exo ?: return false
+        return runCatching {
+            p.setMediaSource(source)
+            if (startMs > 0L) p.seekTo(startMs)
+            p.prepare()
+            p.playWhenReady = autoPlay
+            true
+        }.getOrDefault(false)
+    }
+
     /** mpv 起播（实例由 Activity 建，选项在那一侧） */
     fun playMpv(
         url: String,

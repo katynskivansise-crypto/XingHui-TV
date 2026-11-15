@@ -98,6 +98,10 @@ class VideoHost(
      * 否则 mpv 还握着这块 surface，EXO 的解码器接上去就是两家同时输出。
      */
     fun takeExo(p: Player?) {
+        // ★接手前先摘掉上一个所有者（包括"退出时交接给小窗"的那一个）。
+        //   PlayerView 只有一个 player 位；现在小窗也走 setPlayer 了，
+        //   不摘就 attach 新的，等于两个引擎同时以为自己拥有这块面。
+        if (bound != null && bound !== p) setPlayer(null)
         if (owner == Owner.NATIVE) {
             runCatching { nativeRelease?.invoke() }
             nativeRelease = null
@@ -109,10 +113,9 @@ class VideoHost(
 
     /** native（mpv）接管画面。EXO 必须先 clear 掉，理由同上。 */
     fun takeNative(attach: (SurfaceHolder) -> Unit, release: () -> Unit): Boolean {
-        if (owner == Owner.EXO) {
-            setPlayer(null)
-            owner = Owner.NONE
-        }
+        // 同上：不论 owner 是谁，只要 PlayerView 上还挂着引擎就先摘掉
+        if (bound != null) setPlayer(null)
+        if (owner == Owner.EXO) owner = Owner.NONE
         nativeAttach = attach
         nativeRelease = release
         val h = surfaceView.holder

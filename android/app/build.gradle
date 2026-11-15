@@ -1,18 +1,21 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
-    id 'org.jetbrains.kotlin.plugin.compose'
 }
 
 android {
     namespace 'com.xinghui.tv'
-    // Compose BOM 2026.09.00(1.12.1) 与 core-ktx 1.19.1 的 aar-metadata 要求 compileSdk>=37；
-    // AGP 9.5 支持的最高 API 级别正好是 37。targetSdk 仍保持 36（运行时行为不变）。
+    // Compose 已移除：它是空挂载（0 个 @Composable、0 处 androidx.compose 引用、0 个 ComposeView），
+    // 曾经只挂在 build.gradle 里（插件 + BOM + ui + material3 + tv-material）从未产出界面。
+    // 现在约束 compileSdk 的是 core-ktx 1.19.1 的 aar-metadata（要求 >=37）；
+    // AGP 9.5 支持的最高 API 级别正是 37。targetSdk 保持 36（运行时行为不变）。
+    // 若把 core-ktx 降到 1.17.0，compileSdk 可回 36 —— 但那需要另一轮验证，暂不动。
     compileSdk 37
 
     defaultConfig {
         applicationId "com.xinghui.tv"
-        minSdk 23   // Compose ui/foundation/tv-material 的 minSdkVersion 实测均为 23
+        minSdk 23   // 由依赖下限决定：core-ktx 1.19.1 与 recyclerview 1.4.0 的 minSdk 都是 23
+                    // （media3/appcompat/profileinstaller 只要 21，不是约束项）。与 Compose 无关。
         targetSdk 36
         versionCode 1
         versionName "0.1.0"
@@ -36,10 +39,6 @@ android {
         }
     }
 
-    buildFeatures {
-        compose = true
-    }
-
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -53,22 +52,19 @@ android {
 }
 
 dependencies {
-    // ---- Jetpack Compose（UI 层） ----
-    implementation platform('androidx.compose:compose-bom:2026.09.00')
-    implementation 'androidx.compose.ui:ui'
-    implementation 'androidx.compose.ui:ui-tooling-preview'
-    implementation 'androidx.compose.material3:material3'
-    // TV 专用组件（焦点系统 / TvLazyColumn / TV 主题），不在 bom 内，须显式版本
-    implementation 'androidx.tv:tv-material:1.1.0'
-    // Baseline Profile：Compose 是库不是平台组件，低端设备靠它在安装时 AOT 关键路径
+    // Baseline Profile：低端设备靠它在安装时 AOT 关键路径
     implementation 'androidx.profileinstaller:profileinstaller:1.4.1'
-    debugImplementation 'androidx.compose.ui:ui-tooling'
 
     // org.json / logger 已移除：前者 Android framework 内置（外部 jar 会被 BootClassLoader 抢先，永远用不上），
     // 后者 2017 停维护且全项目仅 2 处调用，改用 android.util.Log。
     implementation 'androidx.core:core-ktx:1.19.1'
     implementation 'androidx.appcompat:appcompat:1.8.0'
     implementation 'androidx.recyclerview:recyclerview:1.4.0'
+    // ★UI 基础：列表与网格一律 RecyclerView（androidx.recyclerview 1.4.0）。
+    //   原版的线路行/集数网格用的是 leanback 的 HorizontalGridView / VerticalGridView，
+    //   那套 API 在 1.1.0（2023）之后基本停更；而它的网格本质就是
+    //   RecyclerView + 特定 LayoutManager + 焦点记忆 —— 效果等价，不引入这个依赖。
+    //   焦点态由 selector_*.xml 提供（与原版同一套 drawable），观感一致。
     implementation 'androidx.media3:media3-exoplayer:1.11.1'
     implementation 'androidx.media3:media3-ui:1.11.1'
     // 流媒体扩展：DefaultMediaSourceFactory 靠反射查找这三个工厂类。

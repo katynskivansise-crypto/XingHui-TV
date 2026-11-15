@@ -52,8 +52,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     fun prepare(a: android.content.Intent) { args = a }
 
     /** 把当前引擎原样交回宿主（退出播放层时用，不 release、不重建） */
-    fun takePlayer(): ExoPlayer? { val p = player; player = null; return p }
-
     /**
      * 当前内核是 mpv 时它手里的实例。
      * ★退出播放层必须把它交出去：takePlayer() 只能拿 ExoPlayer，mpv 模式拿不到，
@@ -61,6 +59,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      *   现场就是"小窗像暂停一样，只有声音"。
      */
     fun mpvInstance(): MpvPlayer? = if (isMpvMode()) mpv else null
+
+    /** 详情页挂错误回调用：当前真正在播的那颗（ExoPlayer 或 MpvPlayer） */
+    fun currentPlayer(): androidx.media3.common.Player? =
+        if (isMpvMode()) (mpv ?: player) else (player ?: mpv)
 
     /** gate 日志用：本层是否已经 inflate 过（第二次进入时为 true） */
     fun isAttached(): Boolean = attached
@@ -70,10 +72,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * ★以前退出只把 EXO 交回宿主，没有让 VideoHost 交权，owner 一直停在 EXO / NATIVE；
      *   宿主小窗再用 setVideoSurfaceView 挂同一块 surface，就变成两家抢一块面。
      */
-    fun releaseSurface() {
-        runCatching { videoHost?.releaseOwner() }
-    }
-
     /**
      * 解析 Intent 字段。
      * ★从 bind() 里抽出来的：bind() 只 inflate 一次（attached 后立刻 return），
@@ -211,32 +209,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      *   缺这一步时 PlayLayer.player 恒为 null，onHostResume 里的 player?.play() 是空操作 ——
      *   真机表现就是「从播放页回详情页后，再点集数进不去播放页」。
      */
-    fun reconnect(p: ExoPlayer?) {
-        // 首次进入：bind 会自己建引擎，这里什么都不做
-        if (!attached) return
-        // 只补空位。二次进入时 player 已被 takePlayer() 置空，才需要从宿主接回；
-        // 不要覆盖本层自己建的实例（会丢一个没人释放的 ExoPlayer）。
-        if (p != null && player == null) player = p
-        if (isMpvMode()) {
-            // mpv 复用时要重新交主权（releaseSurface 已经把 VideoHost 的 native 回调清掉了）
-            val m = mpv
-            if (m != null) videoHost?.let { vh -> runCatching { m.bindToHost(vh) } }
-        } else {
-            // EXO 模式兜底：万一宿主那边也没有实例，就地建一颗，否则起播无从谈起
-            if (player == null) {
-                player = ExoPlayer.Builder(host).build().also { p2 ->
-                    p2.setAudioAttributes(androidx.media3.common.AudioAttributes.DEFAULT, true)
-                    session.adoptExo(p2)
-                }
-                attachPlayerListeners()
-            }
-            player?.let { videoHost?.takeExo(it) }
-        }
-        MpvDebug.log("[life] reconnect kernel=${if (isMpvMode()) "mpv" else "exo"} " +
-            "player=${if (player != null) "ok" else "null"} mpv=${if (mpv != null) "ok" else "null"}")
-    }
-
-
     /** 承接原来 46 处 window.xxx：播放层用的就是宿主的窗口，不存在第二个窗口 */
     private val window get() = host.window
     /** 承接 14 处 runOnUiThread（lambda 走 Runnable 的 SAM 转换） */
@@ -1353,18 +1325,26 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             startMpv(url, effHeaders, at)
             return
         }
-        // header 与当前播放器不一致时重建（播放接口返回的 UA/Referer 需注入数据源）；
-        // player 为 null 时（mpv 内核对下我们不再预建 EXO）也必须补建，否则这条分支什么都不会播
-        if (player == null || effHeaders != activeHeaders) {
+        // ★只有"还没有播放器实例"才建。headers 差异不再触发重建 ——
+        //   它现在只作用于本次起播的 MediaSource（见 buildSourceFactory 的注释）。
+        //   重建播放器 = 摘画面 + 重建输出面，是"进页面黑一下 / 卡一下 / 残留上一帧"的来源。
+        if (player == null) {
             rebuildPlayer(effHeaders)
         }
+        activeHeaders = effHeaders
         val itemBuilder = MediaItem.Builder().setUri(url).setMediaId(url)
         // 字幕轨：对齐原版 ExoUtil.getMediaItem → setSubtitleConfigurations(getSubtitleConfigs(subs))
         if (activeSubs.isNotEmpty()) itemBuilder.setSubtitleConfigurations(activeSubs)
         // 起播前按过暂停：媒体项照样装载，但不自动播（与正常暂停的观感一致）
         val wantPlay = pendingPauseIntent != true
         pendingPauseIntent = null
-        if (session.playExo(itemBuilder.build(), at, wantPlay)) {
+        val item = itemBuilder.build()
+        // ★优先走 MediaSource 路径：headers 跟着这一条媒体项走，播放器实例不动。
+        //   失败（例如工厂构造异常）才退回 session 的 setMediaItem 路径。
+        val src = runCatching { buildSourceFactory(effHeaders).createMediaSource(item) }.getOrNull()
+        val ok = if (src != null) session.playExoSource(src, at, wantPlay)
+                 else session.playExo(item, at, wantPlay)
+        if (ok) {
             setKeepScreenOn(wantPlay)
             if (!wantPlay) showPlayCenter()
         } else {
@@ -1446,22 +1426,26 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /** 纯构造：只建实例、装监听、绑画面，不动 ownership（会话调用它） */
     private fun rebuildPlayerInternal(headers: Map<String, String>): ExoPlayer? {
+        // ★★全局只允许一颗 ExoPlayer：详情页预览与播放页必须是同一个实例。
+        //   以前这里无条件 ExoPlayer.Builder(host).build()，于是进播放页时第二颗实例
+        //   把画面层抢走，详情页那颗没被暂停、继续出声 —— "小窗没画面、只有声音"的另一半。
+        //   只有"换源带了不同的请求头"才重建（否则复用）。
+        // ★无条件复用宿主那一颗。
+        //   headers 已经下沉到 MediaSource（见 buildSourceFactory），不再需要为它重建实例；
+        //   而 release 掉宿主正在用的实例会让详情页预览变成野指针（released player）。
+        //   所以这里的规则只有一条：有就复用，没有才建。
+        val existing = host.player
+        if (existing != null) {
+            MpvDebug.log("[player] 复用宿主那一颗（headers 已下沉到 MediaSource），不新建")
+            activeHeaders = headers
+            return existing
+        }
         activeHeaders = headers
         val builder = ExoPlayer.Builder(host)
         builder.setRenderersFactory(buildRenderersFactory())
         builder.setTrackSelector(buildTrackSelector())
         builder.setLoadControl(buildLoadControl())
-        // 工厂必须无条件设：之前写成 `if (headers.isNotEmpty())`，
-        // 没有请求头的源就拿不到超时、拿不到跨协议重定向，设了等于没设。
-        val timeoutMs = Settings(host).networkTimeoutSec.coerceIn(5, 120) * 1000
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setConnectTimeoutMs(timeoutMs)
-            .setReadTimeoutMs(timeoutMs)
-            // 允许 302 跳到另一个协议。默认关着时，http→https 这种重定向会直接抛
-            // HttpDataSourceException，表现为某些源「起播就报错」而别的源正常。
-            // Manifest 已声明 usesCleartextTraffic="true"，https→http 也不会被系统拦。
-            .setAllowCrossProtocolRedirects(true)
-        if (headers.isNotEmpty()) httpFactory.setDefaultRequestProperties(headers)
+        // 工厂统一由 buildSourceFactory(headers) 提供（见下），这里不再重复构造。
         // 解析器参数对齐原版 ExoUtil 的 getExtractorsFactory（原版 MediaSourceFactory.java 同一行）：
         //   FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS —— TS 里 HDMV 封装的 DTS 音轨默认会被丢弃，
         //     这类片源表现为「有画面没声音」，加上才认；
@@ -1476,12 +1460,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             .setTsExtractorTimestampSearchBytes(
                 androidx.media3.extractor.ts.TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 3
             )
-        // 对齐原版 MediaSourceFactory:90：原版数据源是 DefaultDataSource.Factory(http)，
-        // 除 http 外还认 file:// / content:// / asset:// / data://。
-        // 只用 DefaultHttpDataSource 时，任何没被 UrlConvert 转写的本地路径都会起不来
-        // （表现为 EXO 放不了、mpv 能放）。包一层后不依赖调用方自觉。
-        val dataSource = androidx.media3.datasource.DefaultDataSource.Factory(host, httpFactory)
-        builder.setMediaSourceFactory(DefaultMediaSourceFactory(dataSource, extractors))
+        builder.setMediaSourceFactory(buildSourceFactory(headers, extractors))
         val built = builder.build().also {
             // 官方 Players.java:158 setHandleAudioBecomingNoisy(true)：
             // HDMI / 蓝牙音频突然断开时自动暂停，而不是继续无声播放。
@@ -1491,12 +1470,56 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             it.setPlaybackSpeed(speedSteps[speedIdx])
         }
         player = built
+        // ★回写宿主：详情页预览与播放页共用这一颗（原版 PlayerManager 单例语义）。
+        //   不回写的话，宿主 next 次还会自己 buildInlinePlayer() 再建一颗。
+        host.player = built
         session.adoptExo(built)
         // 玩家表面探针必须在绑定之后挂：media3 会在这时把 surface 交给播放器
         applyCaptionStyle()
         attachPlayerListeners()
         return built
     }
+
+    /**
+     * 数据源/媒体源工厂 —— **请求头属于"这一条媒体项"，不属于"播放器实例"**。
+     *
+     * ★这是本轮扫描最重要的一处结构修正。原版 Players.java 的做法是：
+     *   每次起播为 MediaItem 单独构造 MediaSource（headers 注在 DataSource 上），
+     *   播放器实例始终是同一个。我们以前把 headers 注在 player 级的
+     *   MediaSourceFactory 上，于是"headers 变了"就只能重建整个播放器 ——
+     *   重建意味着 release + 重新 setPlayer + 输出面重建：
+     *   表现就是"进播放页先黑一下""换线路/切源卡一下""有时残留上一帧"。
+     *
+     *   现在 headers 只影响本函数返回的工厂，player 一次都不用重建。
+     */
+    private fun buildSourceFactory(
+        headers: Map<String, String> = emptyMap(),
+        extractors: androidx.media3.extractor.ExtractorsFactory = defaultExtractors(),
+    ): DefaultMediaSourceFactory {
+        val timeoutMs = Settings(host).networkTimeoutSec.coerceIn(5, 120) * 1000
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(timeoutMs)
+            .setReadTimeoutMs(timeoutMs)
+            // 允许 302 跳到另一个协议。默认关着时 http→https 这种重定向会直接抛
+            // HttpDataSourceException，表现为某些源「起播就报错」而别的源正常。
+            .setAllowCrossProtocolRedirects(true)
+        if (headers.isNotEmpty()) httpFactory.setDefaultRequestProperties(headers)
+        // 对齐原版 MediaSourceFactory:90：原版数据源是 DefaultDataSource.Factory(http)，
+        // 除 http 外还认 file:// / content:// / asset:// / data://。
+        val dataSource = androidx.media3.datasource.DefaultDataSource.Factory(host, httpFactory)
+        return DefaultMediaSourceFactory(dataSource, extractors)
+    }
+
+    /** 解析器参数对齐原版 ExoUtil.getExtractorsFactory（TS 的 HDMV-DTS 与时间戳搜索范围） */
+    private fun defaultExtractors(): androidx.media3.extractor.ExtractorsFactory =
+        androidx.media3.extractor.DefaultExtractorsFactory()
+            .setTsExtractorFlags(
+                androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+                    .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
+            )
+            .setTsExtractorTimestampSearchBytes(
+                androidx.media3.extractor.ts.TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 3
+            )
 
     /**
      * 渲染器工厂。
@@ -3943,8 +3966,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         sniffer = null
         runCatching { uiHandler.removeCallbacks(flushPendingKeyRun) }
         runCatching { videoHost?.releaseOwner() }
-        player?.release()
+        // ★宿主那一份引用必须一起清。
+        //   PlayLayer.player 与 host.player 是同一个实例（rebuildPlayerInternal 会回写），
+        //   只把本层置空、宿主仍指着已 release 的实例 —— 详情页预览再碰它就是
+        //   "Player is already released" 崩溃。原版 PlayerManager 也是 release 后置 null。
+        val dying = player
         player = null
+        if (host.player === dying) host.player = null
+        runCatching { dying?.release() }
         // 播放器已释放，这时候清迅雷任务/分片才安全（文件不删，则 thunder/ 会无限增长）
         runCatching { ThunderPlay.stop() }
     }

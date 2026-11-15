@@ -12,4 +12,11 @@
     <color name="grey_600">#FF757575</color>
     <color name="grey_700">#FF616161</color>
     <color name="text">#FFFFFFFF</color>
+    <color name="amber_300">#ffffd54f</color>
+    <color name="black_05">#0d000000</color>
+    <color name="black_80">#cc000000</color>
+    <color name="black_90">#e6000000</color>
+    <color name="green_400">#ff66bb6a</color>
+    <color name="grey_800">#ff424242</color>
+    <color name="transparent">#00000000</color>
 </resources>

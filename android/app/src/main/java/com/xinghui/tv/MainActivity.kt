@@ -82,7 +82,13 @@ class MainActivity : Activity() {
     private var currentLine: PlayLine? = null
 
     /** 内嵌播放器（对齐原版 mBinding.video） */
-    private var player: ExoPlayer? = null
+    /**
+     * ★全局唯一一颗 ExoPlayer：详情页预览与播放页共用同一个实例。
+     *   原版 VideoActivity 的 PlayerManager 就是这个语义（一个 Activity 里只有一颗播放器）。
+     *   我们以前是详情页 buildInlinePlayer() 一颗、播放页 rebuildPlayerInternal() 又一颗，
+     *   进播放页时新实例把画面抢走、旧实例还在出声 —— 这就是"小窗没画面、只有声音"的另一半。
+     */
+    internal var player: ExoPlayer? = null
     /**
      * 小窗形态的原始 LayoutParams —— 原版的 mFrameParams。
      * ★保存的是 XML 里那个对象本身，退出全屏时原样还回去。
@@ -209,11 +215,13 @@ class MainActivity : Activity() {
         //   不再引用后加的调试方法 —— 少一个跨文件依赖，就少一次"只覆盖了一个文件"导致的编译失败。
         MpvDebug.log("[gate] showPlayLayer ep=${extras.getStringExtra("ep_url").orEmpty().take(40)} " +
             "exoPlayer=${if (player != null) "ok" else "null"} mpv=${if (layer.mpvInstance() != null) "ok" else "-"}")
-        // 详情预览先把这块 surface 让出来，再交给播放层 —— 同一块，不新建
-        detachSurfaceFrom()
-        runCatching { player?.pause() }
-        // ★先把引擎与画面接回播放层（退出时 takePlayer / releaseSurface 交出去的那一份）
-        layer.reconnect(player)
+        // ★★原版 VideoActivity.enterFullscreen() 全文只有两句：
+        //     mBinding.video.setForeground(null);
+        //     mBinding.video.setLayoutParams(MATCH_PARENT, MATCH_PARENT);
+        //   播放器与 PlayerView 的绑定在页面生命周期里只建立一次，进出全屏从不碰它。
+        //   这里原来做 detachSurfaceFrom()（= setPlayer(null)）→ reconnect()（= setPlayer 回来），
+        //   等于每进一次都把视频输出断开重接：画面停在最后一帧、音频独立继续。
+        //   这两句已删除 —— 进播放页不碰播放器、不碰 surface。
         // ★★界面必须先切过来，再走进入协议。
         //   以前这里是反的：enter() 在层切换之前，而 enter 里要 fetchAndPlay / 绑按钮 /
         //   读标记，任何一步抛异常都会让整个 showPlayLayer 中断 ——
@@ -303,77 +311,25 @@ class MainActivity : Activity() {
     fun exitPlayLayer() {
         if (!playMode) return
         playMode = false
-        playLayer?.onHostPause()
+        // ★★原版 VideoActivity.exitFullscreen() 全文只有两句：
+        //     mBinding.video.setForeground(selector_video);
+        //     mBinding.video.setLayoutParams(mFrameParams);
+        //   只把容器缩回小窗、换焦点框。**不暂停、不换 player、不摘画面、不重挂 surface。**
+        //
+        //   旧实现在这里 takePlayer → releaseSurface → attachPreviewTo：
+        //   每退出一次就把视频输出断开重接一次，MediaCodec 的输出面要重建，
+        //   最后一帧留着、音频独立继续 —— "小窗像暂停一样、只有声音"；
+        //   这条链上任何一步失败，就是"再点集数进不去"。
+        //   现在整条链删除，画面从头到尾没有人动过。
         playContainer.visibility = View.GONE
         detailLayer.visibility = View.VISIBLE
-        // 播放层的引擎原样交回：不 release、不 prepare、不 seek。
-        val p = playLayer?.takePlayer()
-        if (p != null) player = p
-        // ★画面层同时松手：否则 VideoHost 的 owner 停在 EXO/NATIVE，
-        //   宿主小窗再挂同一块 surface 就是两家抢面（这是"小窗黑/再进不去"的共同来源）
-        playLayer?.releaseSurface()
-        // ★mpv 内核退出时必须把 MpvPlayer 交出去。takePlayer() 只拿 ExoPlayer，
-        //   mpv 模式拿不到 → 旧代码在这里 q == null 直接 return：小窗什么都没挂上，
-        //   mpv 还在出声，画面却留在播放页那块已经不可见/已销毁的面上 →
-        //   现场就是"小窗像暂停一样，只有声音"。
-        val mpvNow = playLayer?.mpvInstance()
-        val q: androidx.media3.common.Player? = mpvNow ?: (p ?: player)
-        MpvDebug.log("[gate] exit kernel=${if (mpvNow != null) "mpv" else "exo"} " +
-            "takePlayer=${if (p != null) "ok" else "null"} hostPlayer=${if (player != null) "ok" else "null"} " +
-            "handoff=${if (q == null) "NONE(直接return)" else q.javaClass.simpleName}")
-        if (q == null) return
-        bindDetailListener(q)
-        // ★海报要收起来。以前退出播放层没走这一步：如果进播放页前海报是可见的，
-        //   回来后海报会一直盖在小窗上 —— 用户看到的是静止封面，而不是"没画面"。
         runCatching { setPreviewVisible(true) }
-        // ① 容器先缩回小窗（原版 mFrameParams 那一步）
         videoFrameToMini()
-        // ② 把画面交回，走 setVideoSurfaceView —— media3 自己接住尺寸变化
-        attachPreviewTo(q)
-        // ★引擎可能已经被重置成 IDLE（换源/换集/换内核都会）。IDLE 下调 play() 不会起播，
-        //   表现就是"小窗有 surface 但一直是灰的"。
-        if (q !is MpvPlayer && q.playbackState == androidx.media3.common.Player.STATE_IDLE) {
-            // 只 prepare 不设 mediaItem 等于空转，先补上片源
-            runCatching {
-                if (q.mediaItemCount == 0 && inlineUrl.isNotBlank()) {
-                    q.setMediaItem(androidx.media3.common.MediaItem.Builder().setUri(inlineUrl).build())
-                }
-            }
-            runCatching { q.prepare() }
-        }
-        // mpv 在 onHostPause 里被 setBackground(true)（等于告诉它"进后台了"），
-        // 交接后必须还原，否则它认为在后台、不出帧。
-        if (q is MpvPlayer) runCatching { q.setBackground(false) }
-        runCatching { q.play() }
-        // 把判断依据直接打到屏幕上：装一版就能看清是哪一环断的，不用再去翻日志。
-        runCatching {
-            val st = when (q.playbackState) {
-                1 -> "IDLE"; 2 -> "BUFFERING"; 3 -> "READY"; 4 -> "ENDED"; else -> "?" + q.playbackState
-            }
-            // ★必须延后：videoFrameToMini 只是 requestLayout，布局要到下一帧才跑完。
-            //   在同一拍读 videoSurface.width 拿到的是上一轮的尺寸（1920x1080），
-            //   那条 Toast 因此误导了两轮排查。
-            videoSurface.postDelayed({
-                runCatching {
-                    android.widget.Toast.makeText(
-                        this,
-                        "[exit] st=$st playing=${q.isPlaying} " +
-                            "vsize=${q.videoSize.width}x${q.videoSize.height} " +
-                            "tracks=${q.currentTracks.groups.size} " +
-                            "frame=${videoFrame.width}x${videoFrame.height} " +
-                            "sv=${videoSurface.width}x${videoSurface.height} " +
-                            "shown=${videoSurface.isShown} surfValid=$surfaceValid",
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
-                }
-            }, 600)
-        }
-        MpvDebug.log(
-            "[exit] 交回小窗 frame=${videoFrame.width}x${videoFrame.height} " +
-                "sv=${videoSurface.width}x${videoSurface.height} " +
-                "vsize=${q.videoSize.width}x${q.videoSize.height} " +
-                "state=${q.playbackState} playing=${q.isPlaying} surfaceValid=$surfaceValid"
-        )
+        // 焦点回集数列表：否则焦点还留在已隐藏的播放页控件上，方向键会打空
+        runCatching { findDetail<RecyclerView>(R.id.detailList)?.requestFocus() }
+        // 详情页错误回调（只加 listener，不动画面）
+        runCatching { playLayer?.currentPlayer()?.let { bindDetailListener(it) } }
+        MpvDebug.log("[gate] exit 只缩容器：player/surface 全程未动 playMode=$playMode")
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1344,12 +1300,15 @@ class MainActivity : Activity() {
      * 若播放页期间进程被回收导致实例没了，onResume 里的 `player ?: buildInlinePlayer()`
      * 会自动退回原来的重建路径。
      */
+    /**
+     * 进播放页前的"交接"。
+     * ★原版没有这个动作：小窗与全屏是同一个 PlayerView、同一个播放器，进全屏只改 LayoutParams。
+     *   这里以前 pause + detachSurfaceFrom()（= setPlayer(null)），
+     *   正是"画面冻住、只剩声音"的直接来源：视频输出被摘掉，音频轨独立继续。
+     *   现在什么都不做。
+     */
     private fun detachInlinePlayback() {
-        runCatching {
-            player?.let { if (it.isPlaying) it.pause() }
-            detachSurfaceFrom()
-            Log.i("XingHuiTV", "[detail] 离开页面，预览已暂停并摘掉画面（实例保留，返回可续上）")
-        }
+        Log.i("XingHuiTV", "[detail] 进播放页：播放器与画面都不动，只切容器")
     }
 
     private fun releaseInlinePlayback() {
