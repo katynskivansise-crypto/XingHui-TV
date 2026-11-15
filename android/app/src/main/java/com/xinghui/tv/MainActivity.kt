@@ -526,6 +526,13 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 vod = first
+                // ★每换一部影片都必须重置这个闸门。
+                //   autoStarted 是 Activity 级一次性闸门，只有进程内第一次进详情时是 false；
+                //   不重置的话第二次进详情 autoPlayFromHistory() 第一行就 return，
+                //   小窗永远不起播 —— 表现就是「详情页秒开、小窗没画面、进播放页才加载」。
+                autoStarted = false
+                autoPlayAfterExpand = false
+                playingIdx = 0
                 renderLines()
             }
         }.start()
@@ -1003,13 +1010,28 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 inlineUrl = url
+                // ★这里必须拿到一颗**非空**播放器再下发。
+                //   原来整段都是 player?.xxx —— player 为 null 时四次调用全部空转，
+                //   却仍然返回 true，于是"成功了但什么都没加载"，没有任何日志，也不进换源。
+                //   这是静默失败，不是容错。
+                val p = player ?: runCatching { buildInlinePlayer() }.getOrNull()?.also {
+                    player = it
+                    applyCaptionStyle()
+                    bindDetailListener(it)
+                }
+                if (p == null) {
+                    handlePlayFailure(idx, auto, "内嵌播放器构建失败（无法下发媒体源）", depth)
+                    return@runOnUiThread
+                }
+                // 画面绑定同样要在这里确认：小窗能出画面靠的是这块常驻 SurfaceView 上有播放器，
+                // 只 prepare 不绑定 = 只有声音、画面留在海报上。
+                if (!previewAttached()) attachPreviewTo(p)
                 val ok = runCatching {
-                    // ★mediaId 必须显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」，
-                    //   不设的话 mediaId 恒为空串，进入播放页的复用判据永远不成立 → 每次都重新加载。
-                    player?.setMediaItem(MediaItem.Builder().setUri(url).setMediaId(url).build())
-                    player?.prepare()
-                    if (resumeMs > 1000) player?.seekTo(resumeMs)
-                    player?.play()
+                    // mediaId 显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」。
+                    p.setMediaItem(MediaItem.Builder().setUri(url).setMediaId(url).build())
+                    p.prepare()
+                    if (resumeMs > 1000) p.seekTo(resumeMs)
+                    p.play()
                     true
                 }.getOrElse { e ->
                     Log.e("XingHuiTV", "[detail] 内嵌播放源不被支持 $url", e)
