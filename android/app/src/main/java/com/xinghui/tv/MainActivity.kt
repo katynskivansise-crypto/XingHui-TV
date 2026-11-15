@@ -325,8 +325,30 @@ class MainActivity : Activity() {
         detailLayer.visibility = View.VISIBLE
         runCatching { setPreviewVisible(true) }
         videoFrameToMini()
-        // 焦点回集数列表：否则焦点还留在已隐藏的播放页控件上，方向键会打空
-        runCatching { findDetail<RecyclerView>(R.id.detailList)?.requestFocus() }
+        // ★焦点必须落到**当前那一集的格子**上，而不是列表容器本身。
+        //   只把焦点给 RecyclerView 时，TV 上能拿到的只有容器：方向键会先"捡回焦点"，
+        //   确认键则完全没有落点 —— 现场就是「返回后选集怎么点都没反应、什么都选不了」。
+        //   列表刚由 GONE 变 VISIBLE 的同一帧内 isShown 还没刷新，requestFocus 会失败，
+        //   所以整体挪到下一帧（post），并且先滚到该集所在行再取它的子视图。
+        runCatching {
+            val rv = findDetail<RecyclerView>(R.id.detailList)
+            val idx = playingIdx
+            val count = rv?.adapter?.itemCount ?: 0
+            if (rv != null && idx >= 0 && idx < count) rv.scrollToPosition(idx)
+            detailLayer.post {
+                runCatching {
+                    val rv2 = findDetail<RecyclerView>(R.id.detailList)
+                    rv2?.requestFocus()
+                    val item = rv2?.layoutManager?.findViewByPosition(idx)
+                    item?.requestFocus()
+                    MpvDebug.log(
+                        "[gate] exit 焦点恢复 idx=$idx " +
+                            "rvFocus=${rv2?.isFocused} itemFound=${item != null} itemFocus=${item?.isFocused} " +
+                            "rvShown=${rv2?.isShown} dListShown=${rv2?.visibility}"
+                    )
+                }
+            }
+        }
         // 详情页错误回调（只加 listener，不动画面）
         runCatching { playLayer?.currentPlayer()?.let { bindDetailListener(it) } }
         MpvDebug.log("[gate] exit 只缩容器：player/surface 全程未动 playMode=$playMode")
@@ -1321,6 +1343,14 @@ class MainActivity : Activity() {
     }
 
     private fun pauseInlinePlayback() {
+        // ★两颗内核都要停：小窗播的是哪颗由设置决定，不能只认 EXO。
+        //   以前这里只 pause 了 player（EXO），内核选 mpv 时这一行等于空操作。
+        runCatching {
+            val m = playLayer?.mpvInstance() ?: return@runCatching
+            runCatching { m.setBackground(true) }
+            runCatching { m.pause() }
+            Log.i("XingHuiTV", "[detail] 离开页面，mpv 已转为后台并暂停")
+        }
         runCatching {
             val p = player ?: return@runCatching
             if (p.isPlaying || p.playWhenReady) {
@@ -1332,13 +1362,32 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        if (playMode) playLayer?.onHostPause()
+        // ★★ 无条件交给播放层，不能再有 `if (playMode)` 这道门。
+        //   原因：mpv 内核在**详情页小窗**状态下也是活着的（内核选 mpv 时，小窗播的就是它），
+        //   而 playMode 在"从播放页退回详情页"那一刻就已经是 false。
+        //   于是离开详情页时这里整个被跳过 → 只有 pauseInlinePlayback() 停了 EXO，
+        //   mpv 那一路继续出声 —— 现场就是「退回详情页/回主页，声音还在播」。
+        //   onHostPause() 内部是幂等的，两颗内核都会 pause，并 setBackground(true)。
+        runCatching { playLayer?.onHostPause() }
 
         // 退到后台、按返回、切播放页，都先落一次进度；否则只有正常看完才记得住
         saveInlinePosition()
         // 同时停声：只落进度不停播放，离开页面后音频会继续在后台响
         pauseInlinePlayback()
         super.onPause()
+    }
+
+    /**
+     * 页面已不可见：再兜一次底。
+     *
+     * onPause 之后到 onStop 之间还可能有人把播放拉起来 —— 内核 watchdog 恢复、mpv 的
+     * 后台模式（setBackground(true)）本身就不抑制音频、以及某些 ROM 上 onResume 提前触发。
+     * 走到 onStop 时窗口已经不可见，这一刻必须保证没有声音。
+     */
+    override fun onStop() {
+        runCatching { playLayer?.onHostPause() }
+        pauseInlinePlayback()
+        super.onStop()
     }
 
     override fun onResume() {
@@ -1434,7 +1483,12 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (playMode) runCatching { playLayer?.onHostDestroy() }
+        // ★★ 无条件销毁，同样不能有 `if (playMode)`。
+        //   以前详情页状态（playMode=false）退出时根本不会调 onHostDestroy →
+        //   mpv 实例、它的 surface、以及 saveExecutor 全部泄漏，
+        //   而且 mpv 那条音频轨会跟着进程一直响下去（越进几次越明显，因为每个泄漏实例都在放）。
+        //   onHostDestroy 内部只摘自己的定时任务、落盘、release 内核，对已退场的播放层是幂等安全的。
+        runCatching { playLayer?.onHostDestroy() }
 
         saveInlinePosition()
         player?.release()

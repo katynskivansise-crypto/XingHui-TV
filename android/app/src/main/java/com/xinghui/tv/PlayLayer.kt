@@ -181,6 +181,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      *   4) 每次重新起播
      */
     fun enter(a: android.content.Intent, parent: android.view.ViewGroup) {
+        // ★★ 重新进场第一件事：解除退场闸门。
+        //   leaving 会在返回键那一刻置 true（见 onHostKeyEvent 的 BACK 分支），它的用途有两个：
+        //   · 挡掉 savePosition 的重复落盘；
+        //   · 挡掉**退出之后仍在后台跑的解析/自动换源链**。
+        //   如果进场不复位，第二次进入时这条闸门仍然关着 —— 表现就是
+        //   「进得去、但解析结果被丢弃、什么都不播，而且退出后再也不落盘」。
+        leaving = false
         val wasAttached = attached
         // ★必须在 applyArgs 之前比：applyArgs 会把 epUrl 覆盖成新值
         val sameEpisode = a.getStringExtra("ep_url").orEmpty() == epUrl &&
@@ -193,7 +200,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         // 重载会表现成"进得去，但先转几秒、画面还要黑一下"。
         // 恢复动作交给 onHostResume（它负责 mpv 的 setBackground(false)/resume
         // 与 EXO 的 play），这里只负责跳过重载。
-        if (wasAttached && sameEpisode && activeUrl.isNotBlank()) {
+        // ★播放器处于错误态时不能走"跳过重载"：同集重进本来想省掉重新解析，
+        //   但错误态下跳过就等于"进去之后什么都不发生"，看起来和进不去一模一样。
+        //   playerError 非空 → 老老实实重新起播（这条只对 EXO 有意义，mpv 模式 player 恒为 null）。
+        val playerBroken = player?.playerError != null
+        if (wasAttached && sameEpisode && activeUrl.isNotBlank() && !playerBroken) {
             MpvDebug.log("[play] 同集再入：跳过解析与重载 url=${activeUrl.take(48)}")
             return
         }
@@ -550,6 +561,14 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /** 调用引擎 player 接口解析出播放地址；csp_ 源走壳侧并带 header；失败进入自动换源重试链 */
     private fun resolvePlay(fl: String, ep: String) {
+        // ★退场即作废：这条方法一律从后台线程进来（fetchAndPlay / tryAutoSwitch），
+        //   用户按返回之后它还会跑完 —— 跑完就会调 playUrl 往**详情页绑定的播放器**里塞新地址、
+        //   改 activeUrl，接着 playUrl 失败又触发 onPlayFail → 又换线路 → 又解析。
+        //   详情页那边看到的就是"选集怎么点都没反应，还老弹'正在尝试解析源'"。
+        if (leaving) {
+            MpvDebug.log("[play] 退场后丢弃解析结果 fl=$fl ep=${ep.take(24)}")
+            return
+        }
         // 解析要发网络请求（引擎 player / csp 源），这段到 ExoPlayer 第一次状态回调之间
         // 播放器还没接管，shutter 盖着就是纯黑。原版同样的空档是 progressLayout.showProgress()，
         // 这里先盖上转圈，等 STATE_BUFFERING / READY 回调再按原版时机切换。
@@ -811,6 +830,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             else -> Thread {
                 val hit = ParseJob.run(item, parseEpRaw, flag)
                 runOnUiThread {
+                    if (leaving) return@runOnUiThread
                     if (hit != null) {
                         playUrl(toPlayableUrl(hit.url) ?: hit.url, mergedHeaders + hit.headers)
                         updateQualityBtn()
@@ -849,6 +869,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             host,
             onFound = { u, h ->
                 runOnUiThread {
+                    if (leaving) return@runOnUiThread
                     val merged = if (hdrs.isEmpty()) h else hdrs + h
                     val playable = toPlayableUrl(u) ?: u
                     // 推送进来的网页地址本身不可播：抓到真流后把 vod_id 换成流地址，
@@ -955,6 +976,12 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /** 播放/解析失败 → 先切下一条线路，再自动换站点；都失败才停止（对齐原项目 startFlow→checkFlag→checkSearch） */
     private fun onPlayFail(msg: String) {
+        // ★退场后失败重试必须停：这条链每次都会起新线程解析，退出播放页后它还在跑，
+        //   换线路 → 换站点 → 改 vodId/siteKey → 弹 Toast，全都会砸在详情页上。
+        if (leaving) {
+            MpvDebug.log("[play] 退场后忽略失败重试：${msg.take(48)}")
+            return
+        }
         hidePlayProgress()
         if (tryAutoSwitch()) return
         if (siteSwitchCount < MAX_SITE_SWITCH && autoSwitchSite()) return
@@ -962,6 +989,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun tryAutoSwitch(): Boolean {
+        if (leaving) return false
         val next = nextLineIndex()
         if (next == null) return false
         val line = vodLines[next]
@@ -979,6 +1007,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     /** 自动换站：线路走完后，用片名搜索其他站点同名影片并切换（对齐原项目 checkSearch→nextSite） */
     private fun autoSwitchSite(): Boolean {
+        if (leaving) return false
         if (vodName.isBlank()) return false
         siteSwitchCount++
         val target = runCatching {
@@ -1191,11 +1220,12 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      *   详情页小窗读不到位置就只能从片头开始。这就是「按过菜单再返回，小窗回片头」的数据侧原因。
      */
     private fun savePosition(force: Boolean = false, reason: String = "自动") {
-        // 退了就不再写：返回键那一刻已经 force 保存过一次（位置最准），
-        // 之后 onPause / onDestroy 还会各调一次，而 pause 是异步的 —— 位置还在往后走几毫秒，
-        // 于是同一部片会被"最后写一次"覆盖三遍（真机日志里 26647 → 26686 → 26691）。
-        // 位置多跳几毫秒无害，但会让「最后一次到底存在哪」变得不可判读，日志也被刷屏。
-        if (leaving && !force) return
+        // ★这里原来有一条 `if (leaving && !force) return`，已删。
+        //   它想解决的问题（同一位置被覆盖三遍）下面的 lastSavedPos 去重已经覆盖；
+        //   而它带来的副作用很实在：退出播放页后 mpv 内核仍在小窗继续播，
+        //   再走 onPause/onStop 时因为 leaving 还是 true，**小窗的进度一次都不落盘** ——
+        //   表现就是"小窗播了半天，回首页再进来又从旧位置开始"。
+        //   退场那一刻仍然用 force=true 抢一次最准的位置，之后交给去重。
         val pos = if (isMpvMode()) mpvPos else runCatching { player?.currentPosition ?: 0L }.getOrDefault(0L)
         if (pos <= 0) return
         if (!force && pos == lastSavedPos) return
