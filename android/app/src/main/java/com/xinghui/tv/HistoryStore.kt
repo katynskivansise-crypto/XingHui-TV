@@ -128,6 +128,27 @@ class HistoryStore(context: Context) {
         return obj.optString("vod_ep_url", obj.optString("position_ep"))
     }
 
+    /**
+     * 历史里那条**线路名**（对齐原版 `History.vodFlag` → `VideoActivity.checkFlag:3642`
+     * 的 `onItemClick(mHistory.getFlag())`）。
+     * 进详情页必须按它恢复线路，否则集列表换了一批、后面的集定位全部失效。
+     */
+    fun lastFlag(vodId: String): String {
+        if (vodId.isBlank()) return ""
+        val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return ""
+        return obj.optString("vod_flag", "")
+    }
+
+    /**
+     * 历史里那一集的**名字**（对应原版 `History.vodRemarks`，`updateHistory` 里写的就是 `item.getName()`）。
+     * url 会随线路/CDN 签名变化，名字更稳 —— 原版 `Flag.indexOf` 匹配不到 url 时会回落到按名字评分。
+     */
+    fun lastEpName(vodId: String): String {
+        if (vodId.isBlank()) return ""
+        val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return ""
+        return obj.optString("vod_remarks", "")
+    }
+
     fun epUrlOf(vodId: String): String {
         if (vodId.isBlank()) return ""
         val obj = history().firstOrNull { it.optString("vod_id") == vodId } ?: return ""

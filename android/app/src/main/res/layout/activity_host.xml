@@ -79,6 +79,39 @@
             android:id="@+id/subtitleView"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
+
+        <!-- ★小窗加载圈 —— 位置逐条对齐原版 5.0.8 `activity_video.xml` 第 12 行：
+             `<include android:id="@id/progress" layout_width="fill_parent"
+              layout_height="fill_parent" layout="@layout/view_progress" />`
+             它是 **`@id/video` 这个 400x225 容器的子 View**，不是全屏层。
+             所以原版起播时圈出现在**小窗内部**，外面照常显示详情（`video` 只是被
+             `ProgressLayout` 一并 INVISIBLE 到出画面为止）。
+
+             我们上一版把圈加到了 hostRoot 上（全屏），位置错了 —— 已撤掉，改成这里。 -->
+        <FrameLayout
+            android:id="@+id/inlineProgress"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+
+            <!-- 原版 view_progress.xml：CircularProgressIndicator 居中、indeterminate、白色 -->
+            <ProgressBar
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:indeterminateTint="@android:color/white" />
+
+            <!-- 原版 view_progress.xml：@id/traffic 白字 16sp、marginTop 40dip、默认 gone -->
+            <TextView
+                android:id="@+id/inlineProgressText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:layout_marginTop="56dp"
+                android:text="加载中"
+                android:textColor="@android:color/white"
+                android:textSize="16sp" />
+        </FrameLayout>
     </androidx.media3.ui.AspectRatioFrameLayout>
 
     <FrameLayout
@@ -86,39 +119,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="@android:color/transparent" />
-
-    <!-- 详情页加载圈：逐条对齐原版 5.0.8 `view_progress.xml` +
-         `ProgressLayout.b(1)`（把所有非 progress 子 View 设成 INVISIBLE，只留居中白圈）。
-
-         原版 `showProgress()`（5.6.0:3448）是 `getPlayer()` 里紧跟 `playerContent(...)` 执行的 ——
-         解析请求还没回来，圈已经亮了。我们详情页以前完全没有这一层，界面先出来、解析在后台跑，
-         所以看起来是「秒开、小窗不加载」。 -->
-    <LinearLayout
-        android:id="@+id/detailProgress"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:gravity="center"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <!-- 原版 view_progress.xml：CircularProgressIndicator 居中、indeterminate、白色 -->
-        <ProgressBar
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:indeterminateTint="@android:color/white" />
-
-        <!-- 原版 view_progress.xml：@id/traffic 白字 16sp、距上 40dip、默认 gone；
-             我们沿用播放层的做法固定显示「加载中」 -->
-        <TextView
-            android:id="@+id/detailProgressText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="加载中"
-            android:textColor="@android:color/white"
-            android:textSize="16sp" />
-    </LinearLayout>
 
     <FrameLayout
         android:id="@+id/playLayer"

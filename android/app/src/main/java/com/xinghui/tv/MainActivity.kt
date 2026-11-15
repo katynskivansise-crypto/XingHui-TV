@@ -119,6 +119,23 @@ class MainActivity : Activity() {
     private var savedBoxParams: android.view.ViewGroup.LayoutParams? = null
     private var savedBoxForeground: Drawable? = null
     private var playingIdx = -1
+
+    /**
+     * 起播超时 —— 逐条对齐原版：
+     * `Constant.java:13 TIMEOUT_PLAY = TimeUnit.SECONDS.toMillis(15)`
+     * `PlayerManager:287 this.runnable = this::onPlaybackTimeout`
+     *   各起播点 `App.post(runnable, Constant.TIMEOUT_PLAY)`（:2460/:2502/:2551/:4661/:4694/:6664/:7002/:7878/:7929/:7959/:8014/:8052）
+     *   `App.removeCallbacks(runnable)`（:348/:1307/:2434/:2475/:2521/:3365/:4648）
+     * `PlayerManager:418 onPlaybackTimeout()` → `callback.onError(getString(R.string.error_play_timeout))`
+     * `VideoActivity:5462 onError(msg)` → reset + `showError(msg)` + `startFlow()` → `checkFlag()` 换下一线路。
+     * 文案 `values-zh-rCN/strings.xml:93 error_play_timeout = 连接超时`。
+     *
+     * 我们原来完全没有这一层：某一路源一直 buffering 时，小窗圈会永远转、也不会自动换源。
+     * 现在把 15s 计时挂在 `setMediaItem + prepare + play` 之后（原版也是在 setMediaItem 处挂），
+     * 到点未 READY 就按 `onError` 的语义处理：灭圈 + 提示 + 走 handlePlayFailure 换下一线路。
+     */
+    private val playTimeoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var playTimeoutRunnable: Runnable? = null
     private var episodes: List<Pair<String, String>> = emptyList()
     private var epOrder = false
     private var activeSection = 0
@@ -226,30 +243,43 @@ class MainActivity : Activity() {
      * 不挡的话方向键会落进看不见的层里。
      */
     /**
-     * 详情页加载指示 —— 逐条对齐原版 `showProgress()`（5.6.0:3448）与 `ProgressLayout.b(1)`。
+     * 小窗加载圈 —— 位置与显隐时机逐条对齐原版。
      *
-     * 原版 `getPlayer()` 里 `mViewModel.playerContent(...)` 之后**紧跟** `showProgress()`：
-     * 圈立刻亮，同时把整页内容设成 INVISIBLE（不是压黑）。
-     * 我们的详情页以前没有这一层 —— 界面先出来、解析在后台 Thread 里跑，看着就是"秒开"。
+     * 原版 `activity_video.xml` 第 12 行：`progress` 是 `@id/video`（400x225 容器）的子 View，
+     * 所以圈出现在**小窗内部**。`showProgress()`（5.6.0:3448）在 `getPlayer` 里紧跟
+     * `playerContent(...)` 执行 —— 解析请求发出时圈就亮。
+     * 灭圈在 `:5497 case Player.STATE_READY: hideProgress();`。
      *
-     * 用 alpha 而不是 visibility：detailLayer 的显隐本来就用 alpha 管（showDetailLayer）。
+     * 播放层自己有 `playProgress`，所以这里只在详情页形态显示。
      */
-    private fun showDetailProgress() {
+    private fun showInlineProgress() {
         if (playMode) return
-        runCatching {
-            findViewById<View>(R.id.detailProgress)?.visibility = View.VISIBLE
-            detailLayer.alpha = 0f
-        }
-        MpvDebug.log("[detail] 加载圈 ON")
+        findViewById<View>(R.id.inlineProgress)?.visibility = View.VISIBLE
+        MpvDebug.log("[detail] 小窗加载圈 ON")
     }
 
-    /** 对应原版 5.6.0:5497 `case Player.STATE_READY: hideProgress();` —— 灭圈时机是 READY，不是首帧。 */
-    private fun hideDetailProgress() {
-        runCatching {
-            findViewById<View>(R.id.detailProgress)?.visibility = View.GONE
-            if (!playMode) detailLayer.alpha = 1f
+    private fun hideInlineProgress() {
+        findViewById<View>(R.id.inlineProgress)?.visibility = View.GONE
+        MpvDebug.log("[detail] 小窗加载圈 OFF")
+    }
+
+    private fun armPlayTimeout(idx: Int, auto: Boolean, depth: Int) {
+        disarmPlayTimeout()
+        val r = Runnable {
+            playTimeoutRunnable = null
+            MpvDebug.log("[detail] 起播超时 15s idx=$idx line=${currentLine?.name}")
+            hideInlineProgress()
+            Toast.makeText(this@MainActivity, "连接超时", Toast.LENGTH_SHORT).show()
+            // 原版 onError → startFlow → checkFlag：换下一线路（全失败由 handlePlayFailure 收尾）
+            handlePlayFailure(idx, auto, "连接超时", depth)
         }
-        MpvDebug.log("[detail] 加载圈 OFF")
+        playTimeoutRunnable = r
+        playTimeoutHandler.postDelayed(r, 15_000L)
+    }
+
+    private fun disarmPlayTimeout() = playTimeoutRunnable?.let {
+        playTimeoutHandler.removeCallbacks(it)
+        playTimeoutRunnable = null
     }
 
     private fun showDetailLayer(show: Boolean) {
@@ -328,13 +358,17 @@ class MainActivity : Activity() {
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 // 原版 5.6.0:5497 `case Player.STATE_READY: hideProgress();`
-                if (playbackState == androidx.media3.common.Player.STATE_READY) hideDetailProgress()
+                if (playbackState == androidx.media3.common.Player.STATE_READY) {
+                    disarmPlayTimeout()
+                    hideInlineProgress()
+                }
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 // 原版没有错误去重（5.6.0 无 errorCount/playFail，5.0.8 无 800 常量）：
                 // 一次起播只由 App.post(runnable, TIMEOUT_PLAY) 的起播窗口兜底，错误回调照常处理。
-                hideDetailProgress()
+                disarmPlayTimeout()
+                hideInlineProgress()
                 Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，走自动换源")
                 handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
                     reason = "播放器错误 ${error.errorCodeName}", depth = 0)
@@ -399,6 +433,9 @@ class MainActivity : Activity() {
                 }
             }
         }
+        // 回详情页时小窗圈应当是灭的；播放层那颗的 STATE_READY 回写只作兜底（幂等）
+        disarmPlayTimeout()
+        hideInlineProgress()
         // 详情页错误回调（只加 listener，不动画面）
         runCatching { playLayer?.currentPlayer()?.let { bindDetailListener(it) } }
         MpvDebug.log("[gate] exit 只缩容器：player/surface 全程未动 playMode=$playMode")
@@ -711,14 +748,28 @@ class MainActivity : Activity() {
             adapter.notifyDataSetChanged()
             return
         }
-        // 对齐原版：进详情页直接展开第一条线路的集数网格，焦点落在第一集，
-        // 按确认即起播。原版没有「先选线路、再选集数」这一层，多条线路用「换源」切换。
-        currentLine = lines.first()
+        // ★对齐原版 checkFlag（5.6.0:3642）—— `onItemClick(mHistory.getFlag())`：
+        //   进详情页用的是**历史里记的那条线路**，不是 flags.get(0)。
+        //   我们原来固定 lines.first()，于是「上次在第 3 条线路看第 25 集」再进来时：
+        //   线路回到第 1 条 → 集数列表换成另一批 → 按 url 定位必然匹配失败 → 永远第 1 集。
+        val hKey0 = HistoryStore.keyOf(v.vodId, v.vodName)
+        val histFlag = runCatching { HistoryStore(this).lastFlag(hKey0) }.getOrDefault("")
+        currentLine = lines.firstOrNull { it.name == histFlag } ?: lines.first()
         showLines = false
         buildFlags(lines)
-        renderEpisodes(lines.first())
+        renderEpisodes(currentLine ?: lines.first())
         findDetail<RecyclerView>(R.id.detailList)?.let { rv ->
-            rv.post { rv.requestFocus() }
+            rv.post {
+                rv.requestFocus()
+                // ★requestFocus 会把焦点落到首个可聚焦项、可视区一并拉回顶部 ——
+                //   必须在这之后再滚一次，否则 showGroup 里那次 scrollToPosition 白做。
+                val start = activeSection * GROUP_SIZE
+                val end = minOf(start + GROUP_SIZE, episodes.size)
+                if (playingIdx in start until end) {
+                    val pos = if (epOrder) end - 1 - playingIdx else playingIdx - start
+                    rv.scrollToPosition(pos.coerceAtLeast(0))
+                }
+            }
         }
         // 对齐原版：VideoActivity 打开即 onRefresh 起播当前集，不是等用户点。
         // 迅雷单条要先等展开结果，展开完再起播。
@@ -750,21 +801,95 @@ class MainActivity : Activity() {
     private fun resolveHistoryEpisode(): Int {
         val v0 = vod ?: return 0
         val key = HistoryStore.keyOf(v0.vodId, v0.vodName)
-        val last = runCatching { HistoryStore(this).lastEpUrl(key) }.getOrDefault("")
-        if (last.isBlank()) return 0
-        val idx = episodes.indexOfFirst { it.second == last }
-        MpvDebug.log("[detail] 历史集定位 key=${key.take(24)} hit=$idx/${episodes.size}")
-        return if (idx >= 0) idx else 0
+        val store = HistoryStore(this)
+        // 一级：url 精确 —— 对齐原版 Flag.indexOf:141（先按引用，再按 url）
+        val lastUrl = runCatching { store.lastEpUrl(key) }.getOrDefault("")
+        if (lastUrl.isNotBlank()) {
+            val i = episodes.indexOfFirst { it.second == lastUrl }
+            if (i >= 0) {
+                MpvDebug.log("[detail] 历史集定位 url 命中 $i/${episodes.size}")
+                return i
+            }
+        }
+        // 二级：按集名评分 —— 对齐原版 Flag.find(Episode, strict):182 的兜底
+        //       `return find(target.getName(), strict)` + Episode.getScore:111（100/80/70/60）
+        val lastName = runCatching { store.lastEpName(key) }.getOrDefault("")
+        if (lastName.isNotBlank()) {
+            val numL = episodeNumber(lastName)
+            var best = -1; var bestScore = 0
+            episodes.forEachIndexed { i, e ->
+                val n = e.first
+                val sn = n.lowercase(); val sl = lastName.lowercase()
+                val score = when {
+                    n.equals(lastName, ignoreCase = true) -> 100
+                    numL != -1 && episodeNumber(n) == numL -> 80
+                    lastName.length >= 2 && sn.contains(sl) -> 70
+                    n.length >= 2 && sl.contains(sn) -> 60
+                    else -> 0
+                }
+                if (score > bestScore) { bestScore = score; best = i }
+            }
+            if (best >= 0) {
+                MpvDebug.log("[detail] 历史集定位 名字命中 $best 分=$bestScore name=$lastName")
+                return best
+            }
+        }
+        MpvDebug.log("[detail] 历史集定位 未命中 url=${lastUrl.takeLast(18)} name=$lastName")
+        return 0
     }
 
-    private fun renderEpisodes(line: PlayLine) {
+    /**
+     * 按**集名**在当前集列表里找同一集 —— 对应原版 `onItemClick(Flag)` → `seamless(item)`
+     * → `flag.find(mHistory.getEpisode(), true)` → `Episode.getScore`（100/80/70/60）。
+     *
+     * 换线路时集序、集数都会变，用**下标**当游标必然串集（3/40 变成别的第 3 集）。
+     */
+    private fun relocateToName(name: String, fallback: Int): Int {
+        val n = name.trim()
+        if (n.isEmpty() || episodes.isEmpty()) return fallback.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+        episodes.indexOfFirst { it.first == n }.takeIf { it >= 0 }?.let {
+            MpvDebug.log("[detail] 换线路重定位 同名命中 $it name=$n")
+            return it
+        }
+        val num = episodeNumber(n)
+        if (num >= 0) {
+            episodes.indexOfFirst { episodeNumber(it.first) == num }.takeIf { it >= 0 }?.let {
+                MpvDebug.log("[detail] 换线路重定位 同号命中 $it num=$num name=$n")
+                return it
+            }
+        }
+        MpvDebug.log("[detail] 换线路重定位 未命中 name=$n → $fallback")
+        return fallback.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+    }
+
+    /** 对齐 5.6.0 `Util.getNumber:110`：去 [..]/(..) → 去年份 → 去分辨率 → EPISODE 正则 → 兜底去非数字。 */
+    private fun episodeNumber(text: String): Int {
+        return runCatching {
+            var t = text.replace(Regex("\\[.*?\\]|\\(.*?\\)"), "")
+            t = t.replace(Regex("\\b(19|20)\\d{2}\\b"), "")
+            t = t.lowercase().replace(Regex("2160p|1080p|720p|480p|4k|h26[45]|x26[45]|mp4"), "")
+            val m = Regex("(?i)(?:ep|第|e|[\\-\\.\\s])\\s?(\\d{1,4})").find(t)
+            if (m != null) m.groupValues[1].toInt()
+            else {
+                val d = t.replace(Regex("\\D+"), "")
+                if (d.isEmpty()) -1 else d.toInt()
+            }
+        }.getOrDefault(-1)
+    }
+
+    private fun renderEpisodes(line: PlayLine, preferName: String? = null) {
         episodeSeq++          // 切线路/重渲染即作废上一轮异步展开
         episodes = line.episodes
         // 对齐原版 seamless(Flag)（5.6.0:1311）：列表渲染之前先把「上次打开的那一集」定位出来。
         // 原版是 setEpisodeAdapter → seamless(find) → selectEpisode(toggle + notifyItemChanged) 两段式；
         // 我们原来把定位挪到了 autoPlayFromHistory 里，而那时 applyEpisodeGrid/showGroup 已经拿着
         // playingIdx 的初值 -1 刷过一遍、之后再没有回刷 —— 于是在第 N 集，详情页永远显示第 1 集。
-        if (playingIdx < 0) playingIdx = resolveHistoryEpisode()
+        if (playingIdx < 0) {
+            // 换线路时传了 preferName：在新线路里找「同名那一集」（原版 seamless → flag.find(name)）；
+            // 首次进详情页没有 preferName，走历史定位。
+            playingIdx = if (preferName.isNullOrBlank()) resolveHistoryEpisode()
+            else relocateToName(preferName, 0)
+        }
         // 原版这一行是线路 tab（超级无敌4K / 高清4K / …），选中项标黄
         markActiveFlag(line.name)
         applyEpisodeGrid()
@@ -904,10 +1029,14 @@ class MainActivity : Activity() {
 
     private fun switchToLine(line: PlayLine) {
         if (line.name == currentLine?.name) return
+        // ★换线路 = 换了一批集，必须按**集名**在新线路里重新定位。
+        //   原来这里把旧下标 keep 直接拿去 playInline —— 新线路集序/集数不同，
+        //   播的就是「新线路的第 keep 集」，用户看到的是集数跳了、内容也对不上。
+        val keepName = episodes.getOrNull(playingIdx)?.first.orEmpty()
         currentLine = line
-        val keep = playingIdx
-        renderEpisodes(line)
-        if (keep >= 0) playInline(keep.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
+        playingIdx = -1
+        renderEpisodes(line, keepName)
+        if (playingIdx >= 0) playInline(playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
     }
 
     /**
@@ -927,15 +1056,19 @@ class MainActivity : Activity() {
             val next = lines[cur + 1]
             // 对齐原版 Notify.show(getString(R.string.play_switch_flag, flag.getFlag()))
             Toast.makeText(this, "正在切换到「${next.name}」", Toast.LENGTH_SHORT).show()
+            // 换源同样要保住"同一集"：取当前集名，在新线路里按名字/集号找回来。
+            val keepName1 = episodes.getOrNull(idx)?.first.orEmpty()
             currentLine = next
-            renderEpisodes(next)
-            val i = idx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+            playingIdx = -1
+            renderEpisodes(next, keepName1)
+            val i = playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
             playInline(i, auto = auto, depth = depth + 1)
             return
         }
         // 走完最后一条线路：原版继续 checkSearch 跨站搜索，本工程暂不做跨站
         Log.e("XingHuiTV", "[detail] 全部 ${lines.size} 条线路均失败")
-        hideDetailProgress()
+        disarmPlayTimeout()
+        hideInlineProgress()
         if (auto) {
             Toast.makeText(this, "所有线路都播放失败，可手动换源", Toast.LENGTH_SHORT).show()
         } else {
@@ -1024,19 +1157,35 @@ class MainActivity : Activity() {
             showLines && key.startsWith("L:") -> {
                 val idx = key.removePrefix("L:").toIntOrNull() ?: return
                 val line = v.parseLines().getOrNull(idx) ?: return
+                // 用户主动选线路：同样要保住「正在看的这一集」
+                // （原版 onItemClick(Flag) → setEpisodeAdapter + seamless(item) 会重新 find 一次）。
+                // 原来这里直接 renderEpisodes(line)，playingIdx 还是旧下标 → 串集。
+                val keepNameL = episodes.getOrNull(playingIdx)?.first.orEmpty()
+                val wasPlayingL = playingIdx >= 0
                 currentLine = line
                 showLines = false
-                renderEpisodes(line)
+                playingIdx = -1
+                renderEpisodes(line, keepNameL)
+                // 原版 onItemClick(Flag)：setEpisodeAdapter → seamless(item) → selectEpisode → onRefresh()
+                //   → 换好线路就**直接起播**，不需要再点一次集数。这里同样起播。
+                if (playingIdx >= 0) playInline(playingIdx, quiet = !wasPlayingL)
             }
             !showLines && key.startsWith("E:") -> {
                 val idx = key.removePrefix("E:").toIntOrNull() ?: return
-                MpvDebug.log("[pick] 点集数 E:$idx → openPlayPageAt（无条件进全屏）")
-                // ★点集数 = 直接进全屏播放层（原版 VideoActivity 点集数即进全屏）。
-                //   单 Activity 之后画面在宿主层的 videoFrame，详情页里的 playerBox 只是透明占位，
-                //   既没有 inlinePlayer 也没有第二块 surface。原来那套「小窗里换集 /
-                //   把 playerBox 铺满当全屏」已经没有任何画面可言 —— 铺满 playerBox 只会得到
-                //   「左上一个小画面 + 其余全黑」，也就是这个 bug 的现场。
-                openPlayPageAt(idx)
+                // 原版 `VideoActivity.onItemClick(Episode):1316` → `shouldEnterFullscreen(item):1510`：
+                //     `boolean enter = !isFullscreen() && item.isSelected();`
+                //     `item.isSelected()` 就是「这一集正被 FlagAdapter.toggle 标为当前集」，即正在播的那一集。
+                //   ① 点的**就是当前正播的那一集** → 只 `enterFullscreen()`，`selectEpisode` 都不调 → **不重播**
+                //   ② 点**别的集** → `selectEpisode(item, true)` → `onRefresh()` → **在小窗里就地换集，不进全屏**
+                // 之前这里是无条件 `openPlayPageAt`（一律进全屏），与原版不符。
+                if (idx == playingIdx && playingIdx >= 0 && !playMode) {
+                    MpvDebug.log("[pick] 点当前正在播的 E:$idx → 进全屏（不重播）")
+                    // openPlayPageAt 内部 `wasPlayingThis = idx == playingIdx` 为真 → 复用 inlineUrl，不重新解析
+                    openPlayPageAt(idx)
+                } else {
+                    MpvDebug.log("[pick] 点 E:$idx（当前在播 ${if (playingIdx < 0) "无" else playingIdx}）→ 小窗就地换集")
+                    playInline(idx)
+                }
             }
         }
     }
@@ -1050,11 +1199,14 @@ class MainActivity : Activity() {
         }
         val cur = lines.indexOfFirst { it.name == currentLine?.name }.let { if (it < 0) 0 else it }
         val next = lines[(cur + 1) % lines.size]
+        val keepName2 = episodes.getOrNull(playingIdx)?.first.orEmpty()
+        val wasPlaying = playingIdx >= 0
         currentLine = next
-        renderEpisodes(next)
+        playingIdx = -1
+        renderEpisodes(next, keepName2)
         Toast.makeText(this, "已换源：${next.name}", Toast.LENGTH_SHORT).show()
-        // 正在播就接着播同一集号的另一线路，否则只切换集数列表
-        if (playingIdx >= 0) playInline(playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
+        // 正在播就接着播同一集（按名字找），否则只切换集数列表
+        if (wasPlaying && playingIdx >= 0) playInline(playingIdx.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
     }
 
     private fun playInline(idx: Int, auto: Boolean = false, depth: Int = 0, quiet: Boolean = false) {
@@ -1088,8 +1240,8 @@ class MainActivity : Activity() {
         runCatching {
             HistoryStore(this).addHistory(v.vodId, v.vodName, v.vodPic, ep.first, line.name, ep.second)
         }
-        // 对齐原版 showProgress：解析请求发出时圈就该亮。quiet 是"从播放页回来静默恢复小窗"，不显示。
-        if (!quiet) showDetailProgress()
+        // 对齐原版 showProgress：解析请求发出时小窗圈就该亮。quiet = 从播放页回来静默恢复小窗，不显示。
+        if (!quiet) showInlineProgress()
         Thread {
             var url = ""
             var err = ""
@@ -1147,6 +1299,9 @@ class MainActivity : Activity() {
                 }
                 if (!ok) {
                     handlePlayFailure(idx, auto, "内核不支持该地址（$url）", depth)
+                } else {
+                    // 对齐原版：媒体源已经下发，从这一刻开始计 15 秒
+                    armPlayTimeout(idx, auto, depth)
                 }
             }
         }.start()
@@ -1342,6 +1497,10 @@ class MainActivity : Activity() {
         val reusableUrl = if (wasPlayingThis) inlineUrl else ""
         playingIdx = idx
         runCatching { adapter.setActive("E:$idx") }
+        // 交接给播放层时小窗圈必须灭掉 —— 否则全屏播放期间那块 400x225 的圈还在转
+        // （原版没有"两套 UI"这一层，圈只在小窗里，不存在这个问题）。
+        disarmPlayTimeout()
+        hideInlineProgress()
         inlineLeaveFullscreen = inlineFullscreen
         // 交接给播放层之前先把详情页预览停下来（暂停 + 摘掉画面层，但保留实例）
         detachInlinePlayback()
