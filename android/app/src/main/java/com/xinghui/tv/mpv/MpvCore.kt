@@ -190,8 +190,8 @@ class MpvCore(private val appContext: Context) {
      * 官方挂面：attachSurface 之后 mpv 自己起 vo=gpu 渲染线程往这块 Surface 推帧。
      * android-surface-size 一定要在 attach 之后设，并且每次窗口尺寸变化都要重设。
      */
-    fun attachSurface(s: Surface, width: Int, height: Int) {
-        if (dead || !created) return
+    fun attachSurface(s: Surface, width: Int, height: Int): Boolean {
+        if (dead || !created) return false
         applyColorDepth(true)
         surface = s
         val ok = runCatching {
@@ -204,7 +204,10 @@ class MpvCore(private val appContext: Context) {
             MpvDebug.log("[mpv] attachSurface 失败 ${it.message}")
             false
         }
-        MpvDebug.log("[mpv] vo=gpu attach ${width}x${height} ok=$ok")
+        // 挂失败就把 surface 记录撤掉，别留一个「看起来有面、其实没面」的状态。
+        if (!ok) surface = null
+        MpvDebug.log("[mpv] vo=gpu attach ${width}x$height ok=$ok")
+        return ok
     }
 
     /** 尺寸变了但 Surface 没换：只更新 android-surface-size */

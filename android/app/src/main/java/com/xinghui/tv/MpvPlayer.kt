@@ -495,11 +495,18 @@ class MpvPlayer(
         //   before the real MediaCodec format is known, causing an extra reconfig.
         // 这里之前设成 yes，mpv 会另建一个自带窗口的 VO 来跟交给它的 Surface 争，
         // 表现就是画面不动、声音还在——就是「mpv 内核卡死」。
-        runCatching { core.attachSurface(surface, width, height) }
+        val ok = runCatching { core.attachSurface(surface, width, height) }.getOrDefault(false)
         runCatching { core.setPropertyString("force-window", "no") }
-        runCatching { core.setPropertyString("vo", "gpu") }
+        // 挂失败就绝不能设 vo=gpu。否则变成「vo=gpu + surfaceReady=true，但面其实没挂上」，
+        // 两重判据都认为已经好了，之后永远不再重试 —— 黑屏有声。
+        if (ok) runCatching { core.setPropertyString("vo", "gpu") }
         runCatching {
             MpvDebug.log("[mpv] attachSurface ${width}x${height} first=$first 像素格式保持系统默认（本版不再 setFormat）")
+        }
+        if (!ok) {
+            surfaceReady = false
+            MpvDebug.log("[mpv] 挂面失败，surfaceReady 保持 false，等下次 bindHolder/surfaceChanged 重挂")
+            return
         }
         surfaceReady = true
         if (playPending && pendingUrl.isNotBlank()) {
@@ -1676,6 +1683,11 @@ class MpvPlayer(
         runCatching { core.setPropertyString("vo", "null") }
         runCatching { core.setPropertyString("force-window", "no") }
         runCatching { core.detachSurface() }
+        // 这里必须复位。vo 已经被设成 "null"，如果 surfaceReady 还留着 true，
+        // 下一次 bindHolder 会因为「已经挂好了」而跳过重新 attach ——
+        // 结果就是 vo 永远是 null，解码照跑、画面永远黑，日志表现为
+        // vo=null 但 playing=true、[vs] 一直报尺寸。这就是黑屏有声。
+        surfaceReady = false
         return Futures.immediateVoidFuture()
     }
 
@@ -1695,7 +1707,10 @@ class MpvPlayer(
         // 上 addCallback，Android 不会再补发 surfaceCreated。只等回调的话 surfaceReady
         // 永远是 false，play() 进不了 doPlay，15 秒后 watchdog 把内核 release 掉、退回 EXO ——
         // 表现就是「mpv 内核卡死、只有声音」。
-        if (valid && !surfaceReady) {
+        // 判据不只看 surfaceReady，也看 vo 的真实值：vo 被置 null 过之后
+        // surfaceReady 万一没复位，这里仍会把面挂回去。
+        val voDead = core.getPropertyString("vo") != "gpu"
+        if (valid && (!surfaceReady || voDead)) {
             if (!inited) initWithOptions()
             if (inited) onSurfaceCreated(holder)
         }

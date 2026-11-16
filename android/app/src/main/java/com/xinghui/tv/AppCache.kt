@@ -38,7 +38,7 @@ object AppCache {
         runCatching { File(com.github.catvod.utils.Path.thunderCache(), "thunder") }.getOrNull(),
         File(ctx.filesDir, "jpa"),        // 历史残留：旧版硬编码在 filesDir，升级后旧数据还在
         File(ctx.filesDir, "dexcache"),   // spider jar 的 dex 优化产物（对齐原版 cache/jar）
-        File(ctx.filesDir, "mpv.log"),    // mpv 日志（msg-level=all=w 也会缓慢增长）
+        File(ctx.filesDir, "mpv.log"),    // mpv 日志（msg-level=all=info，初始化段较大，播放中基本不增长）
         File(ctx.filesDir, "crash.log"),  // 上次崩溃堆栈
         ctx.cacheDir,                     // 含 spider jar 的 dex 优化产物、迅雷 Path.thunder()/jpa
         ctx.externalCacheDir,             // 系统外置缓存
