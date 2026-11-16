@@ -135,16 +135,23 @@
                 android:layout_gravity="center"
                 android:indeterminateTint="@android:color/white" />
 
-            <!-- 原版 view_progress.xml：@id/traffic 白字 16sp、marginTop 40dip、默认 gone -->
+            <!-- 逐条对齐 5.0.8 `res/layout/view_progress.xml` 第 5 行：
+                 <MaterialTextView android:textSize="16.0sp" android:textColor="@color/white"
+                   android:layout_gravity="center" android:id="@id/traffic"
+                   android:visibility="gone" android:layout_width="wrap_content"
+                   android:layout_height="wrap_content" android:layout_marginTop="40.0dip" />
+                 ★注意：原版**没有** android:text 属性。这段文字是 `Traffic.setSpeed(view)` 每秒写进去的
+                   网速（"123 KB/s" / "1.2 MB/s"），不是"加载中"提示。
+                   我之前写死成 text="加载中"、marginTop 改成 56dp，两处都是自创，已改回。 -->
             <TextView
                 android:id="@+id/inlineProgressText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="center"
-                android:layout_marginTop="56dp"
-                android:text="加载中"
+                android:layout_marginTop="40dp"
                 android:textColor="@android:color/white"
-                android:textSize="16sp" />
+                android:textSize="16sp"
+                android:visibility="gone" />
         </FrameLayout>
     </androidx.media3.ui.AspectRatioFrameLayout>
 

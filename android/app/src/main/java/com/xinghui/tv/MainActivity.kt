@@ -90,8 +90,12 @@ class MainActivity : Activity() {
     private var surfaceValid = false
     private var playMode = false
 
-    private fun <T : View> findDetail(id: Int): T = detailRoot.findViewById(id)
-    private fun <T : View> findViewHost(id: Int): T = this.findViewById<View>(id) as T
+    // 返回可空类型：`findViewById` 本身就可能返回 null。原来声明成非空 `T`，
+    // 一旦 id 不在 detailRoot 那棵树里就抛 `NullPointerException: findViewById(...) must not be null`，
+    // 崩溃栈只指向这一行，看不出调用方。原版用 ViewBinding（`mBinding.xxx`）是编译期保证的，
+    // 我们手工实现没有那层保证，所以这里必须如实声明可空，让调用方逐个处理。
+    private fun <T : View> findDetail(id: Int): T? = detailRoot.findViewById(id)
+    private fun <T : View> findViewHost(id: Int): T? = this.findViewById<View>(id) as T?
 
     private lateinit var store: HistoryStore
     private var vod: Vod? = null
@@ -261,28 +265,85 @@ class MainActivity : Activity() {
      * 所以错误块出现在**小窗内部**。
      */
     private fun showError(text: String) {
-        findDetail<android.widget.LinearLayout>(R.id.inlineError)?.visibility = View.VISIBLE
-        findDetail<android.widget.TextView>(R.id.inlineErrorText)?.text = text
+        // ★这里必须用 Activity 级的 findViewById，不能用 findDetail：
+        //   `findDetail(id): T = detailRoot.findViewById(id)` 只在 **activity_detail_layer** 那棵树里找，
+        //   而 inlineError 在 `activity_host.xml` 的 videoFrame 里（宿主层，不在 detailRoot 内）。
+        //   用 findDetail 会拿到 null，而 findDetail 的返回类型是非空 T →
+        //   直接抛 `java.lang.NullPointerException: findViewById(...) must not be null`（MainActivity.kt:93）。
+        findViewById<android.widget.LinearLayout>(R.id.inlineError)?.visibility = View.VISIBLE
+        findViewById<android.widget.TextView>(R.id.inlineErrorText)?.text = text
         hideInlineProgress()
     }
 
-    /** 对齐原版 `:3456 hideError()`：`error` GONE + `text` 清空。 */
+    /** 对齐原版 `:3456 hideError()`：`error` GONE + `text` 清空。（同上，走 Activity 级 findViewById） */
     private fun hideError() {
-        findDetail<android.widget.LinearLayout>(R.id.inlineError)?.visibility = View.GONE
-        findDetail<android.widget.TextView>(R.id.inlineErrorText)?.text = ""
+        findViewById<android.widget.LinearLayout>(R.id.inlineError)?.visibility = View.GONE
+        findViewById<android.widget.TextView>(R.id.inlineErrorText)?.text = ""
     }
 
+    /**
+     * 小窗加载圈 + 网速 —— 调度与文案逐条对齐原版：
+     *   5.6.0 `VideoActivity:601  mR3 = this::setTraffic;`
+     *   `:3434 showProgress()` 里 `App.post(mR3, 0);`
+     *   `:3516 setTraffic()` → `Traffic.setSpeed(mBinding.progress.traffic); App.post(mR3, 1000);`
+     *   `:3446 hideProgress()` 里 `App.removeCallbacks(mR3); Traffic.reset();`
+     *   `utils/Traffic.java:21 setSpeed(view)` → `view.setVisibility(VISIBLE); view.setText(getSpeed());`
+     *   `Traffic.java:27 getSpeed()` → `speed < 1000 ? speed + " KB/s" : format("#.0", speed/1024) + " MB/s"`
+     */
     private fun showInlineProgress() {
         if (playMode) return
         // 原版 `showProgress():3433` 里前两句是 `hideCenter(); hideError();`
         hideError()
         findViewById<View>(R.id.inlineProgress)?.visibility = View.VISIBLE
+        // 原版 `App.post(mR3, 0)` —— 立刻跑一次网速
+        playTimeoutHandler.post(trafficRunnable)
         MpvDebug.log("[detail] 小窗加载圈 ON")
     }
 
     private fun hideInlineProgress() {
         findViewById<View>(R.id.inlineProgress)?.visibility = View.GONE
+        // 原版 `hideProgress():3446` 里 `App.removeCallbacks(mR3); Traffic.reset();`
+        playTimeoutHandler.removeCallbacks(trafficRunnable)
+        trafficReset()
         MpvDebug.log("[detail] 小窗加载圈 OFF")
+    }
+
+    // ═══ 网速：逐条复刻 utils/Traffic.java（原版是独立类，这里按本项目不新增并列文件的约定内联） ═══
+    private val trafficFormat = java.text.DecimalFormat("#.0")
+    private var trafficLastRx = 0L
+    private var trafficLastTs = 0L
+    private val trafficUid: Int get() = android.os.Process.myUid()
+
+    // 显式声明 Runnable 类型：内部要自引用再 postDelayed，否则 Kotlin 递归类型推断报错
+    private val trafficRunnable: Runnable = Runnable { runTrafficTick() }
+
+    private fun runTrafficTick() {
+        // 原版 `Traffic.java:22 if (TrafficStats.getUidRxBytes(UID) == TrafficStats.UNSUPPORTED) return;`
+        if (android.net.TrafficStats.getUidRxBytes(trafficUid) == android.net.TrafficStats.UNSUPPORTED.toLong()) return
+        val tv = findViewById<android.widget.TextView>(R.id.inlineProgressText) ?: return
+        // 原版 `Traffic.java:23 view.setVisibility(View.VISIBLE);`
+        tv.visibility = View.VISIBLE
+        // 原版 `Traffic.java:24 view.setText(getSpeed());`
+        tv.text = trafficSpeed()
+        // 原版 `:3517 App.post(mR3, 1000);`
+        playTimeoutHandler.postDelayed(trafficRunnable, 1000L)
+    }
+
+    /** 原版 `Traffic.java:27 getSpeed()`：`(nowRx - lastRx) * 1000 / max(now - last, 1)`，KB/s 与 MB/s 分档 */
+    private fun trafficSpeed(): String {
+        val now = System.currentTimeMillis()
+        val nowRx = android.net.TrafficStats.getUidRxBytes(trafficUid) / 1024
+        val speed = (nowRx - trafficLastRx) * 1000 / maxOf(now - trafficLastTs, 1L)
+        trafficLastTs = now
+        trafficLastRx = nowRx
+        // 原版 `Traffic.java:33 return speed < 1000 ? speed + UNIT_KB : format.format(speed / 1024f) + UNIT_MB;`
+        return if (speed < 1000) "$speed KB/s" else trafficFormat.format(speed / 1024f) + " MB/s"
+    }
+
+    /** 原版 `Traffic.java:36 reset()` */
+    private fun trafficReset() {
+        trafficLastRx = 0L
+        trafficLastTs = 0L
     }
 
     private fun armPlayTimeout(idx: Int, auto: Boolean, depth: Int) {
@@ -485,8 +546,8 @@ class MainActivity : Activity() {
             android.widget.Toast.makeText(this, "tk20 · 画面层归一", android.widget.Toast.LENGTH_LONG).show()
         }
 
-        hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)
-        detailLayer = findViewHost(R.id.detailLayer)
+        hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)!!
+        detailLayer = findViewHost(R.id.detailLayer)!!
         // ★不依赖 XML：布局文件的背景一律在这里强制成透明。
         //   壁纸现在是布局里那块 contextWall（全屏 ImageView），不再依赖窗口背景；
         //   这两层只要有一层不是 transparent，详情页就是纯黑 ——
@@ -495,12 +556,12 @@ class MainActivity : Activity() {
             hostRoot.setBackgroundColor(android.graphics.Color.TRANSPARENT)
             detailLayer.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
-        playContainer = findViewHost(R.id.playLayer)
-        videoFrame = findViewHost(R.id.videoFrame)
+        playContainer = findViewHost(R.id.playLayer)!!
+        videoFrame = findViewHost(R.id.videoFrame)!!
         // ★画面由官方 PlayerView 承载，它内部那个 SurfaceView 才是真正的渲染目标。
         videoSurface = resolveSurfaceView()
         frameParams = videoFrame.layoutParams
-        subtitleView = findViewHost(R.id.subtitleView)
+        subtitleView = findViewHost(R.id.subtitleView)!!
 
         detailRoot = layoutInflater.inflate(R.layout.activity_detail_layer, detailLayer, false)
         detailLayer.addView(detailRoot)
@@ -547,15 +608,15 @@ class MainActivity : Activity() {
         val list = findDetail<RecyclerView>(R.id.detailList)
         // 集数聚焦用黄字（对齐原版 01[1080P] 的高亮），分类条等其它地方不受影响
         adapter = ListAdapter(pairs, null, Color.rgb(255, 204, 0)) { key -> onPick(key) }
-        list.layoutManager = LinearLayoutManager(this)
-        list.adapter = adapter
+        list?.layoutManager = LinearLayoutManager(this)
+        list?.adapter = adapter
 
         // 返回按钮按原版去掉（原版 VodActivity 靠系统返回键），布局里也不再声明
-        findDetail<View>(R.id.btnFav).setOnClickListener { toggleFav() }
-        findDetail<View>(R.id.btnDesc).setOnClickListener { showDescDialog() }
-        findDetail<View>(R.id.btnSource).setOnClickListener { switchSource() }
+        findDetail<View>(R.id.btnFav)?.setOnClickListener { toggleFav() }
+        findDetail<View>(R.id.btnDesc)?.setOnClickListener { showDescDialog() }
+        findDetail<View>(R.id.btnSource)?.setOnClickListener { switchSource() }
         // 倒序：整段集数反向排（原版「倒序 →」那个按钮）
-        findDetail<View>(R.id.btnOrder).setOnClickListener {
+        findDetail<View>(R.id.btnOrder)?.setOnClickListener {
             epOrder = !epOrder
             if (episodes.size > GROUP_SIZE) activeSection = 0
             rebuildGroups()
@@ -593,7 +654,7 @@ class MainActivity : Activity() {
                     "windowBg=${window.decorView.background?.javaClass?.simpleName}"
             )
         }
-        inlineView = findDetail(R.id.inlinePlayer)
+        inlineView = findDetail(R.id.inlinePlayer)!!
         // ★这一行是「详情页预览到底创建的是 SurfaceView 还是 TextureView」的唯一直接证据。
         //   PlayerView 在 surface_type=surface_view 下 getVideoSurfaceView() 返回内部的 SurfaceView；
         //   改成 texture_view 后它返回 null。所以 /debug 里这一行打「null」就说明 texture_view 生效了，
@@ -620,7 +681,7 @@ class MainActivity : Activity() {
         player?.let { bindDetailListener(it) }
         // ★点小窗 = 进全屏播放层（原版 VideoActivity 点视频框即进全屏）。
         //   不再走 enterInlineFullscreen：那条路铺满的是 playerBox，而画面在宿主层的 videoFrame。
-        findDetail<View>(R.id.playerBox).setOnClickListener {
+        findDetail<View>(R.id.playerBox)?.setOnClickListener {
             openPlayPageAt(playingIdx.coerceAtLeast(0))
         }
 
@@ -743,7 +804,7 @@ class MainActivity : Activity() {
         showLines = true
         currentLine = null
 
-        findDetail<TextView>(R.id.detailName).text = v.vodName
+        findDetail<TextView>(R.id.detailName)?.text = v.vodName
         // 对齐原版信息行：「站源: xxx   年份: xxx   地区: xxx」，标签与值分段，
         // 之前用「 · 」拼成一行，读不出哪段是什么。
         val siteName = SubscriptionStore(this).currentSite()?.name.orEmpty()
@@ -755,10 +816,10 @@ class MainActivity : Activity() {
                 if (isNotEmpty()) append("    "); append("更新：").append(v.vodRemarks)
             }
         }
-        findDetail<TextView>(R.id.detailInfo).text = info.ifBlank { "暂无信息" }
-        findDetail<TextView>(R.id.detailDesc).text = v.vodContent.ifBlank { "暂无简介" }
+        findDetail<TextView>(R.id.detailInfo)?.text = info.ifBlank { "暂无信息" }
+        findDetail<TextView>(R.id.detailDesc)?.text = v.vodContent.ifBlank { "暂无简介" }
         if (Settings(this).showPoster) {
-            AsyncImageLoader.load(findDetail(R.id.detailImage), v.vodPic)
+            findDetail<android.widget.ImageView>(R.id.detailImage)?.let { AsyncImageLoader.load(it, v.vodPic) }
         }
         applyFavState(store.isFavorite(v.vodId))
 
@@ -768,7 +829,7 @@ class MainActivity : Activity() {
             showLines = true
             pairs.add("none" to "无播放线路")
             buildFlags(emptyList())
-            findDetail<RecyclerView>(R.id.detailList).layoutManager = LinearLayoutManager(this)
+            findDetail<RecyclerView>(R.id.detailList)?.layoutManager = LinearLayoutManager(this)
             adapter.notifyDataSetChanged()
             return
         }
@@ -984,12 +1045,12 @@ class MainActivity : Activity() {
             else -> 10
         }
         val singleLine = runCatching { Settings(this).episodeStyle == 0 }.getOrDefault(false)
-        rv.layoutManager = if (singleLine)
+        rv?.layoutManager = if (singleLine)
             androidx.recyclerview.widget.LinearLayoutManager(this, RecyclerView.HORIZONTAL, false)
         else GridLayoutManager(this, cols)
-        if (rv.itemDecorationCount == 0) {
+        if (rv?.itemDecorationCount == 0) {
             // 列间隙 8dp：左右各 4dp，相邻两格加起来正好 8dp（对齐原版 colWidth 的扣减方式）
-            rv.addItemDecoration(object : RecyclerView.ItemDecoration() {
+            rv?.addItemDecoration(object : RecyclerView.ItemDecoration() {
                 override fun getItemOffsets(
                     outRect: android.graphics.Rect, view: View,
                     parent: RecyclerView, state: RecyclerView.State
@@ -1112,7 +1173,7 @@ class MainActivity : Activity() {
      */
     private fun rebuildGroups() {
         val box = findDetail<android.widget.LinearLayout>(R.id.groupItems)
-        box.removeAllViews()
+        box?.removeAllViews()
         val row = findDetail<View>(R.id.groupRow)
         if (episodes.size <= 1) {
             row?.visibility = View.GONE
@@ -1141,7 +1202,7 @@ class MainActivity : Activity() {
                     (it as TextView).requestFocus()
                 }
             }
-            box.addView(btn)
+            box?.addView(btn)
         }
     }
 
@@ -1244,9 +1305,9 @@ class MainActivity : Activity() {
         val ep = episodes.getOrNull(idx)
             ?: line.episodes.getOrNull(idx)
             ?: run {
+                // 原版 `onItemClick(Episode)` 里集一定有效（来自 mEpisodeAdapter），没有这个分支。
+                // 这里只保留内部诊断日志，界面上不做任何事（按源码移植，不自创提示）。
                 Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}")
-                // 原版没有这个分支；这里是我们自己的保护，按原版 showError 的方式报（文案用 error_detail）
-                showError("暂无播放数据")
                 return
             }
         playingIdx = idx
@@ -1417,13 +1478,13 @@ class MainActivity : Activity() {
         inlineFullscreen = true
         setPreviewVisible(true)
         val box = findDetail<FrameLayout>(R.id.playerBox)
-        savedBoxParams = box.layoutParams
+        savedBoxParams = box?.layoutParams
         // 对齐原版 VideoActivity.enterFullscreen():853 —— mBinding.video.setForeground(null)。
         // 小窗挂的 selector_video 聚焦时画的是 shape_video_focused（1.5dp 纯白描边），
         // 全屏时不去掉，四周就留一整圈白线，也就是一直在说的「四周白条」。
-        savedBoxForeground = box.foreground
-        box.foreground = null
-        box.layoutParams = android.widget.RelativeLayout.LayoutParams(
+        savedBoxForeground = box?.foreground
+        box?.foreground = null
+        box?.layoutParams = android.widget.RelativeLayout.LayoutParams(
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT
         )
@@ -1434,7 +1495,7 @@ class MainActivity : Activity() {
         // ★画面在宿主层，铺满 playerBox 不等于铺满画面 —— 必须同时把 videoFrame 拉全屏，
         //   否则就是「playerBox 占满屏幕，但画面还是左上 400x225」（本 bug 的原始现场）。
         runCatching { videoFrameToFull() }
-        box.requestFocus()
+        box?.requestFocus()
     }
 
     private fun exitInlineFullscreen() {
@@ -1442,9 +1503,9 @@ class MainActivity : Activity() {
         inlineFullscreen = false
         val box = findDetail<FrameLayout>(R.id.playerBox)
         // 还原进全屏时保存的那份参数（类型与父容器天然匹配，不做任何强转）
-        savedBoxParams?.let { box.layoutParams = it }
+        savedBoxParams?.let { box?.layoutParams = it }
         // 对齐原版 exitFullscreen():866 —— setForeground(selector_video) 还原小窗焦点边框
-        box.foreground = savedBoxForeground ?: runCatching {
+        box?.foreground = savedBoxForeground ?: runCatching {
             getDrawable(R.drawable.selector_video)
         }.getOrNull()
         listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
@@ -1464,7 +1525,7 @@ class MainActivity : Activity() {
         //         PlayerView.setVisibility 会连带设内部 surface view，ExoPlayer#3160）
         //       → 解码器照常在跑、声音照常在出，画面没有承载层。
         runCatching { setPreviewVisible(true) }
-        findDetail<View>(R.id.detailList).requestFocus()
+        findDetail<View>(R.id.detailList)?.requestFocus()
     }
 
     /**
