@@ -75,9 +75,31 @@ class MpvPlayer(
 
     private var inited = false
     private var surfaceReady = false
-    /** 上一次真正挂面时用的宽高。用来判断 surfaceChanged 是「微调」还是「小窗↔全屏」这种量级变化。 */
-    private var lastFrameW = 0
-    private var lastFrameH = 0
+    /**
+     * 照 5.6.0 的 attachedSurface / attachedVo。
+     * bindVideoOutput:3301 用它做 `sameVideoSurface = surfaceAttached && attachedSurface == surface`：
+     * 引用没变（只是尺寸变了）就只更新 android-surface-size；引用变了才重新 attach。
+     * 少了这层判断，Surface 一被系统换掉，mpv 会继续往已失效的旧面推帧 —— 全屏黑屏或卡死。
+     */
+    private var attachedSurface: Surface? = null
+    private var attachedVo: String? = null
+    /** 照 5.6.0 的 surfaceWidth/surfaceHeight：尺寸先进缓存，下发时从缓存取。 */
+    private var cachedSurfaceW = 0
+    private var cachedSurfaceH = 0
+
+    /** 当前 vo 真正生效的尺寸。只有它变了才需要重建 vo，见 scheduleVoRebuild 的说明。 */
+    private var voSizeW = 0
+    private var voSizeH = 0
+    private var pendingVoW = 0
+    private var pendingVoH = 0
+    private val sizeHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val voRebuildRunnable = Runnable {
+        val w = pendingVoW
+        val h = pendingVoH
+        pendingVoW = 0
+        pendingVoH = 0
+        if (w > 0 && h > 0 && (w != voSizeW || h != voSizeH)) rebuildVoForSize(w, h)
+    }
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
@@ -452,41 +474,22 @@ class MpvPlayer(
     //   3. surface 的生命周期跟着 SurfaceView，Activity 不可见时系统照样会 destroyed，逻辑与原来一致。
 
     private fun onSurfaceCreated(holder: SurfaceHolder) {
+        // 照 5.6.0 surfaceCreated:3525 —— 重新取 surface、更新尺寸缓存、回到统一的 bindVideoOutput
         val w = holder.surfaceFrame.width()
         val h = holder.surfaceFrame.height()
+        if (w > 0 && h > 0) { cachedSurfaceW = w; cachedSurfaceH = h }
         MpvDebug.log("[mpv] surfaceCreated(SurfaceView) inited=$inited playPending=$playPending ${w}x$h")
         if (!inited) initWithOptions()
         if (!inited) return
-        attachSurface(holder.surface, w, h, first = true)
+        bindVideoOutput(first = true)
     }
 
     private fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format last=${lastFrameW}x$lastFrameH")
-        if (!inited) {
-            lastFrameW = width
-            lastFrameH = height
-            return
-        }
-        if (width <= 0 || height <= 0) return
-        val sameSize = (width == lastFrameW && height == lastFrameH)
-        if (sameSize) return
-        // 微调（布局重算抖几个像素）只更新属性；
-        // 量级变化（小窗 600x338 → 全屏 1920x1080）必须重建输出，见下面的说明。
-        val bigChange = lastFrameW <= 0 || lastFrameH <= 0 ||
-            kotlin.math.abs(width - lastFrameW) > lastFrameW / 6 ||
-            kotlin.math.abs(height - lastFrameH) > lastFrameH / 6
-        lastFrameW = width
-        lastFrameH = height
-        if (!bigChange) {
-            core.updateSurfaceSize(width, height)
-            return
-        }
-        if (!surfaceReady) {
-            // 还没挂面，只记下尺寸，等 attach 时按新值挂
-            core.updateSurfaceSize(width, height)
-            return
-        }
-        rebindForSizeChange(holder, width, height)
+        // 照 5.6.0 surfaceChanged:3533 —— 尺寸进缓存，然后交给 bindVideoOutput 判定
+        if (width > 0 && height > 0) { cachedSurfaceW = width; cachedSurfaceH = height }
+        MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format attached=${attachedSurface != null}")
+        if (!inited) return
+        bindVideoOutput(first = false)
     }
 
     /**
@@ -500,35 +503,23 @@ class MpvPlayer(
      * 所以量级变化时按 5.6.0 的换面路径重建一次：摘 vo → detach → 重新 attach → 重新设 vo。
      * 中间黑一下是重建的固有代价，比停在旧帧上强。
      */
-    private fun rebindForSizeChange(holder: SurfaceHolder, width: Int, height: Int) {
-        // 旧尺寸看上一行 surfaceChanged 里的 last=xxx（那条是在更新前打的）
-        MpvDebug.log("[mpv] 尺寸量级变化 → 重建输出 ${width}x$height")
-        val wasPlaying = !paused
-        surfaceReady = false
-        runCatching { core.setPropertyString("vo", "null") }
-        runCatching { core.setPropertyString("force-window", "no") }
-        runCatching { core.detachSurface() }
-        attachSurface(holder.surface, width, height, first = false)
-        if (surfaceReady && wasPlaying && paused) {
-            runCatching { core.setPropertyBoolean("pause", false) }
-        }
-    }
+    
 
     private fun onSurfaceDestroyed(holder: SurfaceHolder) {
+        // 照 5.6.0 surfaceDestroyed:3541 —— 面没了就把引用一起清掉
         MpvDebug.log("[mpv] surfaceDestroyed(SurfaceView) inited=$inited")
         surfaceReady = false
-        lastFrameW = 0
-        lastFrameH = 0
         if (inited) {
-            // 官方 BaseMPVView.surfaceDestroyed 原文（BaseMPVView.kt）：
-            //   MPVLib.setPropertyString("vo", "null")
-            //   MPVLib.setPropertyString("force-window", "no")
-            //   MPVLib.detachSurface()
-            // 顺序不能反：先把视频输出摘掉，再解绑 Surface，否则 mpv 会在已失效的窗口上再推一帧。
+            // 官方 BaseMPVView.surfaceDestroyed 顺序不能反：先摘 vo，再 force-window=no，最后 detachSurface。
+            // 反过来 mpv 会对着一个已失效的窗口再推一帧。
             runCatching { core.setPropertyString("vo", "null") }
             runCatching { core.setPropertyString("force-window", "no") }
-            core.detachSurface()
+            runCatching { core.detachSurface() }
         }
+        attachedSurface = null
+        attachedVo = null
+        cachedSurfaceW = 0
+        cachedSurfaceH = 0
     }
 
     /** TextureView 形态只能轮询：PlayerView 已挂了 SurfaceTextureListener，再注册会顶掉它。 */
@@ -543,27 +534,28 @@ class MpvPlayer(
         // 顺序照 5.6.0 bindVideoOutput:3317-3325：先 mpvAttachSurface + applyAndroidSurfaceSize，
         // 最后才 set vo。反过来先设 vo=gpu 再 attach，mpv 会先在没有面的状态下建一次输出。
         //
-        // force-window 必须是 no。5.6.0:3323 原文写明：
+        // force-window 必须是 no。5.6.0:3323 原文：
         //   Opening force-window while idle creates a disposable 960x540 VO
         //   before the real MediaCodec format is known, causing an extra reconfig.
-        // 这里之前设成 yes，mpv 会另建一个自带窗口的 VO 来跟交给它的 Surface 争，
-        // 表现就是画面不动、声音还在——就是「mpv 内核卡死」。
         val ok = runCatching { core.attachSurface(surface, width, height) }.getOrDefault(false)
         runCatching { core.setPropertyString("force-window", "no") }
-        // 挂失败就绝不能设 vo=gpu。否则变成「vo=gpu + surfaceReady=true，但面其实没挂上」，
-        // 两重判据都认为已经好了，之后永远不再重试 —— 黑屏有声。
-        if (ok) runCatching { core.setPropertyString("vo", "gpu") }
-        runCatching {
-            MpvDebug.log("[mpv] attachSurface ${width}x${height} first=$first 像素格式保持系统默认（本版不再 setFormat）")
-        }
         if (!ok) {
             surfaceReady = false
-            MpvDebug.log("[mpv] 挂面失败，surfaceReady 保持 false，等下次 bindHolder/surfaceChanged 重挂")
+            attachedSurface = null
+            attachedVo = null
+            MpvDebug.log("[mpv] 挂面失败 ${width}x$height，等下次 bindVideoOutput 重试")
             return
         }
+        runCatching { core.setPropertyString("vo", "gpu") }
+        attachedSurface = surface
+        attachedVo = "gpu"
         surfaceReady = true
-        lastFrameW = width
-        lastFrameH = height
+        cachedSurfaceW = width
+        cachedSurfaceH = height
+        voSizeW = width
+        voSizeH = height
+        MpvDebug.log("[mpv] attachSurface ${width}x$height first=$first ok=true")
+        // 挂好之后的起播协调
         if (playPending && pendingUrl.isNotBlank()) {
             playPending = false
             doPlay(pendingUrl)
@@ -574,14 +566,88 @@ class MpvPlayer(
         } else if (first && pendingUrl.isNotBlank() && !backgrounded) {
             // 换了一块新 surface，但 mpv 因为 vo 曾被置 null 已经掉到 idle（文件没在播），
             // 只重开 vo 是黑屏，按最后一次地址重新 loadfile，位置沿用记下来的进度。
-            val wasIdle = runCatching {
-                core.getPropertyBoolean("idle-active")
-            }.getOrNull() ?: false
+            val wasIdle = runCatching { core.getPropertyBoolean("idle-active") }.getOrNull() ?: false
             if (wasIdle) {
                 pendingSeekMs = pendingStartMs
                 doPlay(pendingUrl)
             }
         }
+    }
+
+    /**
+     * 照 5.6.0 bindVideoOutput:3297 逐条实现。
+     *
+     *   引用没变（同一块面，只是尺寸变了）→ 只更新 android-surface-size，最多再补一次 vo；
+     *   引用变了（系统换了一块 Surface，或首次挂）→ 先拆旧的，再 attach 新的。
+     *
+     * 这层判断是官方主线要求的：surfaceChanged 里官方第一步就是 `surface = holder.getSurface()`，
+     * 然后拿它和 attachedSurface 比引用。只更新尺寸而不比引用，一旦 Surface 换掉，
+     * mpv 会继续往已失效的旧面推帧 —— 全屏黑屏或卡死就是这么来的。
+     */
+    /**
+     * 尺寸变了，排一次 vo 重建（带 250ms 防抖，避开 surfaceChanged 连发）。
+     *
+     * 为什么必须重建 vo：
+     *   mpv 的 video/out/vo.c:238 update_opts 在 option 变化时只做两件事 ——
+     *   read_opts(vo) 和 vo->driver->control(vo, VOCTRL_VO_OPTS_CHANGED, NULL)。
+     *   而 Android 的 OpenGL context 对这条请求是：
+     *     video/out/opengl/context_android.c:125 android_control(...) { return VO_NOTIMPL; }
+     *   也就是说改 android-surface-size 只会更新 vo->opts 里的值，
+     *   真正干活的 android_reconfig（setBuffersGeometry + ra_gl_ctx_resize）永远不会被调度。
+     *
+     *   android_reconfig 只挂在 ra_ctx_fns.reconfig 上，而 reconfig 只由 vo_reconfig
+     *   → run_reconfig dispatch 触发，那条路径只在「视频参数变化」时走。
+     *
+     *   所以要让新尺寸真正生效，只能重建 vo：vo=null 销毁、vo=gpu 重建，
+     *   新 vo 走 android_init + vo_reconfig，android_reconfig 才会用新的
+     *   android_surface_size 建交换链。这不是绕路，是 mpv 唯一的重配置入口。
+     */
+    private fun scheduleVoRebuild(w: Int, h: Int) {
+        pendingVoW = w
+        pendingVoH = h
+        sizeHandler.removeCallbacks(voRebuildRunnable)
+        sizeHandler.postDelayed(voRebuildRunnable, 250)
+    }
+
+    private fun rebuildVoForSize(w: Int, h: Int) {
+        MpvDebug.log("[mpv] 尺寸 ${voSizeW}x$voSizeH → $w x$h，重建 vo 让 android_reconfig 生效")
+        runCatching { core.setPropertyString("vo", "null") }
+        val ok = runCatching { core.setPropertyString("vo", "gpu") }.isSuccess
+        if (ok) {
+            voSizeW = w
+            voSizeH = h
+            attachedVo = "gpu"
+        }
+        MpvDebug.log("[mpv] vo 重建 ok=$ok 当前 vo=${runCatching { core.getPropertyString("vo") }.getOrNull()}")
+        // 重建期间 mpv 可能自行解暂停，按之前的暂停态纠正
+        if (paused) runCatching { core.setPropertyBoolean("pause", true) }
+    }
+
+    private fun bindVideoOutput(first: Boolean) {
+        val holder = currentHolder ?: return
+        val sf = holder.surface
+        if (!inited) return
+        if (sf == null || !sf.isValid) return
+        val w = if (cachedSurfaceW > 0) cachedSurfaceW else holder.surfaceFrame.width()
+        val h = if (cachedSurfaceH > 0) cachedSurfaceH else holder.surfaceFrame.height()
+        val sameVideoSurface = attachedSurface != null && attachedSurface === sf
+        if (sameVideoSurface) {
+            core.updateSurfaceSize(w, h)
+            if (w != voSizeW || h != voSizeH) scheduleVoRebuild(w, h)
+            if (attachedVo != "gpu") {
+                if (runCatching { core.setPropertyString("vo", "gpu") }.isSuccess) attachedVo = "gpu"
+            }
+            surfaceReady = true
+            MpvDebug.log("[mpv] 同一块面 ${w}x$h，只更新尺寸（不重挂）")
+            return
+        }
+        if (attachedSurface != null) {
+            runCatching { core.detachSurface() }
+            attachedSurface = null
+            attachedVo = null
+        }
+        MpvDebug.log("[mpv] 换了面 ${w}x$h，重新挂")
+        attachSurface(sf, w, h, first = first)
     }
 
     fun ensureSurface() {
@@ -590,15 +656,13 @@ class MpvPlayer(
             is android.view.TextureView -> watchTexture()
             is SurfaceView -> {
                 val h = (host as SurfaceView).holder
-                val fw = h.surfaceFrame.width()
-                val fh = h.surfaceFrame.height()
-                val voDead = core.getPropertyString("vo") != "gpu"
-                if (h.surface?.isValid == true && (!surfaceReady || voDead)) {
-                    onSurfaceCreated(h)
-                } else if (surfaceReady && fw > 0 && fh > 0 && core.updateSurfaceSize(fw, fh)) {
-                    // 面已经在，但窗口尺寸可能变了（小窗进全屏/全屏退小窗）。
-                    // surfaceChanged 若因故没送达，这里是最后一道兜底。
-                    MpvDebug.log("[mpv] 尺寸同步 ${fw}x$fh（ensureSurface 兜底）")
+                // callback 可能被 clearVideoOutput 摘过而没加回来（复用路径不重新 setVideoSurfaceView），
+                // 这里按 holder 是否一致判断，不一致就整个重绑一次。
+                if (currentHolder !== h) {
+                    MpvDebug.log("[mpv] ensureSurface：callback 丢失，重新 bindHolder")
+                    bindHolder(h)
+                } else {
+                    bindVideoOutput(first = false)
                 }
             }
         }
@@ -638,6 +702,11 @@ class MpvPlayer(
         // 先摘掉 surface 回调再 destroy，否则释放后视图的可见性变化还会回调进来，
         // 把已经 destroy 的 libmpv 再 init 一遍（同 5.6.0 handleRelease 里的 clearVideoOutput）。
         currentHolder?.let { h -> runCatching { h.removeCallback(holderCallback) } }
+        sizeHandler.removeCallbacks(voRebuildRunnable)
+        pendingVoW = 0
+        pendingVoH = 0
+        voSizeW = 0
+        voSizeH = 0
         currentHolder = null
         runCatching { (host as? android.view.TextureView)?.removeCallbacks(textureWatch) }
         runCatching { ownedSurface?.release() }
@@ -871,7 +940,6 @@ class MpvPlayer(
             core.getPropertyString("current-vo") ?: "空"
         }.getOrElse { "读取失败" }
     }
-
 
     fun surfaceReadyNow(): Boolean = surfaceReady
 
@@ -1738,21 +1806,22 @@ class MpvPlayer(
     }
 
     override fun handleClearVideoOutput(videoOutput: Any?): ListenableFuture<*> {
-        // 这里**不能**摘 callback，这是「小窗正常、一进全屏就卡死」的病根。
-        //
-        // 这块 SurfaceView 是全 app 唯一一块、跨页面常驻复用。摘掉 callback 之后，
-        // 如果后续走「复用、不重新 setVideoSurfaceView」的路径（日志里的
-        // 复用判据 hit=true mpv=true 就是），callback 再也注册不回来。
-        // 于是全屏时 Surface 从 600x338 变成 1920x1080 的那次 surfaceChanged 收不到，
-        // android-surface-size 永远停在 600x338，mpv 在 600x338 的窗口里渲染，
-        // 而实际 Surface 是 1920x1080 —— 小窗（正好 600x338）完全正常，全屏直接不出帧。
-        //
-        // callback 只在 releaseInternal（真正销毁）里摘。
+        // 照 5.6.0 clearVideoOutput:3335-3347 逐条：
+        //   clearSurfaceFrameRate → resetSurfaceFrameRateRequest → detachSurfaceHolder
+        //   → detachMpvSurface → removeOsdSurfaceView → releaseOwnedSurface
+        //   → surface=null, surfaceWidth=0, surfaceHeight=0 → resetAppliedSurfaceSizes
+        detachHolderCallback()
         runCatching { core.setPropertyString("vo", "null") }
         runCatching { core.setPropertyString("force-window", "no") }
         runCatching { core.detachSurface() }
-        // vo 已经置 null，必须同步复位，否则下次 bindHolder 会以为「已经挂好了」而跳过重挂。
+        attachedSurface = null
+        attachedVo = null
         surfaceReady = false
+        cachedSurfaceW = 0
+        cachedSurfaceH = 0
+        voSizeW = 0
+        voSizeH = 0
+        MpvDebug.log("[mpv] clearVideoOutput 完成（面与尺寸已全部复位）")
         return Futures.immediateVoidFuture()
     }
 
@@ -1761,31 +1830,23 @@ class MpvPlayer(
      * 所以换内核不需要额外补一刀。先摘旧的避免重复 add。
      */
     private fun bindHolder(holder: SurfaceHolder) {
-        currentHolder?.let { old -> runCatching { old.removeCallback(holderCallback) } }
+        // 照 5.6.0 setSurfaceHolder:2991
+        //   surfaceHolder = holder; updateSurfaceSize(holder); holder.addCallback(surfaceCallback);
+        //   surface = holder.getSurface(); bindVideoOutput();
+        detachHolderCallback()
         currentHolder = holder
-        holder.addCallback(holderCallback)
         val fw = holder.surfaceFrame.width()
         val fh = holder.surfaceFrame.height()
-        val valid = holder.surface?.isValid == true
-        MpvDebug.log("[mpv] bindHolder frame=${fw}x${fh} valid=$valid")
-        // 照 5.6.0 bindVideoOutput:3317 —— 拿到 surface 就直接 mpvAttachSurface，不等回调。
-        // 这块 SurfaceView 在进播放页之前就已经 created 了，往一个已经 created 的 holder
-        // 上 addCallback，Android 不会再补发 surfaceCreated。只等回调的话 surfaceReady
-        // 永远是 false，play() 进不了 doPlay，15 秒后 watchdog 把内核 release 掉、退回 EXO。
-        //
-        // 判据不只看 surfaceReady，也看 vo 的真实值：vo 被置 null 过之后
-        // surfaceReady 万一没复位，这里仍会把面挂回去。
-        val voDead = core.getPropertyString("vo") != "gpu"
-        if (valid && (!surfaceReady || voDead)) {
-            if (!inited) initWithOptions()
-            if (inited) onSurfaceCreated(holder)
-        }
-        // addCallback 之前已经发生过的 surfaceChanged 收不到，用当前 frame 补一次。
-        // 进全屏就是这个场景：surfaceCreated 报小窗的 600x338、就按 600x338 挂了面，
-        // 随后 Surface 变 1920x1080，而那一刻 callback 还没注册回来。
-        // 不补这一步，android-surface-size 会一直停在小窗尺寸。
-        if (inited && surfaceReady && fw > 0 && fh > 0 && core.updateSurfaceSize(fw, fh)) {
-            MpvDebug.log("[mpv] 尺寸同步 ${fw}x$fh（补 addCallback 前错过的 surfaceChanged）")
-        }
+        if (fw > 0 && fh > 0) { cachedSurfaceW = fw; cachedSurfaceH = fh }
+        holder.addCallback(holderCallback)
+        MpvDebug.log("[mpv] bindHolder frame=${fw}x$fh valid=${holder.surface?.isValid}")
+        if (!inited) initWithOptions()
+        if (inited) bindVideoOutput(first = true)
+    }
+
+    /** 照 5.6.0 detachSurfaceHolder:3393 —— 幂等摘 callback。 */
+    private fun detachHolderCallback() {
+        currentHolder?.let { h -> runCatching { h.removeCallback(holderCallback) } }
+        currentHolder = null
     }
 }
