@@ -88,6 +88,40 @@
              `ProgressLayout` 一并 INVISIBLE 到出画面为止）。
 
              我们上一版把圈加到了 hostRoot 上（全屏），位置错了 —— 已撤掉，改成这里。 -->
+        <!-- ★错误块 —— 逐条复刻 5.0.8 `res/layout/view_widget_vod.xml` 第 8-11 行：
+             原版是 `@id/video`（400x225 容器）内 `@id/widget`（include view_widget_vod）里的
+             `LinearLayout android:id="@id/error"`：
+               · layout_gravity="center"、gravity="center"、orientation="vertical"
+               · background="@drawable/shape_widget"（#66000000 + 8dip 圆角 + 16dip padding）
+               · 56.0dip 的 AppCompatImageView，src="@drawable/ic_widget_error"
+               · 16.0sp / white / center 的 TextView，id=@id/text
+             显隐由 `showError()` / `hideError()` 控制（5.6.0 VideoActivity:3450 / :3456），
+             时机：`onError(msg)` → `showError(msg)`；`showProgress()` 里 `hideError()`。 -->
+        <LinearLayout
+            android:id="@+id/inlineError"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="@drawable/shape_widget"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_widget_error" />
+
+            <TextView
+                android:id="@+id/inlineErrorText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+        </LinearLayout>
+
         <FrameLayout
             android:id="@+id/inlineProgress"
             android:layout_width="match_parent"

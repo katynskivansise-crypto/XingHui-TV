@@ -252,8 +252,30 @@ class MainActivity : Activity() {
      *
      * 播放层自己有 `playProgress`，所以这里只在详情页形态显示。
      */
+    /**
+     * 对齐原版 5.6.0 `VideoActivity:3450 showError(String)`：
+     *   `mBinding.widget.error.setVisibility(View.VISIBLE);`
+     *   `mBinding.widget.text.setText(text);`
+     *   `hideProgress();`
+     * `widget` 是 `activity_video.xml` 里 `@id/video`（400x225 容器）内的 `view_widget_vod`，
+     * 所以错误块出现在**小窗内部**。
+     */
+    private fun showError(text: String) {
+        findDetail<android.widget.LinearLayout>(R.id.inlineError)?.visibility = View.VISIBLE
+        findDetail<android.widget.TextView>(R.id.inlineErrorText)?.text = text
+        hideInlineProgress()
+    }
+
+    /** 对齐原版 `:3456 hideError()`：`error` GONE + `text` 清空。 */
+    private fun hideError() {
+        findDetail<android.widget.LinearLayout>(R.id.inlineError)?.visibility = View.GONE
+        findDetail<android.widget.TextView>(R.id.inlineErrorText)?.text = ""
+    }
+
     private fun showInlineProgress() {
         if (playMode) return
+        // 原版 `showProgress():3433` 里前两句是 `hideCenter(); hideError();`
+        hideError()
         findViewById<View>(R.id.inlineProgress)?.visibility = View.VISIBLE
         MpvDebug.log("[detail] 小窗加载圈 ON")
     }
@@ -268,8 +290,9 @@ class MainActivity : Activity() {
         val r = Runnable {
             playTimeoutRunnable = null
             MpvDebug.log("[detail] 起播超时 15s idx=$idx line=${currentLine?.name}")
-            hideInlineProgress()
-            Toast.makeText(this@MainActivity, "连接超时", Toast.LENGTH_SHORT).show()
+            // 原版 `PlayerManager:418 onPlaybackTimeout` → `callback.onError(getString(R.string.error_play_timeout))`
+            // → `VideoActivity:5471 showError(msg)`，文案「连接超时」，显示在小窗错误块里。
+            showError("连接超时")
             // 原版 onError → startFlow → checkFlag：换下一线路（全失败由 handlePlayFailure 收尾）
             handlePlayFailure(idx, auto, "连接超时", depth)
         }
@@ -368,7 +391,8 @@ class MainActivity : Activity() {
                 // 原版没有错误去重（5.6.0 无 errorCount/playFail，5.0.8 无 800 常量）：
                 // 一次起播只由 App.post(runnable, TIMEOUT_PLAY) 的起播窗口兜底，错误回调照常处理。
                 disarmPlayTimeout()
-                hideInlineProgress()
+                // 原版 `:5462 onError(msg)` → `:5471 showError(msg)`（错误块），文案 error_play_url
+                showError("播放地址加载失败")
                 Log.e("XingHuiTV", "[player] 播放失败 ${error.errorCodeName}，走自动换源")
                 handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
                     reason = "播放器错误 ${error.errorCodeName}", depth = 0)
@@ -1069,6 +1093,9 @@ class MainActivity : Activity() {
         Log.e("XingHuiTV", "[detail] 全部 ${lines.size} 条线路均失败")
         disarmPlayTimeout()
         hideInlineProgress()
+        // 原版 `VideoActivity:5462 onError(msg)` → `showError(msg)`：错误显示在**小窗内的错误块**，
+        // 不是 Toast。文案取原版 values-zh-rCN 的 error_play_url（播放地址加载失败）。
+        showError("播放地址加载失败")
         if (auto) {
             Toast.makeText(this, "所有线路都播放失败，可手动换源", Toast.LENGTH_SHORT).show()
         } else {
@@ -1216,7 +1243,12 @@ class MainActivity : Activity() {
         // line.episodes 还是原始未展开的那份，用它会取错集或越界（点了不播）。
         val ep = episodes.getOrNull(idx)
             ?: line.episodes.getOrNull(idx)
-            ?: run { Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}"); return }
+            ?: run {
+                Log.e("XingHuiTV", "[detail] 集索引越界 idx=$idx eps=${episodes.size}")
+                // 原版没有这个分支；这里是我们自己的保护，按原版 showError 的方式报（文案用 error_detail）
+                showError("暂无播放数据")
+                return
+            }
         playingIdx = idx
         // 起手日志：真机 /debug 里看这一行有没有 ——
         //   有 → 小窗起播链路在跑，后面卡在解析/下发；
@@ -1287,6 +1319,13 @@ class MainActivity : Activity() {
                 //   这句就误判成"已绑"，新实例一个 surface 都没拿到：只有声音、画面留在旧帧上。
                 attachPreviewTo(p)
                 val ok = runCatching {
+                    // ★对齐原版 `onRefresh:3275`：
+                    //     `player().stop(); player().clear(); ... getPlayer(getFlag(), getEpisode());`
+                    //   `PlayerManager.stop():1245` 里是真的 `engine.stop()`。
+                    //   同一颗 player 从 READY 直接 `setMediaItem` 时，部分状态下不会重新准备 ——
+                    //   表现就是"点了别的集，什么都没发生"（不报错、不出画面、圈一闪就没）。
+                    //   先 stop 回到 IDLE 再换 item，与原版顺序一致。
+                    p.stop()
                     // mediaId 显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」。
                     p.setMediaItem(MediaItem.Builder().setUri(url).setMediaId(url).build())
                     p.prepare()
@@ -1297,6 +1336,7 @@ class MainActivity : Activity() {
                     Log.e("XingHuiTV", "[detail] 内嵌播放源不被支持 $url", e)
                     false
                 }
+                if (ok) MpvDebug.log("[detail] 已下发 idx=$idx ep=${ep.first} url=${url.take(40)}")
                 if (!ok) {
                     handlePlayFailure(idx, auto, "内核不支持该地址（$url）", depth)
                 } else {
