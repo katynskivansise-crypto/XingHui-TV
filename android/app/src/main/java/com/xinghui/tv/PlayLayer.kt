@@ -397,13 +397,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      */
     private val videoHost: VideoHost get() = host.videoHost
     private lateinit var session: PlaybackSession
-    // ★默认用「裁剪」而不是「原始(fit)」。
-    //   fit 在 PlayerView 里不是"缩放画面"，而是让内部 AspectRatioFrameLayout **改自己的尺寸**
-    //   去贴合视频比例 —— 结果就是容器 600x338、里面的 SurfaceView 只有 600x250，
-    //   上下各留 44px 黑边（真机 frame=600x338 sv=600x250 就是它）。
-    //   原版没这个问题，因为它的画面对应的是裸 SurfaceView，fit 根本不参与测量。
-    //   我们要的是"铺满且不变形"：裁剪(zoom) 按比例填满容器、只裁掉多余边，不变形。
-    private var scaleIdx = 4
+    // 对齐原版 PlayerSetting.getScale():150 —— `Prefers.getInt("scale")` 未设置时默认 0，
+    // 即 select_scale[0]「原始」= RESIZE_MODE_FIT。
+    // 原版 @id/exo 就是 PlayerView，内部 AspectRatioFrameLayout 在 FIT 下按视频比例 letterbox，
+    // 两侧留黑是正常形态。这里曾经写死 4(裁剪)，理由是"原版 fit 不参与测量"，那个判断是错的。
+    private var scaleIdx = 0
     // 对齐原版 select_scale：原始 / 16:9 / 4:3 / 填充 / 裁剪 → ExoPlayer resizeMode
     private val scaleModes = intArrayOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -539,9 +537,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         } else {
             // mpv 内核：先把原生实例建好，按键（暂停/快进）从第一秒起就有效。
             // 画面层这里先摆出来，真正的 play(url) 在地址解析完之后由 startMpv 触发。
-            // ★路线 A（对齐 WebHomeTV 5.6）：mpv 与 EXO 共用 PlayerView 那一块 SurfaceView。
-            // 播放页从此只有一套画面层，切内核 = 换内核、不换视图、不换 window layer。
-            // 画面层里已不存在任何"盖黑"视图，onCreate 不再需要动快门
+            // ★画面层是两块独立 SurfaceView（EXO 一块、mpv 一块），切内核 = 换哪块在屏内，
+            // 不换视图、不换 window layer，另一块按 VideoHost.park() 停泊且 Surface 不销毁。
             // 原生内核初始化要几十到几百毫秒（mpv_create + 四十多条选项 + observeProperty + attachSurface）。
             // 放在 onCreate 里同步执行会把"首帧"和"窗口拿到输入焦点"一起往后推 ——
             // 从详情页进来那一两秒的按键会被系统直接丢掉，表现就是"进去按 OK 没反应"。
@@ -554,7 +551,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 sv.post {
                     if (isFinishing || isDestroyed) return@post
                     ensureMpv(sv)
-                    MpvDebug.log("[mpv] 首帧后建实例（绑定 PlayerView 的 SurfaceView，按键已可用）")
+                    MpvDebug.log("[mpv] 首帧后建实例（绑定 mpv 专用 SurfaceView，按键已可用）")
                 }
             }
         }
@@ -579,7 +576,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         MpvDebug.log("[perf] bindControlBar=${SystemClock.uptimeMillis() - tBar0}ms 距onCreate=${SystemClock.uptimeMillis() - tCreate}ms")
         videoHost?.post { setupSharedSurface() }
         uiHandler.postDelayed(snapTick, 1000)
-        surfCallback?.let { runCatching { videoHost?.surfaceView?.holder?.removeCallback(it) } }
+        surfCallback?.let { runCatching { videoHost?.removeSurfaceCallback(it) } }
         val cb = object :
             android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
@@ -608,7 +605,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             }
         }
         surfCallback = cb
-        videoHost?.surfaceView?.holder?.addCallback(cb)
+        videoHost?.addSurfaceCallback(cb)
     }
 
     private fun fetchAndPlay(vid: String, fl: String, ep: String) {
@@ -646,7 +643,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             return
         }
         // 解析要发网络请求（引擎 player / csp 源），这段到 ExoPlayer 第一次状态回调之间
-        // 播放器还没接管，shutter 盖着就是纯黑。原版同样的空档是 progressLayout.showProgress()，
+        // 画面层还没有内容（黑底）。原版同样的空档是 progressLayout.showProgress()，
         // 这里先盖上转圈，等 STATE_BUFFERING / READY 回调再按原版时机切换。
         showPlayProgress("resolvePlay")
         var url = ""
@@ -1211,7 +1208,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 //   STATE_BUFFERING -> showProgress()
                 //   STATE_READY     -> hideProgress()
                 // 原版那 3 秒里显示的是居中的转圈，不是黑屏；我们之前没接这一段，
-                // 所以 shutter 盖着的时候看起来就是纯黑。
+                // 所以画面层没内容时看起来就是纯黑。
                 when (state) {
                     Player.STATE_BUFFERING -> showPlayProgress("BUFFERING回调")
                     Player.STATE_READY, Player.STATE_ENDED -> hidePlayProgress()
@@ -1715,63 +1712,15 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         videoHost?.surfaceView
 
     /**
-     * PlayerView 的 shutter 开关。
+     * 本页保留此函数只为不打断调用点。
      *
-     * media3 的 PlayerView 里有一个 exo_shutter（默认不透明黑），首帧渲染前挡着画面。
-     * 但 mpv 不归 media3 管，它不会触发 onRenderedFirstFrame，shutter 会永远挡在前面 ——
-     * 所以 mpv 模式下必须把它让开：背景透明 + 直接 GONE。
-     * 切回 EXO 时恢复不透明黑，仍然让 media3 自己在首帧后隐藏它。
-     */
-    /**
-     * 旧快门随 PlayerView 一起消失。画面层现在是
-     * AspectRatioFrameLayout + SurfaceView，**里面没有任何会画黑的视图**。
-     * 保留这个函数只为让历史调用点不必逐个删干净。
-     */
-
-    /**
-     * 播放中永久释放快门。
-     *
-     * media3 的 exo_shutter 是一整块不透明黑，只要它被翻成 VISIBLE，画面区域立刻全黑
-     * （控制条在它上层，所以看上去是"整屏黑、条还在"）。它的显隐由 media3 内部
-     * updateShutter 逻辑决定，我们这边任何一次 setPlayer/setVisibility/布局都可能把它翻出来，
-     * 而它翻出来之后再也不会自己退回去（EXO 只在 onRenderedFirstFrame 里关一次）。
-     * 所以播放真正开始后，直接把它置透明 + GONE 并保持，起播前的遮挡交给自己的 playProgress。
-     */
-
-    /**
-     * 永久把 exo_shutter 从视图树里摘掉。
-     *
-     * 只设透明+GONE 是不够的：media3 内部 updateShutter / closeShutter 会再次把它翻成 VISIBLE，
-     * 而我们没有任何回调能拦（那是它自己那张表驱动的）。它一旦被翻出来，
-     * 就是一块盖在 SurfaceView 上的不透明黑 —— **两个内核同时全黑**，
-     * 直到下一次 onRenderedFirstFrame 或我们 1000ms 的进度时钟兜底才消失，
-     * 表现就是"唤起菜单键黑一下，大概 1 秒"。
-     * 摘出视图树后，它再 visibility=VISIBLE 也没有绘制效果。
-     * 起播前的遮挡由我们自己的 playProgress 负责，本来就不依赖它。
-     */
-
-    /**
-     * 打开官方接口 keepContentOnPlayerReset（media3 1.3.1 自带，不是分叉专有）。
-     *
-     * 官方 PlayerView.updateForCurrentTrackSelections()：
-     *   if (player == null || tracks.isEmpty()) { if (!keepContentOnPlayerReset) closeShutter(); }
-     *   if (isNewPlayer && !keepContentOnPlayerReset) closeShutter();
-     * closeShutter() 就是把 exo_shutter 置 VISIBLE —— 一整块不透明黑。
-     * 我们切内核时 `playerView.player = null` 正好命中“tracks 为空”，于是必然盖一块黑上去，
-     * 直到 EXO 下一次 onRenderedFirstFrame 才打开。打开这个开关后，清空/替换播放器不关快门。
+     * keepContentOnPlayerReset 是 PlayerView 的接口；布局里已经没有 PlayerView
+     * （画面层是 AspectRatioFrameLayout + 两块 SurfaceView），这个开关没有作用对象，
+     * 所以函数体为空。起播前的遮挡由 playProgress 承担。
      */
     private fun enableKeepContent() {
-        runCatching {
-            // 已无 PlayerView，keep_content_on_player_reset 自然失效
-            Unit
-        }
+        runCatching { Unit }
     }
-
-    /**
-     * 已无快门可动：画面层不是 PlayerView 了。
-     * 这里保留函数签名，调用点一行都不用改；将来若需要"遮挡窗口期"，
-     * 只改这个函数的实现即可，不会再牵动播放器内部状态。
-     */
 
     private fun isMpvMode(): Boolean =
         !mpvFallbackExo && PlayerManager.shouldUseMpv(host) &&
@@ -1870,40 +1819,29 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun startMpv(url: String, headers: Map<String, String>, startMs: Long) {
         // EXO 若还在跑，会和 mpv 同时出声，所以切到 mpv 前必须把它收掉。
-        // 这里用 release 而不是 stop：stop 只是把状态推到 IDLE，MediaCodec / Surface 还挂着，
-        // 紧接着把 PlayerView 置 GONE 会让它的 Surface 被销毁，而播放器仍然持有那个句柄 ——
-        // 这是从 EXO 热切 mpv 时黑屏、甚至进程直接挂掉的来源。
-        // 彻底释放并置空，切回 EXO 时走 rebuildPlayer 重建，虽然慢一点但状态是干净的。
-        // 顺序很重要：先把 PlayerView 与 EXO 解绑（media3 会把这块 surface 从旧播放器上 clear），
-        // 再释放 EXO。反过来的话，release 期间 media3 还会去摸一块马上要被 mpv 接管的 surface。
-        // ★官方 switchTargetView 的 javadoc 明确要求：先挂新的、再摘旧的，
-        //   "without transitioning through a state where no surface is attached"。
-        //   只有一块 surface 时做不到真的先挂后摘，但可以避免最坏的一步：
-        //   不要用 setPlayer(null)（那会命中"tracks 为空 → closeShutter"，
-        //   直接盖一整块不透明黑），而是只把这块 surface 从 EXO 身上 clear 掉，
-        //   PlayerView 与 EXO 的绑定留着，release 时一起收。
-        //   配合 setKeepContentOnPlayerReset(true)，清 surface 也不会关快门，画面保留最后一帧。
-        runCatching {
-            val sv = currentSurface() as? android.view.SurfaceView
-        }
-        // 顺序：先把这块 surface 从 EXO 身上摘掉，再释放播放器。
-        // 反过来的话 release 期间 media3 还会去摸一块马上就要交给 mpv 的 surface。
+        // 用 release 而不是 stop：stop 只把状态推到 IDLE，MediaCodec / Surface 还挂着。
+        // 顺序：先把 EXO 与它那块面解绑，再释放播放器；反过来 release 期间 media3
+        // 还会去摸一块马上要交给 mpv 的 surface。
+        // 两块面各归各的引擎，所以不存在"抢面"问题（见 VideoHost 类注释）。
         session.releaseExo()
         player = null
         handOver("mpv", "releaseExo 已解绑并释放，下一步 attach 给 mpv")
         // 换内核只做"交还输出面"。原版 PlayerManager.java:1522-1523 那句"不同 player 需要新 Surface"
-        // 针对的是 PlayerView 的 render 模式切换；我们是单一常驻 SurfaceView + 单一渲染目标，
-        // 旧内核 release 后 surface 本身没变。原先那步"重建 surface"实际只是 setPlayer(null)→setPlayer(p)，
-        // 并没有真的换面，只会白黑一帧。
+        // 针对的是 PlayerView 的 render 模式切换；我们的输出面固定属于各自引擎，
+        // 旧内核 release 后 surface 本身没变，不需要重建。
         runCatching {
             videoHost?.releaseOwner()
-            MpvDebug.log("[kernel] 换到 mpv：releaseOwner 已执行（输出面沿用常驻 SurfaceView）")
+            MpvDebug.log("[kernel] 换到 mpv：releaseOwner 已执行（mpv 用自己那块 SurfaceView）")
         }
-        // mpv 输出期间把 shutter 让开（不透明白 = 画面被它盖住）
         val surface = currentSurface()
-        // 共用画面层是唯一前提，拿不到就本页退回 EXO（不能静默不播）
+        // 画面层拿不到就本页退回 EXO（不能静默不播）
         if (surface == null) {
-            MpvDebug.log("[mpv] 拿不到共用画面层（PlayerView 没有 surface view），本页退回 EXO")
+            MpvDebug.log("[mpv] 拿不到画面层，本页退回 EXO")
+            mpvFallbackExo = true
+            if (player == null) rebuildPlayer(headers)
+            resumeOverride = startMs
+            playUrl(url, headers)
+            return
             mpvFallbackExo = true
             if (player == null) rebuildPlayer(headers)
             resumeOverride = startMs
@@ -2271,9 +2209,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             mpv?.release()
             mpv = null
             handOver("exo", "mpv 已 release（同步 destroy），下一步 EXO 接管画面层")
-            // mpv 走了：把 shutter 恢复成原版的黑色，EXO 出首帧前由它挡着
-                if (player == null) rebuildPlayer(activeHeaders)
-            // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 PlayerView
+            // mpv 走了，EXO 需要重建播放器后接管
+            if (player == null) rebuildPlayer(activeHeaders)
+            // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 EXO 侧的 resizeMode
             videoHost?.resizeMode = scaleModes[scaleIdx]
             resumeOverride = at
             playUrl(url, activeHeaders)
@@ -2731,38 +2669,15 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     /**
-     * 收条/呼条前后各采三拍，判断"黑的那一下"到底是渲染层没了还是合成层没跟上。
-     * 判读：三拍都 vo=gpu 且 pos 在推进 → 播放器一直活着，黑在合成；
-     *       出现 vo=空 / surface valid=false → 表面真丢了。
-     */
-    /**
-     * 锁住画面层的缓冲区尺寸 —— 对齐 WebHomeTV 5.6 的 syncVideoSurfaceSize()。
+     * 画面层像素格式保持系统默认，不做任何改动。
      *
-     * 5.6 在 RENDER_SURFACE 下对 PlayerView 的 SurfaceView 调 holder.setFixedSize(width,height)，
-     * 这样 Surface 的缓冲区大小由"视频尺寸"决定，不再跟着视图每帧 measure/layout 走。
-     * 我们一直没做这一步，缓冲区尺寸始终由布局推导：只要窗口里发生一次布局
-     * （EXO 内核呼出控制条就是 layouts=1），Surface 就可能按新尺寸重开缓冲区，
-     * 重开那一帧生产者还没写入 → 画面层空白 → 整屏黑一下。
-     * 锁死缓冲区后，布局再多也不会换缓冲区，这一帧就不存在。
+     * SurfaceHolder.setFormat 会让 SurfaceFlinger 重分配一整套 buffer，等于在播放中
+     * 重建画面层拓扑；原版与官方 PlayerView 全程不碰它。这里只留一条诊断日志。
      */
     private fun setupSharedSurface() {
         val sv = videoHost?.surfaceView ?: return
-        // ★setFixedSize 这条是从 5.6 抄的，但 5.6 只在它自己那套自定义 render surface 上锁尺寸。
-        //   我们把它挂在了 PlayerView 的 SurfaceView 上，结果真机日志里：
-        //     [sv] setFixedSize 1920x1080 → surface=1920x1080   （此时视图还是满屏 1080）
-        //     [exo] view=1920x799                              （视频比例算出 799 之后视图缩了）
-        //   buffer 被钉死 1080、视图却是 799 → 合成时把画面纵向压扁（1080/799 ≈ 1.35 倍），
-        //   并且每次布局都触发一次 [sv2] changed 重新分配 buffer。
-        //   官方 PlayerView 自己会按 resize_mode=fit 算 AspectRatioFrameLayout 的尺寸，
-        //   根本不需要我们锁死缓冲区。
-        //   这里只做一件必要的事：把 Surface 的像素格式从默认 RGB_565（API25 默认）改成 8888，
-        //   否则整条链路只有 16bit，色带明显，mpv 的 RGBA 帧也要被降位再上屏。
-        // ★不再 setFormat(RGBA_8888)。
-        //   改像素格式 = 向 SurfaceFlinger 申请换一套 buffer（buffer 队列重建），
-        //   在播放中去改等于动了画面层的拓扑；原版与官方 PlayerView 全程不碰它。
-        //   色带这一项先不计代价换稳定：真机验证黑屏消失后再决定要不要用别的办法拿 8888。
         runCatching {
-            MpvDebug.log("[sv] 画面层沿用官方默认 PixelFormat（不再 setFormat）")
+            MpvDebug.log("[sv] 画面层沿用官方默认 PixelFormat（不 setFormat）")
         }
     }
 

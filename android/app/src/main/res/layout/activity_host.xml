@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- ★单窗口宿主：详情层与播放层是同一个 Activity 里的两个 View 层。
-     只有一块 SurfaceView，从进详情页那一刻起就存在，直到退出 App 都不销毁。
+     画面层是两块 SurfaceView（EXO 一块 / mpv 一块），从进详情页那一刻起就存在，直到退出 App 都不销毁。
 
      Z 序（自下而上，SurfaceView 的 surface 天然在窗口 surface 之下，普通 View 一律盖在它上面）：
         videoFrame   画面容器（AspectRatioFrameLayout，resize_mode=fit）
@@ -12,9 +12,7 @@
         全屏预览（详情页里点小窗）= MATCH_PARENT
         播放   = MATCH_PARENT，同时 detailLayer GONE、playLayer VISIBLE
 
-     ★为什么必须是一块：电视只有那么多块硬件视频平面，有的型号只有一块。
-       第二块 SurfaceView 去申请一个不存在的平面时拿不到画面，但音频不需要载体，照样出声 ——
-       那就是"小窗只有声音没有画面"。（OwnTV 源码原文，见方案文档） -->
+     两块面的停泊规则见 VideoHost.park()：不设 GONE/INVISIBLE，避免 Surface 被销毁。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/hostRoot"
@@ -53,19 +51,25 @@
         app:resize_mode="fit">
 
         <!-- ★画面层结构（依据官方原文 + 两版原项目布局，不是经验）：
-             1) media3 官方 PlayerView 文档：surface_type 取值 none 时 getVideoSurfaceView() 返回 null，
-                "Corresponding method: None" —— 这个属性运行时改不了，只能在布局写死。
-             2) 5.0.8 与 5.6.0 的 activity_video / activity_live / activity_cast 三个播放页，
-                全部写 app:surface_type="none"；只有海报墙的 view_wall_video 用 texture_view。
-             3) 官方 keep_content_on_player_reset 默认就是 false，原项目 Player.Vod 也写 false。
-             4) PlayerManager 原注释："A Surface used by a CPU renderer stays connected after decoder
+             1) 原版 5.0.8 / 5.6.0 的 activity_video、activity_live、activity_cast 三个播放页
+                都是"EXO 一个 View + IJK 一个 View"并存，同一时刻只显示一个 —— 本布局同构。
+             2) media3 官方 keep_content_on_player_reset 默认 false，原项目 Player.Vod 也是 false。
+             3) PlayerManager 原注释："A Surface used by a CPU renderer stays connected after decoder
                 release. A different player needs a new Surface before its GPU/codec can connect."
                 且 resetVideoSurface 只在换内核时为 true —— 尺寸变化从不重建 surface。 -->
 
-        <!-- 画面由这块常驻 SurfaceView 承载。它不在任何会随布局改尺寸的包装类内部，
-             所以小窗↔全屏、比例切换只触发 surfaceChanged，不会 destroyed→created。 -->
+        <!-- 两块独立的输出面：EXO 一块、mpv 一块。同一时刻只有一块在屏内，
+             另一块按 VideoHost.park() 停泊（API>=34 用 INVISIBLE + FOLLOWS_ATTACHMENT，
+             API<34 平移到容器宽度之外），Surface 全程不销毁。
+             两块面各自只被一个引擎挂回调，互不干扰 —— 这是换内核不黑帧的根本。
+             不设 GONE/INVISIBLE：那会立刻销毁 Surface（官方 media3/ui/surface 原文）。 -->
         <SurfaceView
             android:id="@+id/videoSurface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <SurfaceView
+            android:id="@+id/mpvSurface"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 

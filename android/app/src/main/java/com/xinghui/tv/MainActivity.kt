@@ -20,7 +20,6 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -67,25 +66,26 @@ class MainActivity : Activity() {
      * 都会变成 Unresolved reference 把整包编译打断。
      * 画面层是运行时装配的对象，不该成为编译期的硬依赖。
      *
-     * 顺序：独立常驻 SurfaceView（新布局） → PlayerView 内部那块（旧布局） → 明确报错。
+     * 顺序：先找 @id/videoSurface（EXO 面），找不到直接报错暴露布局被改坏。
      */
     private fun resolveSurfaceView(): android.view.SurfaceView {
         val idNew = resources.getIdentifier("videoSurface", "id", packageName)
         if (idNew != 0) {
             findViewById<android.view.View>(idNew)?.let { if (it is android.view.SurfaceView) return it }
         }
-        val idPv = resources.getIdentifier("playerView", "id", packageName)
-        if (idPv != 0) {
-            val pv = findViewById<android.view.View>(idPv) as? androidx.media3.ui.PlayerView
-            (pv?.videoSurfaceView as? android.view.SurfaceView)?.let { return it }
+        throw IllegalStateException("画面层宿主缺失：布局里没有 @id/videoSurface")
+    }
+
+    private fun resolveMpvSurface(): android.view.SurfaceView {
+        val id = resources.getIdentifier("mpvSurface", "id", packageName)
+        if (id != 0) {
+            findViewById<android.view.View>(id)?.let { if (it is android.view.SurfaceView) return it }
         }
-        throw IllegalStateException(
-            "画面层宿主缺失：布局里既没有独立的 videoSurface，也没有带 surface 的 PlayerView"
-        )
+        throw IllegalStateException("画面层宿主缺失：布局里没有 @id/mpvSurface")
     }
 
     internal val videoHost: VideoHost by lazy {
-        VideoHost(videoFrame, resolveSurfaceView(), subtitleView, null)
+        VideoHost(videoFrame, resolveSurfaceView(), resolveMpvSurface(), subtitleView)
     }
     private var surfaceValid = false
     private var playMode = false
@@ -160,8 +160,7 @@ class MainActivity : Activity() {
 
     private fun detachSurfaceFrom() {
         surfaceConsumer = null
-        // 松手也走 PlayerView：keep_content_on_player_reset=true 会保留最后一帧，
-        // 切到播放页时不会先闪一下黑。
+        // 解绑 EXO 与它的那块面，另一块（mpv）不受影响
         runCatching { videoHost.setPlayer(null) }
     }
 
@@ -558,7 +557,7 @@ class MainActivity : Activity() {
         }
         playContainer = findViewHost(R.id.playLayer)!!
         videoFrame = findViewHost(R.id.videoFrame)!!
-        // ★画面由官方 PlayerView 承载，它内部那个 SurfaceView 才是真正的渲染目标。
+        // 画面层是两块 SurfaceView，videoSurface 是 EXO 用的那一块
         videoSurface = resolveSurfaceView()
         frameParams = videoFrame.layoutParams
         subtitleView = findViewHost(R.id.subtitleView)!!
