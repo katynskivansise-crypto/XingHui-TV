@@ -59,6 +59,13 @@ class MpvCore(private val appContext: Context) {
 
     @Volatile private var observer: EventObserver? = null
     @Volatile private var surface: Surface? = null
+    /**
+     * 最近一次真正下发给 mpv 的 android-surface-size。
+     * 对齐 5.6.0 `applyAndroidSurfaceSize:3440` 的 appliedAndroidSurfaceSize：
+     * 相同的尺寸不重复下发，否则 mpv 会按每次属性变更重配一次 vo，
+     * 小窗↔全屏来回切时叠加成明显卡顿。
+     */
+    @Volatile private var appliedSurfaceSize: String? = null
     @Volatile private var dead = false
     @Volatile private var created = false
 
@@ -196,9 +203,7 @@ class MpvCore(private val appContext: Context) {
         surface = s
         val ok = runCatching {
             MPVLib.attachSurface(s)
-            if (width > 0 && height > 0) {
-                MPVLib.setPropertyString("android-surface-size", "${width}x$height")
-            }
+            applyAndroidSurfaceSize(width, height)
             true
         }.getOrElse {
             MpvDebug.log("[mpv] attachSurface 失败 ${it.message}")
@@ -214,13 +219,31 @@ class MpvCore(private val appContext: Context) {
     fun updateSurfaceSize(width: Int, height: Int) {
         if (dead || !created || surface == null) return
         if (width <= 0 || height <= 0) return
-        runCatching { MPVLib.setPropertyString("android-surface-size", "${width}x$height") }
+        applyAndroidSurfaceSize(width, height)
+    }
+
+    /** 照 5.6.0 applyAndroidSurfaceSize:3440 —— 相同尺寸不重复下发。 */
+    private fun applyAndroidSurfaceSize(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        val value = "${width}x$height"
+        if (value == appliedSurfaceSize) return
+        runCatching {
+            MPVLib.setPropertyString("android-surface-size", value)
+            appliedSurfaceSize = value
+            MpvDebug.log("[mpv] android-surface-size=$value")
+        }
+    }
+
+    /** 照 5.6.0 clearVideoOutput:3347 的 resetAppliedSurfaceSizes。解绑后必须清空。 */
+    private fun resetAppliedSurfaceSize() {
+        appliedSurfaceSize = null
     }
 
     fun detachSurface() {
         surface = null
         if (dead || !created) return
         runCatching { MPVLib.detachSurface() }
+        resetAppliedSurfaceSize()
         MpvDebug.log("[mpv] vo=gpu detach")
     }
 

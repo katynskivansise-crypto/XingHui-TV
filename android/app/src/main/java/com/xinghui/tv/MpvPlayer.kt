@@ -535,7 +535,16 @@ class MpvPlayer(
             is android.view.TextureView -> watchTexture()
             is SurfaceView -> {
                 val h = (host as SurfaceView).holder
-                if (h.surface?.isValid == true && !surfaceReady) onSurfaceCreated(h)
+                val fw = h.surfaceFrame.width()
+                val fh = h.surfaceFrame.height()
+                val voDead = core.getPropertyString("vo") != "gpu"
+                if (h.surface?.isValid == true && (!surfaceReady || voDead)) {
+                    onSurfaceCreated(h)
+                } else if (surfaceReady && fw > 0 && fh > 0) {
+                    // 面已经在，但窗口尺寸可能变了（小窗进全屏/全屏退小窗）。
+                    // surfaceChanged 若因故没送达，这里是最后一道兜底。
+                    core.updateSurfaceSize(fw, fh)
+                }
             }
         }
     }
@@ -1674,19 +1683,20 @@ class MpvPlayer(
     }
 
     override fun handleClearVideoOutput(videoOutput: Any?): ListenableFuture<*> {
-        // 照 5.6.0 detachSurfaceHolder：先摘 callback，再收输出
-        currentHolder?.let { h -> runCatching { h.removeCallback(holderCallback) } }
-        currentHolder = null
-        // 官方 BaseMPVView.surfaceDestroyed 的三步，顺序不能反：
-        //   vo=null → force-window=no → detachSurface
-        // 先摘面再关输出，mpv 会对着一个已失效的窗口再做一次 swap。
+        // 这里**不能**摘 callback，这是「小窗正常、一进全屏就卡死」的病根。
+        //
+        // 这块 SurfaceView 是全 app 唯一一块、跨页面常驻复用。摘掉 callback 之后，
+        // 如果后续走「复用、不重新 setVideoSurfaceView」的路径（日志里的
+        // 复用判据 hit=true mpv=true 就是），callback 再也注册不回来。
+        // 于是全屏时 Surface 从 600x338 变成 1920x1080 的那次 surfaceChanged 收不到，
+        // android-surface-size 永远停在 600x338，mpv 在 600x338 的窗口里渲染，
+        // 而实际 Surface 是 1920x1080 —— 小窗（正好 600x338）完全正常，全屏直接不出帧。
+        //
+        // callback 只在 releaseInternal（真正销毁）里摘。
         runCatching { core.setPropertyString("vo", "null") }
         runCatching { core.setPropertyString("force-window", "no") }
         runCatching { core.detachSurface() }
-        // 这里必须复位。vo 已经被设成 "null"，如果 surfaceReady 还留着 true，
-        // 下一次 bindHolder 会因为「已经挂好了」而跳过重新 attach ——
-        // 结果就是 vo 永远是 null，解码照跑、画面永远黑，日志表现为
-        // vo=null 但 playing=true、[vs] 一直报尺寸。这就是黑屏有声。
+        // vo 已经置 null，必须同步复位，否则下次 bindHolder 会以为「已经挂好了」而跳过重挂。
         surfaceReady = false
         return Futures.immediateVoidFuture()
     }
@@ -1699,20 +1709,29 @@ class MpvPlayer(
         currentHolder?.let { old -> runCatching { old.removeCallback(holderCallback) } }
         currentHolder = holder
         holder.addCallback(holderCallback)
-        val sf = holder.surface
-        val valid = sf?.isValid == true
-        MpvDebug.log("[mpv] bindHolder frame=${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()} valid=$valid")
+        val fw = holder.surfaceFrame.width()
+        val fh = holder.surfaceFrame.height()
+        val valid = holder.surface?.isValid == true
+        MpvDebug.log("[mpv] bindHolder frame=${fw}x${fh} valid=$valid")
         // 照 5.6.0 bindVideoOutput:3317 —— 拿到 surface 就直接 mpvAttachSurface，不等回调。
         // 这块 SurfaceView 在进播放页之前就已经 created 了，往一个已经 created 的 holder
         // 上 addCallback，Android 不会再补发 surfaceCreated。只等回调的话 surfaceReady
-        // 永远是 false，play() 进不了 doPlay，15 秒后 watchdog 把内核 release 掉、退回 EXO ——
-        // 表现就是「mpv 内核卡死、只有声音」。
+        // 永远是 false，play() 进不了 doPlay，15 秒后 watchdog 把内核 release 掉、退回 EXO。
+        //
         // 判据不只看 surfaceReady，也看 vo 的真实值：vo 被置 null 过之后
         // surfaceReady 万一没复位，这里仍会把面挂回去。
         val voDead = core.getPropertyString("vo") != "gpu"
         if (valid && (!surfaceReady || voDead)) {
             if (!inited) initWithOptions()
             if (inited) onSurfaceCreated(holder)
+        }
+        // addCallback 之前已经发生过的 surfaceChanged 收不到，用当前 frame 补一次。
+        // 进全屏就是这个场景：surfaceCreated 报小窗的 600x338、就按 600x338 挂了面，
+        // 随后 Surface 变 1920x1080，而那一刻 callback 还没注册回来。
+        // 不补这一步，android-surface-size 会一直停在小窗尺寸。
+        if (inited && surfaceReady && fw > 0 && fh > 0) {
+            core.updateSurfaceSize(fw, fh)
+            MpvDebug.log("[mpv] 尺寸同步 ${fw}x$fh（补 addCallback 前错过的 surfaceChanged）")
         }
     }
 }
