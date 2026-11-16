@@ -123,6 +123,13 @@ class MpvPlayer(
     private var snapSpeed = 1f
     private var snapVideoW = 0
     private var snapVideoH = 0
+    // resolveVideoSize 的三个来源，对应 5.6.0 的 cachedVideoIntProperties
+    private var rawVideoW = 0
+    private var rawVideoH = 0
+    private var vpW = 0
+    private var vpH = 0
+    private var vpDw = 0
+    private var vpDh = 0
     private var playlistData: List<MediaItemData>? = null
     private var playlistForItem: MediaItem? = null
     private var lastStatePushAt = 0L
@@ -474,14 +481,17 @@ class MpvPlayer(
     }
 
     private fun attachSurface(surface: Surface, width: Int, height: Int, first: Boolean) {
-        runCatching {
-            // 官方 BaseMPVView.surfaceCreated 原文（BaseMPVView.kt）：
-            //   恢复视频输出 → setPropertyString("vo", voInUse)
-            // 然后才是 attachSurface + android-surface-size（尺寸由 MpvCore 内部一并设好）。
-            core.setPropertyString("vo", "gpu")
-            core.setPropertyString("force-window", "yes")
-            core.attachSurface(surface, width, height)
-        }
+        // 顺序照 5.6.0 bindVideoOutput:3317-3325：先 mpvAttachSurface + applyAndroidSurfaceSize，
+        // 最后才 set vo。反过来先设 vo=gpu 再 attach，mpv 会先在没有面的状态下建一次输出。
+        //
+        // force-window 必须是 no。5.6.0:3323 原文写明：
+        //   Opening force-window while idle creates a disposable 960x540 VO
+        //   before the real MediaCodec format is known, causing an extra reconfig.
+        // 这里之前设成 yes，mpv 会另建一个自带窗口的 VO 来跟交给它的 Surface 争，
+        // 表现就是画面不动、声音还在——就是「mpv 内核卡死」。
+        runCatching { core.attachSurface(surface, width, height) }
+        runCatching { core.setPropertyString("force-window", "no") }
+        runCatching { core.setPropertyString("vo", "gpu") }
         runCatching {
             MpvDebug.log("[mpv] attachSurface ${width}x${height} first=$first 像素格式保持系统默认（本版不再 setFormat）")
         }
@@ -536,6 +546,12 @@ class MpvPlayer(
         snapSpeed = 1f
         snapVideoW = 0
         snapVideoH = 0
+        rawVideoW = 0
+        rawVideoH = 0
+        vpW = 0
+        vpH = 0
+        vpDw = 0
+        vpDh = 0
         playlistData = null
         playlistForItem = null
         pendingResume = false
@@ -644,10 +660,16 @@ class MpvPlayer(
         core.observeProperty("pause", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
         // 用 eof-reached 判"真的播完"：END_FILE 在换文件/stop 时也会来，拿它判会误跳下一集
         core.observeProperty("eof-reached", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
-        // 视频帧尺寸：直接用 mpv 的 width / height 属性（整数），
-        // 比解析 video-params 字符串再跑正则正规，也是 mpv 官方对外语义。
+        // 尺寸属性照 5.6.0 observeAll:1922-1927 的六个，取值优先级照 updateVideoSize:3804-3811：
+        //   video-params/w|h  →  width|height  →  video-params/dw|dh
+        // 只用 width|height 是不够的：它们在 vo 还没建起来时是 0，而 video-params/dw|dh
+        // 是「应用旋转后的显示尺寸」，带旋转的片源只有后者才是真实显示比例。
         core.observeProperty("width", MpvCore.MpvFormat.MPV_FORMAT_INT64)
         core.observeProperty("height", MpvCore.MpvFormat.MPV_FORMAT_INT64)
+        core.observeProperty("video-params/w", MpvCore.MpvFormat.MPV_FORMAT_INT64)
+        core.observeProperty("video-params/h", MpvCore.MpvFormat.MPV_FORMAT_INT64)
+        core.observeProperty("video-params/dw", MpvCore.MpvFormat.MPV_FORMAT_INT64)
+        core.observeProperty("video-params/dh", MpvCore.MpvFormat.MPV_FORMAT_INT64)
         // track-list 是 node 类型（MPV_FORMAT_NODE = 6）：只用来触发"变了"，具体内容读子属性。
         // 换集 / 加字幕 / 切轨都会推这个属性，是轨道快照的唯一刷新信号。
         core.observeProperty("track-list", 6)
@@ -1014,16 +1036,43 @@ class MpvPlayer(
         }
     }
     override fun eventProperty(property: String, value: Long) {
+        val v = value.toInt()
         when (property) {
-            "width" -> {
-                snapVideoW = value.toInt()
-                ui { pushStateNow() }
-            }
-            "height" -> {
-                snapVideoH = value.toInt()
-                ui { pushStateNow() }
-            }
+            "width" -> rawVideoW = v
+            "height" -> rawVideoH = v
+            "video-params/w" -> vpW = v
+            "video-params/h" -> vpH = v
+            "video-params/dw" -> vpDw = v
+            "video-params/dh" -> vpDh = v
+            else -> return
         }
+        resolveVideoSize()
+    }
+
+    /**
+     * 照 5.6.0 updateVideoSize:3804-3811 的优先级挑出显示尺寸：
+     *   video-params/w|h  →  width|height  →  video-params/dw|dh
+     * 三者都拿不到时保持上一次的值，不把已经正确的尺寸冲回 0 ——
+     * 冲回 0 会让播放层的 aspectRatio 归零，AspectRatioFrameLayout 的 onMeasure
+     * 在 videoAspectRatio<=0 时整段 return，resize_mode 就彻底失效、画面按容器拉伸。
+     */
+    private fun resolveVideoSize() {
+        val w: Int
+        val h: Int
+        if (vpW > 0 && vpH > 0) {
+            w = vpW; h = vpH
+        } else if (rawVideoW > 0 && rawVideoH > 0) {
+            w = rawVideoW; h = rawVideoH
+        } else if (vpDw > 0 && vpDh > 0) {
+            w = vpDw; h = vpDh
+        } else {
+            return
+        }
+        if (w == snapVideoW && h == snapVideoH) return
+        snapVideoW = w
+        snapVideoH = h
+        MpvDebug.log("[vs] mpv 尺寸 ${w}x$h (vp=$vpW/$vpH raw=$rawVideoW/$rawVideoH disp=$vpDw/$vpDh)")
+        ui { pushStateNow() }
     }
     override fun eventProperty(property: String, value: String) {
         when (property) {

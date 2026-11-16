@@ -61,10 +61,16 @@
         android:nextFocusUp="@id/videoBox"
         android:nextFocusDown="@id/flagRow">
 
+    <!-- layout_gravity=center 是必须的：AspectRatioFrameLayout 在 fit 下会把自己的
+         measured height 改成 width/ratio（400x225 容器里视频 2.39:1 → 400x167），
+         父 FrameLayout 默认 top|start 摆放，画面就会贴顶、黑边全堆到底部。
+         官方 exo_player_view.xml 第 18-21 行的 exo_content_frame 正是带
+         android:layout_gravity="center"，PlayerView 靠这一条让画面居中。 -->
     <androidx.media3.ui.AspectRatioFrameLayout
         android:id="@+id/videoFrame"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:layout_gravity="center"
         app:resize_mode="fit">
 
         <!-- ★画面层结构（依据官方原文 + 两版原项目布局，不是经验）：

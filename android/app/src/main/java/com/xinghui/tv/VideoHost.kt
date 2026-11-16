@@ -99,8 +99,15 @@ class VideoHost(
         }
         runCatching { p?.setVideoSurfaceView(surface) }
         runCatching { p?.addListener(videoSizeListener) }
-        // 换内核时新引擎常已带尺寸，绑定后立即同步一次
-        runCatching { p?.videoSize?.let { videoSizeListener.onVideoSizeChanged(it) } }
+        // 换内核时新引擎常已带尺寸，绑定后立即同步一次。
+        // 但必须排除「还没有尺寸」的情况：刚 build 出来的播放器 videoSize 是 UNKNOWN(0,0)，
+        // 照原样转发会让 aspectRatio 归零 —— AspectRatioFrameLayout.onMeasure 在
+        // videoAspectRatio<=0 时整段 return，resize_mode 当场失效，画面按容器拉伸。
+        // 原版 PlayerView 只在 onVideoSizeChanged 里设，从不主动清零，这里同口径。
+        runCatching {
+            val vs = p?.videoSize
+            if (vs != null && vs.width > 0 && vs.height > 0) videoSizeListener.onVideoSizeChanged(vs)
+        }
         bound = p
         onResizeTargetChanged?.invoke()
     }
