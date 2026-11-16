@@ -216,22 +216,24 @@ class MpvCore(private val appContext: Context) {
     }
 
     /** 尺寸变了但 Surface 没换：只更新 android-surface-size */
-    fun updateSurfaceSize(width: Int, height: Int) {
-        if (dead || !created || surface == null) return
-        if (width <= 0 || height <= 0) return
-        applyAndroidSurfaceSize(width, height)
+    /** @return true 表示这次尺寸真的下发了（false = 未初始化或值没变，被去重挡掉） */
+    fun updateSurfaceSize(width: Int, height: Int): Boolean {
+        if (dead || !created || surface == null) return false
+        if (width <= 0 || height <= 0) return false
+        return applyAndroidSurfaceSize(width, height)
     }
 
     /** 照 5.6.0 applyAndroidSurfaceSize:3440 —— 相同尺寸不重复下发。 */
-    private fun applyAndroidSurfaceSize(width: Int, height: Int) {
-        if (width <= 0 || height <= 0) return
+    private fun applyAndroidSurfaceSize(width: Int, height: Int): Boolean {
+        if (width <= 0 || height <= 0) return false
         val value = "${width}x$height"
-        if (value == appliedSurfaceSize) return
-        runCatching {
-            MPVLib.setPropertyString("android-surface-size", value)
+        if (value == appliedSurfaceSize) return false
+        val ok = runCatching { MPVLib.setPropertyString("android-surface-size", value) }.isSuccess
+        if (ok) {
             appliedSurfaceSize = value
             MpvDebug.log("[mpv] android-surface-size=$value")
         }
+        return ok
     }
 
     /** 照 5.6.0 clearVideoOutput:3347 的 resetAppliedSurfaceSizes。解绑后必须清空。 */

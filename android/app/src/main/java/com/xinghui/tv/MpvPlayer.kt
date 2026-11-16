@@ -75,6 +75,9 @@ class MpvPlayer(
 
     private var inited = false
     private var surfaceReady = false
+    /** 上一次真正挂面时用的宽高。用来判断 surfaceChanged 是「微调」还是「小窗↔全屏」这种量级变化。 */
+    private var lastFrameW = 0
+    private var lastFrameH = 0
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
@@ -458,14 +461,64 @@ class MpvPlayer(
     }
 
     private fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format")
-        if (!inited) return
-        core.updateSurfaceSize(width, height)
+        MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format last=${lastFrameW}x$lastFrameH")
+        if (!inited) {
+            lastFrameW = width
+            lastFrameH = height
+            return
+        }
+        if (width <= 0 || height <= 0) return
+        val sameSize = (width == lastFrameW && height == lastFrameH)
+        if (sameSize) return
+        // 微调（布局重算抖几个像素）只更新属性；
+        // 量级变化（小窗 600x338 → 全屏 1920x1080）必须重建输出，见下面的说明。
+        val bigChange = lastFrameW <= 0 || lastFrameH <= 0 ||
+            kotlin.math.abs(width - lastFrameW) > lastFrameW / 6 ||
+            kotlin.math.abs(height - lastFrameH) > lastFrameH / 6
+        lastFrameW = width
+        lastFrameH = height
+        if (!bigChange) {
+            core.updateSurfaceSize(width, height)
+            return
+        }
+        if (!surfaceReady) {
+            // 还没挂面，只记下尺寸，等 attach 时按新值挂
+            core.updateSurfaceSize(width, height)
+            return
+        }
+        rebindForSizeChange(holder, width, height)
+    }
+
+    /**
+     * 小窗 ↔ 全屏时重建视频输出。
+     *
+     * 只改 android-surface-size 在理想情况下就够（mpv 的 android gpu context 会按它
+     * 调 ANativeWindow_setBuffersGeometry 并 resize EGL）。但本机（Amlogic S905 / Android 7.1）
+     * 上实测不行：Surface 已经由 SurfaceView 重新配置过，再让 mpv 原地 resize 会停在旧 buffer 上，
+     * 表现就是「小窗正常、一进全屏要么卡死要么黑屏」。
+     *
+     * 所以量级变化时按 5.6.0 的换面路径重建一次：摘 vo → detach → 重新 attach → 重新设 vo。
+     * 中间黑一下是重建的固有代价，比停在旧帧上强。
+     */
+    private fun rebindForSizeChange(holder: SurfaceHolder, width: Int, height: Int) {
+        // 旧尺寸看上一行 surfaceChanged 里的 last=xxx（那条是在更新前打的）
+        MpvDebug.log("[mpv] 尺寸量级变化 → 重建输出 ${width}x$height")
+        val wasPlaying = !paused
+        surfaceReady = false
+        runCatching { core.setPropertyString("vo", "null") }
+        runCatching { core.setPropertyString("force-window", "no") }
+        runCatching { core.detachSurface() }
+        attachSurface(holder.surface, width, height, first = false)
+        if (surfaceReady && wasPlaying && paused) {
+            runCatching { core.setPropertyBoolean("pause", false) }
+        }
     }
 
     private fun onSurfaceDestroyed(holder: SurfaceHolder) {
         MpvDebug.log("[mpv] surfaceDestroyed(SurfaceView) inited=$inited")
         surfaceReady = false
+        lastFrameW = 0
+        lastFrameH = 0
         if (inited) {
             // 官方 BaseMPVView.surfaceDestroyed 原文（BaseMPVView.kt）：
             //   MPVLib.setPropertyString("vo", "null")
@@ -509,6 +562,8 @@ class MpvPlayer(
             return
         }
         surfaceReady = true
+        lastFrameW = width
+        lastFrameH = height
         if (playPending && pendingUrl.isNotBlank()) {
             playPending = false
             doPlay(pendingUrl)
@@ -540,10 +595,10 @@ class MpvPlayer(
                 val voDead = core.getPropertyString("vo") != "gpu"
                 if (h.surface?.isValid == true && (!surfaceReady || voDead)) {
                     onSurfaceCreated(h)
-                } else if (surfaceReady && fw > 0 && fh > 0) {
+                } else if (surfaceReady && fw > 0 && fh > 0 && core.updateSurfaceSize(fw, fh)) {
                     // 面已经在，但窗口尺寸可能变了（小窗进全屏/全屏退小窗）。
                     // surfaceChanged 若因故没送达，这里是最后一道兜底。
-                    core.updateSurfaceSize(fw, fh)
+                    MpvDebug.log("[mpv] 尺寸同步 ${fw}x$fh（ensureSurface 兜底）")
                 }
             }
         }
@@ -1729,8 +1784,7 @@ class MpvPlayer(
         // 进全屏就是这个场景：surfaceCreated 报小窗的 600x338、就按 600x338 挂了面，
         // 随后 Surface 变 1920x1080，而那一刻 callback 还没注册回来。
         // 不补这一步，android-surface-size 会一直停在小窗尺寸。
-        if (inited && surfaceReady && fw > 0 && fh > 0) {
-            core.updateSurfaceSize(fw, fh)
+        if (inited && surfaceReady && fw > 0 && fh > 0 && core.updateSurfaceSize(fw, fh)) {
             MpvDebug.log("[mpv] 尺寸同步 ${fw}x$fh（补 addCallback 前错过的 surfaceChanged）")
         }
     }
