@@ -98,6 +98,7 @@ class MpvPlayer(
     private var selSid = ""
     private var selAid = ""
     private var selVid = ""
+    private var lastHwdec = ""
     // 与 5.6.0 同名同义：volume 0..1、repeatMode 取 Player.REPEAT_MODE_*、偏移单位毫秒
     private var volume = 1f
     private var repeatMode = Player.REPEAT_MODE_OFF
@@ -263,15 +264,17 @@ class MpvPlayer(
             // 让 mpv 把自己的日志写到私有目录。VO 建不起来时平台侧到底报了什么，
             // 只有它自己知道；只报「中断」等于永远查不到真因。
             //
-            // 级别用 w（warning + error）而不是 v（verbose）：ytdl_hook 失败、VO 建不起来、
-            // 解码器报错这些都在 w 里，全量 v 只会把每次播放写成几十 MB，
-            // 在只剩 32MB 预算的盒子上纯属白占盘。
-            // 另外 log-file 每次 init 是覆盖写，不会跨次累积；下面的上限是防单次播放写太大。
+            // 级别用 info：VO 建不起来时真正有用的那几行 —— [vo/gpu] Initializing GPU、
+            // [vo/gpu/android] ... 、[vo/gpu] Not creating window、[vo/gpu] GL_VERSION ——
+            // 全部是 info 级。之前设成 w 只留 warning/error，等于把唯一能定位
+            // "画面不动"的证据全过滤掉了，只剩一句笼统的加载失败。
+            // 不用 v/debug：那会把每帧解码都写进去，单次播放几十 MB；
+            // 下面仍保留单文件 2MB 上限兜底。
             runCatching {
                 if (logFile.exists() && logFile.length() > 2L * 1024 * 1024) logFile.delete()
             }
             core.setOptionString("log-file", logFile.absolutePath)
-            core.setOptionString("msg-level", "all=w")
+            core.setOptionString("msg-level", "all=info")
             core.setOptionString("idle", "yes")
             core.setOptionString("vo", "gpu")
             core.setOptionString("gpu-context", "android")
@@ -417,7 +420,9 @@ class MpvPlayer(
             // 官方原注释「would crash before the surface is attached」——
             // surface 还没到时若 force-window 开着，mpv 会试图建一个没有 surface 的窗口。
             // 之后 surfaceCreated 会把它重新打开。
-            runCatching { core.setOptionString("force-window", "no") }
+            // force-window 是 init-time 选项，init 之后 setOption 不再生效，
+            // 必须走属性接口（5.6.0 applyPostInitOptions:1821 用的就是 setRuntimeString）。
+            runCatching { core.setPropertyString("force-window", "no") }
             created = true
             core.addObserver(this)
             observeAll()
@@ -677,6 +682,11 @@ class MpvPlayer(
         core.observeProperty("paused-for-cache", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
         core.observeProperty("demuxer-cache-time", MpvCore.MpvFormat.MPV_FORMAT_DOUBLE)
         core.observeProperty("seekable", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
+        // 实际生效的硬解方式。5.6.0 observeProperties:1954 观察它：
+        //   值为 mediacodec 时说明走的是零拷贝直出，某些盒子（T1 这类 Amlogic）
+        //   会出现「初始化成功但不出帧」—— 症状就是画面冻住、声音照走。
+        //   值为 no 说明已经回落软解，那时画面该是动的。
+        core.observeProperty("hwdec-current", MpvCore.MpvFormat.MPV_FORMAT_STRING)
         // 轨道当前选择，属性驱动（这之前是轮询 getPropertyString("sid")）
         core.observeProperty("sid", MpvCore.MpvFormat.MPV_FORMAT_STRING)
         core.observeProperty("aid", MpvCore.MpvFormat.MPV_FORMAT_STRING)
@@ -1079,6 +1089,12 @@ class MpvPlayer(
             "sid" -> selSid = value
             "aid" -> selAid = value
             "vid" -> selVid = value
+            "hwdec-current" -> {
+                if (value != lastHwdec) {
+                    lastHwdec = value
+                    MpvDebug.log("[mpv] 硬解生效方式=$value")
+                }
+            }
         }
     }
 
