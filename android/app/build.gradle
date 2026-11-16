@@ -17,8 +17,8 @@ android {
 
     defaultConfig {
         applicationId "com.xinghui.tv"
-        minSdk 23   // 由 core-ktx 1.18.0 决定：它的 AndroidManifest 写 minSdkVersion=23。
-                    // recyclerview 1.4.0 只要 21，media3/appcompat/profileinstaller 更低，都不是约束项。
+        minSdk 25   // 覆盖下限锁定 Android 7.1（API 25）。core-ktx 1.18.0 本身只要 23，
+                    // 抬到 25 是产品口径：低于 7.1 的盒子不在目标范围。
                     // 与 Compose 无关。
         targetSdk 36
         versionCode 1

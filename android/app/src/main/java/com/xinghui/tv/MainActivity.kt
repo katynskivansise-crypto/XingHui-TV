@@ -28,8 +28,6 @@ import org.json.JSONObject
 /**
  * 详情页：影片信息 + 内嵌播放器小窗 + 集数网格（对齐原版 VideoActivity 的合一形态）。
  * 点播放器小窗 → 全屏；点集数 → 换集；点「当前正在播的那集」→ 全屏。
- */
-/**
  * 唯一宿主 Activity。
  *
  * 为什么详情页和播放页必须同一个窗口：
@@ -56,8 +54,6 @@ class MainActivity : Activity() {
     private var playLayer: PlayLayer? = null
     private var surfaceConsumer: androidx.media3.common.Player? = null
 
-/**
-     */
     /**
      * 画面层宿主的解析：**运行时查 id，不在代码里写死画面层的资源 id**。
      *
@@ -92,8 +88,6 @@ class MainActivity : Activity() {
     private var vod: Vod? = null
     private var currentLine: PlayLine? = null
 
-/**
-     */
     internal var player: ExoPlayer? = null
     /**
      * 小窗形态的原始 LayoutParams —— 原版的 mFrameParams。
@@ -102,7 +96,10 @@ class MainActivity : Activity() {
      *   我之前是手算 400dp×225dp 再补 margin，等于重新拼一个"差不多"的参数，
      *   漏掉的属性就会表现为位置或尺寸不对。
      */
-    private var frameParams: android.view.ViewGroup.LayoutParams? = null
+    /** 原版 mFrameParams —— @id/video 小窗形态的 LayoutParams，退全屏时原样还回去。 */
+    private var boxParams: android.view.ViewGroup.LayoutParams? = null
+    /** 原版 @id/video 本体：400x225 黑底框 + 焦点框，画面在它里面按比例排。 */
+    private var videoBox: android.widget.FrameLayout? = null
 
     private lateinit var inlineView: android.view.View
     private var inlineFullscreen = false
@@ -141,8 +138,6 @@ class MainActivity : Activity() {
 
     // ================= 宿主：唯一 surface + 层切换 =================
 
-/**
-     */
     private fun attachPreviewTo(p: androidx.media3.common.Player) {
         surfaceConsumer = p
         runCatching { videoHost.setPlayer(p) }
@@ -175,8 +170,6 @@ class MainActivity : Activity() {
      * 小窗形态：画面摆回详情页 playerBox 的位置（同一块 surface，只改 LayoutParams）。
      * 与原版一致 —— VideoActivity 就是把 mBinding.video 的 LayoutParams 在
      * 400x225 与 MATCH_PARENT 之间来回换，画面本身一直没动过。
-     */
-    /**
      * 宿主持有的线路与集列表（只读口，给播放层用）。
      *
      * 原版依据：5.6.0 `VideoActivity` 的集列表一直挂在 Flag 对象上，
@@ -205,35 +198,31 @@ class MainActivity : Activity() {
         // 原版 VideoActivity.exitFullscreen() 就这一句：
         //     mBinding.video.setLayoutParams(mFrameParams);
         //   保存的是 XML 里那个对象，原样还回去 —— 宽高、margin、gravity 一个不落。
-        frameParams?.let { videoFrame.layoutParams = it }
+        boxParams?.let { videoBox?.layoutParams = it }
         // 原版小窗还带一层焦点框：setForeground(selector_video)；全屏时置 null。
         // 这就是详情页小窗外面那圈细边。
-        runCatching { videoFrame.foreground = getDrawable(R.drawable.selector_video) }
-        videoFrame.requestLayout()
+        runCatching { videoBox?.foreground = getDrawable(R.drawable.selector_video) }
+        videoBox?.requestLayout()
     }
 
     private fun videoFrameToFull() {
-        videoFrame.layoutParams = android.widget.FrameLayout.LayoutParams(
+        videoBox?.layoutParams = android.widget.FrameLayout.LayoutParams(
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT
         )
         // 原版 enterFullscreen()：setForeground(null)
-        videoFrame.foreground = null
-        videoFrame.requestLayout()
+        videoBox?.foreground = null
+        videoBox?.requestLayout()
     }
 
     /**
      * 进播放层。只换层，不换窗口、不换 surface。
      * 这就是 OwnTV 的 "promotes the running preview straight to full screen with no reload"。
-     */
-    /**
      * 两层的显隐统一走这里 —— **只改 alpha 与焦点可达性，绝不改 visibility**。
      * alpha=0 的层仍在窗口里占着同一块区域，所以绘制区域从页面第一帧起就是固定的，
      * 进出播放页不再触发挖洞区域重算（黑帧就是那么来的）。
      * 焦点这一侧用 FOCUS_BLOCK_DESCENDANTS 挡住：alpha=0 但视图还在，
      * 不挡的话方向键会落进看不见的层里。
-     */
-    /**
      * 小窗加载圈 —— 位置与显隐时机逐条对齐原版。
      *
      * 原版 `activity_video.xml` 第 12 行：`progress` 是 `@id/video`（400x225 容器）的子 View，
@@ -242,8 +231,6 @@ class MainActivity : Activity() {
      * 灭圈在 `:5497 case Player.STATE_READY: hideProgress();`。
      *
      * 播放层自己有 `playProgress`，所以这里只在详情页形态显示。
-     */
-    /**
      * 对齐原版 5.6.0 `VideoActivity:3450 showError(String)`：
      *   `mBinding.widget.error.setVisibility(View.VISIBLE);`
      *   `mBinding.widget.text.setText(text);`
@@ -407,14 +394,12 @@ class MainActivity : Activity() {
             }
         layer.onHostResume()
         MpvDebug.log("[gate] 已切换 detailAlpha=${detailLayer.alpha} playAlpha=${playContainer.alpha} " +
-            "frame=${videoFrame.layoutParams?.width}x${videoFrame.layoutParams?.height} playMode=$playMode")
+            "box=${videoBox?.layoutParams?.width}x${videoBox?.layoutParams?.height} playMode=$playMode")
     }
 
     /**
      * 把详情页的监听器挂到某个引擎上。退出播放层时播放层会把引擎原样交回来，
      * 但监听器不会跟着回来 —— 不重新挂，小窗就没有 onVideoSizeChanged，画面比例和分辨率都会停在旧值。
-     */
-    /**
      * 详情页用到的播放器监听器。**必须复用同一个实例**。
  */
     private var detailListener: androidx.media3.common.Player.Listener? = null
@@ -423,10 +408,15 @@ class MainActivity : Activity() {
         detailListener?.let { runCatching { p.removeListener(it) } }
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                // 原版 5.6.0:5497 `case Player.STATE_READY: hideProgress();`
-                if (playbackState == androidx.media3.common.Player.STATE_READY) {
-                    disarmPlayTimeout()
-                    hideInlineProgress()
+                // 原版 onStateChanged 是两态切换：BUFFERING -> showProgress()、READY -> hideProgress()。
+                // 只做 READY 这一半的话，起播过后中途卡顿永远不再出圈。
+                when (playbackState) {
+                    androidx.media3.common.Player.STATE_BUFFERING -> showInlineProgress()
+                    androidx.media3.common.Player.STATE_READY -> {
+                        disarmPlayTimeout()
+                        hideInlineProgress()
+                    }
+                    else -> Unit
                 }
             }
 
@@ -447,13 +437,7 @@ class MainActivity : Activity() {
                 if (w > 0 && h > 0) {
                     findDetail<TextView>(R.id.vodInfoSize)?.text = "$w x $h"
                 }
-                // 不要调 videoFrame.setAspectRatio()。
-                //   那是我上一轮加的错误优化：AspectRatioFrameLayout 在宽度约束为 EXACTLY 时
-                //   会**强制按比例重算高度**（它为 PlayerView 设计的行为）。
-                //   我们是拿它当固定尺寸的容器用：设了 2.398 之后，
-                //   小窗 400dp×225dp 变 600×250（高度被压扁），
-                //   全屏 1920×1080 变 1920×801（底下露出两百多像素壁纸）。
-                //   比例要由 resize_mode 在子 View 上做，容器尺寸必须由 LayoutParams 说了算。
+                // 比例由 VideoHost 统一设（等价 PlayerView.updateAspectRatio），这里只汇报。
                 MpvDebug.log("[render] vsize ${w}x$h frame=${videoFrame.width}x${videoFrame.height} resizeMode=${videoFrame.resizeMode}")
             }
 
@@ -540,9 +524,10 @@ class MainActivity : Activity() {
         }
         playContainer = findViewHost(R.id.playLayer)!!
         videoFrame = findViewHost(R.id.videoFrame)!!
+        videoBox = findViewHost(R.id.videoBox)
         // 画面层是一块 SurfaceView，EXO 与 mpv 轮流接管
         videoSurface = resolveSurfaceView()
-        frameParams = videoFrame.layoutParams
+        boxParams = videoBox?.layoutParams
         subtitleView = findViewHost(R.id.subtitleView)!!
 
         detailRoot = layoutInflater.inflate(R.layout.activity_detail_layer, detailLayer, false)
@@ -614,7 +599,7 @@ class MainActivity : Activity() {
                 "[boot] 布局自检 hostRootBg=${findViewHost<android.view.View>(R.id.hostRoot)?.background?.javaClass?.simpleName} " +
                     "detailLayerBg=${detailLayer?.background?.javaClass?.simpleName} " +
                     "frame=${videoFrame.width}x${videoFrame.height} " +
-                    "frameLp=${videoFrame.layoutParams?.width}x${videoFrame.layoutParams?.height} " +
+                    "boxLp=${videoBox?.layoutParams?.width}x${videoBox?.layoutParams?.height} " +
                     "surface=${videoSurface.javaClass.simpleName} " +
                     "selfWall=${WallpaperStore.has(this)} " +
                     "windowBg=${window.decorView.background?.javaClass?.simpleName}"
@@ -647,7 +632,7 @@ class MainActivity : Activity() {
         player?.let { bindDetailListener(it) }
         // 点小窗 = 进全屏播放层（原版 VideoActivity 点视频框即进全屏）。
         //   不再走 enterInlineFullscreen：那条路铺满的是 playerBox，而画面在宿主层的 videoFrame。
-        findDetail<View>(R.id.playerBox)?.setOnClickListener {
+        videoBox?.setOnClickListener {
             openPlayPageAt(playingIdx.coerceAtLeast(0))
         }
 
@@ -771,18 +756,47 @@ class MainActivity : Activity() {
         currentLine = null
 
         findDetail<TextView>(R.id.detailName)?.text = v.vodName
-        // 对齐原版信息行：「站源: xxx   年份: xxx   地区: xxx」，标签与值分段，
-        // 之前用「 · 」拼成一行，读不出哪段是什么。
+        // 原版 activity_video.xml 的纵向顺序：@id/name → @id/remark → @id/row1(site/year/area/type)
+        //   「更新至第x集」是 @id/remark 单独一行（:5445 U0(remark, R.string.detail_remark, ...)），
+        //   不在 row1 里。之前把它拼进信息行，行内内容比原版多一项、上面少一行。
+        findDetail<TextView>(R.id.detailRemark)?.let { tv ->
+            val remark = v.vodRemarks.trim()
+            if (remark.isBlank() || remark == v.vodYear) {
+                tv.visibility = View.GONE
+            } else {
+                tv.text = remark
+                tv.visibility = View.VISIBLE
+            }
+        }
         val siteName = SubscriptionStore(this).currentSite()?.name.orEmpty()
         val info = buildString {
             if (siteName.isNotBlank()) append("站源：").append(siteName)
             if (v.vodYear.isNotBlank()) { if (isNotEmpty()) append("    "); append("年份：").append(v.vodYear) }
             if (v.vodArea.isNotBlank()) { if (isNotEmpty()) append("    "); append("地区：").append(v.vodArea) }
-            if (v.vodRemarks.isNotBlank() && v.vodRemarks != v.vodYear) {
-                if (isNotEmpty()) append("    "); append("更新：").append(v.vodRemarks)
-            }
+            // 原版 row1 第四项是 type_name（类型）
+            if (v.vodTypeName.isNotBlank()) { if (isNotEmpty()) append("    "); append("类型：").append(v.vodTypeName) }
         }
         findDetail<TextView>(R.id.detailInfo)?.text = info.ifBlank { "暂无信息" }
+        // 导演 / 演员：原版 VideoActivity:5451-5452 用 detail_director / detail_actor 模板，
+        // 值为空时整行隐藏（原版 setText 只在非空时 VISIBLE）
+        val director = v.vodDirector.trim()
+        val actor = v.vodActor.trim()
+        findDetail<TextView>(R.id.detailDirector)?.let { tv ->
+            if (director.isBlank()) {
+                tv.visibility = View.GONE
+            } else {
+                tv.text = "导演：" + director
+                tv.visibility = View.VISIBLE
+            }
+        }
+        findDetail<TextView>(R.id.detailActor)?.let { tv ->
+            if (actor.isBlank()) {
+                tv.visibility = View.GONE
+            } else {
+                tv.text = "演员：" + actor
+                tv.visibility = View.VISIBLE
+            }
+        }
         findDetail<TextView>(R.id.detailDesc)?.text = v.vodContent.ifBlank { "暂无简介" }
         if (Settings(this).showPoster) {
             findDetail<android.widget.ImageView>(R.id.detailImage)?.let { AsyncImageLoader.load(it, v.vodPic) }
@@ -1446,14 +1460,14 @@ class MainActivity : Activity() {
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
             android.widget.RelativeLayout.LayoutParams.MATCH_PARENT
         )
-        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDirector, R.id.detailActor, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findDetail<View>(it)?.visibility = View.GONE
         }
         // 画面在宿主层，铺满 playerBox 不等于铺满画面 —— 必须同时把 videoFrame 拉全屏，
         //   否则就是「playerBox 占满屏幕，但画面还是左上 400x225」（本 bug 的原始现场）。
         runCatching { videoFrameToFull() }
-        box?.requestFocus()
+        videoBox?.requestFocus()
     }
 
     private fun exitInlineFullscreen() {
@@ -1466,7 +1480,7 @@ class MainActivity : Activity() {
         box?.foreground = savedBoxForeground ?: runCatching {
             getDrawable(R.drawable.selector_video)
         }.getOrNull()
-        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDesc,
+        listOf(R.id.detailName, R.id.detailInfo, R.id.detailDirector, R.id.detailActor, R.id.detailDesc,
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findDetail<View>(it)?.visibility = View.VISIBLE
         }
@@ -1474,6 +1488,7 @@ class MainActivity : Activity() {
         // 它的 surface 会被销毁（surface 生命周期绑 view visibility），
         // 结果解码器照常跑、声音照常出，但没有承载层 —— 表现就是小窗只有声音没画面。
         runCatching { setPreviewVisible(true) }
+        runCatching { videoFrameToMini() }
         findDetail<View>(R.id.detailList)?.requestFocus()
     }
 
@@ -1602,10 +1617,6 @@ class MainActivity : Activity() {
      * 详情页内嵌预览是本项目加的（原版 VodActivity 只有列表和详情，没有播放器）。
      * 跳去播放页时本页只走 onPause，若不 pause，预览那一路音频会和新起的播放页叠在一起。
      * mpv 不申请音频焦点、EXO 离开焦点也不一定立刻停，只能自己停。
-     */
-/**
-     */
-    /**
      * 进播放页前的收尾：暂停预览、把画面层摘掉，但**保留** ExoPlayer 实例。
      *
      * 为什么不再 release：
@@ -1616,8 +1627,6 @@ class MainActivity : Activity() {
      * 代价只是一个**暂停态**的 ExoPlayer 在播放页期间活着（不是第二路在播，
      * 不会有两个声音、也不占解码带宽）；onDestroy 里已有 player?.release() 兜底。
      * 若播放页期间进程被回收导致实例没了，onResume 里的 `player ?: buildInlinePlayer()`
-     */
-/**
      */
     private fun detachInlinePlayback() {
         Log.i("XingHuiTV", "[detail] 进播放页：播放器与画面都不动，只切容器")
@@ -1689,7 +1698,7 @@ class MainActivity : Activity() {
                 inlineLeaveFullscreen = false
                 runCatching {
                     setPreviewVisible(true)
-                    findDetail<FrameLayout>(R.id.playerBox)?.requestFocus()
+                    videoBox?.requestFocus()
                 }
             } else {
                 // 离开时是小窗 → 回到小窗。

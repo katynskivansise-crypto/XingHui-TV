@@ -30,6 +30,10 @@ object AsyncImageLoader {
 
     private val placeHolder = ColorDrawable(0xFF1A1A1A.toInt())
 
+    /** 对应原版 ImgUtil:40 的 failed 集合：某个封面失败过一次就不再重复请求，直接走文字兜底。
+     *  清缓存（AppCache.clear）不看这里，进程重启自然清空。 */
+    private val failed = java.util.Collections.synchronizedSet(HashSet<String>())
+
     // ---------------- 诊断计数器 ----------------
     // TV 上抓 logcat 麻烦，海报空白时最要紧的是分清两类完全不同的失败：
     //   ① vodPic 本来就是空的    → 数据侧，spider 没给图，壳侧怎么修都没用
@@ -45,6 +49,51 @@ object AsyncImageLoader {
         failCount = 0
         emptyCount = 0
         lastFailReason = ""
+    }
+
+    /** 后台线程画兜底色块：控件已被复用绑定到别的 url 时丢弃 */
+    private fun fallbackText(view: ImageView, url: String, text: String) {
+        if (text.isBlank()) return
+        val d = textDrawable(text, view)
+        view.post { if (view.tag == url) view.setImageDrawable(d) }
+    }
+
+    /**
+     * 原版 TextDrawable.buildRect(text.substring(0,1), ColorGenerator.get400(text))。
+     * 颜色按片名散列到固定色板，同一部片每次都是同一个颜色。
+     */
+    private fun textDrawable(text: String, view: ImageView): android.graphics.drawable.Drawable? {
+        val word = text.trim().take(1)
+        if (word.isEmpty()) return null
+        // 原版 ColorGenerator.PALETTE_400 的 19 个 Material 400 色（取自 com.github.bassaer.library.MDColor）
+        val palette = intArrayOf(
+            0xFFEF5350.toInt(), 0xFFEC407A.toInt(), 0xFFAB47BC.toInt(),
+            0xFF7E57C2.toInt(), 0xFF5C6BC0.toInt(), 0xFF42A5F5.toInt(),
+            0xFF29B6F6.toInt(), 0xFF26C6DA.toInt(), 0xFF26A69A.toInt(),
+            0xFF66BB6A.toInt(), 0xFF9CCC65.toInt(), 0xFFD4E157.toInt(),
+            0xFFFFEE58.toInt(), 0xFFFFCA28.toInt(), 0xFFFFA726.toInt(),
+            0xFFFF7043.toInt(), 0xFF8D6E63.toInt(), 0xFFBDBDBD.toInt(),
+            0xFF78909C.toInt(),
+        )
+        // 原版 ColorGenerator.get400：PALETTE_400.get((key.hashCode() & Integer.MAX_VALUE) % size)
+        val bg = palette[(text.hashCode() and Int.MAX_VALUE) % palette.size]
+        val density = view.resources.displayMetrics.density
+        val size = (view.width.takeIf { it > 0 } ?: (120 * density).toInt())
+        val bmp = android.graphics.Bitmap.createBitmap(
+            size.coerceAtLeast(48), size.coerceAtLeast(48),
+            android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = android.graphics.Canvas(bmp)
+        canvas.drawColor(bg)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            textAlign = android.graphics.Paint.Align.CENTER
+            textSize = bmp.width * 0.42f
+            isFakeBoldText = true
+        }
+        val baseY = (bmp.height / 2f) - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText(word, bmp.width / 2f, baseY, paint)
+        return android.graphics.drawable.BitmapDrawable(view.resources, bmp)
     }
 
     private fun noteFail(reason: String, url: String) {
@@ -71,12 +120,22 @@ object AsyncImageLoader {
     /** 每 16 次写入扫一次目录，避免每次写都遍历 */
     private var writeCount = 0
 
-    fun load(view: ImageView, url: String) {
+    /**
+     * @param text 无图 / 失败时的兜底文字（传片名）。原版 ImgUtil.load(text, url, view)
+     *             走的是 TextDrawable：片名首字 + 由字色派生的色块，任何情况下卡片都有识别度。
+     *             不传则维持深灰占位。
+     */
+    fun load(view: ImageView, url: String, text: String = "") {
         view.setImageDrawable(placeHolder)
         view.tag = url
         if (url.isBlank()) {
             // 站点压根没给封面。这类"空白"改加载器是白费劲，要回头查 vod_pic 映射
             emptyCount++
+            view.setImageDrawable(textDrawable(text, view))
+            return
+        }
+        if (failed.contains(url)) {
+            view.setImageDrawable(textDrawable(text, view))
             return
         }
         // TVBox 站的封面地址会把 header 内嵌在 URL 尾巴上（对齐原版 ImgUtil.getUrl 的四类后缀）：
@@ -134,6 +193,8 @@ object AsyncImageLoader {
                     ?: fetch(ctx, realUrl, extraHeaders)?.also { writeDisk(ctx, url, it) }
                 if (bytes == null || bytes.isEmpty()) {
                     noteFail("下载为空", url)
+                    failed.add(url)
+                    fallbackText(view, url, text)
                     return@execute
                 }
                 val bmp = decodeSampled(bytes, reqW, reqH)
@@ -143,6 +204,8 @@ object AsyncImageLoader {
                     runCatching { diskFile(ctx, url).delete() }
                     noteFail("解码失败 len=${bytes.size}", url)
                     Log.e("XingHuiTV", "[image] 解码失败，已清除缓存 len=${bytes.size} url=$url")
+                    failed.add(url)
+                    fallbackText(view, url, text)
                     return@execute
                 }
                 cache.put(url, bmp)
@@ -156,6 +219,8 @@ object AsyncImageLoader {
             } catch (e: Throwable) {
                 // 占位图已设置，静默失败（catch Throwable：解码 OOM 也不该让进程崩）
                 noteFail("异常 ${e.javaClass.simpleName}", url)
+                failed.add(url)
+                fallbackText(view, url, text)
             }
         }
     }

@@ -77,7 +77,7 @@ class VideoAdapter(
         // 空备注不显示空绿块（原版也是只有有备注时才画角标）
         holder.remarks.visibility = if (tag.isBlank()) View.GONE else View.VISIBLE
         if (Settings(holder.root.context).showPoster) {
-            AsyncImageLoader.load(holder.image, vod.vodPic)
+            AsyncImageLoader.load(holder.image, vod.vodPic, vod.vodName)
         } else {
             holder.image.setImageDrawable(android.graphics.drawable.ColorDrawable(0xFF1A1A1A.toInt()))
         }

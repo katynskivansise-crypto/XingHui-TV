@@ -19,9 +19,7 @@
     android:id="@+id/hostRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/transparent"
-    android:focusable="true"
-    android:focusableInTouchMode="true">
+    android:background="@android:color/transparent">
 
     <!-- ★壁纸层：照原版 contextWall 的做法 —— 它是布局里的一块全屏 ImageView，
          不是 window 背景。原版 VideoActivity 里就是 setImageDrawable + 显隐控制。
@@ -41,14 +39,32 @@
          这样 media3 才会挂 SurfaceHolder.Callback、在 surface 尺寸变化时自己调 setVideoSurfaceSize。
          我们之前用的是 setVideoSurface(holder.surface)，裸 Surface 没有这个监听，
          尺寸一变解码器就不知道 → 画面停住、声音还在。 -->
-    <androidx.media3.ui.AspectRatioFrameLayout
-        android:id="@+id/videoFrame"
+    <!-- 画面容器的外层固定框 —— 逐条照 5.0.8 `@id/video`（同一 View 既定尺寸又画焦点框，
+         黑底是给 letterbox 用的：内部 AspectRatioFrameLayout 按视频比例缩到 400x166 后，
+         下面那 59dp 就是这层黑底，不是壁纸）。
+         5.0.8 数值：400x225 / marginTop 24 / marginBottom 12 / marginStart 24 /
+         nextFocusLeft=自己 / nextFocusRight=@id/desc / nextFocusUp=自己 / nextFocusDown=@id/flag。 -->
+    <FrameLayout
+        android:id="@+id/videoBox"
         android:layout_width="400dp"
         android:layout_height="225dp"
         android:layout_gravity="top|start"
         android:layout_marginStart="24dp"
         android:layout_marginTop="24dp"
+        android:layout_marginBottom="12dp"
         android:background="@android:color/black"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:foreground="@drawable/selector_video"
+        android:nextFocusLeft="@id/videoBox"
+        android:nextFocusRight="@id/btnDesc"
+        android:nextFocusUp="@id/videoBox"
+        android:nextFocusDown="@id/flagRow">
+
+    <androidx.media3.ui.AspectRatioFrameLayout
+        android:id="@+id/videoFrame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
         app:resize_mode="fit">
 
         <!-- ★画面层结构（依据官方原文 + 两版原项目布局，不是经验）：
@@ -155,6 +171,7 @@
                 android:visibility="gone" />
         </FrameLayout>
     </androidx.media3.ui.AspectRatioFrameLayout>
+    </FrameLayout>
 
     <FrameLayout
         android:id="@+id/detailLayer"

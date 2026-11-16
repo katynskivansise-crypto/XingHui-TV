@@ -53,7 +53,8 @@ class LibAdapter(
         val vod = items[position]
         holder.name.text = vod.vodName
         holder.info.text = vod.vodRemarks.ifBlank { " " }
-        AsyncImageLoader.load(holder.image, vod.vodPic)
+        // 传片名做兜底：原版 ImgUtil.load(name, pic, view)，无图/失败时画片名首字色块
+        AsyncImageLoader.load(holder.image, vod.vodPic, vod.vodName)
         // 卡宽高由调用方按原版算法传入，海报铺满整卡（原版 adapter_vod.xml 的 image 也是 match_parent）
 
         // 删除角标

@@ -14,6 +14,9 @@ data class Vod(
     val vodYear: String = "",
     val vodArea: String = "",
     val vodContent: String = "",
+    val vodDirector: String = "",
+    val vodActor: String = "",
+    val vodTypeName: String = "",   // 原版 bean 的 type_name，详情页 row1 第四项）
     val vodPlayFrom: String = "",
     val vodPlayUrl: String = "",
     val vodFlag: String = "",   // 上次播放线路（历史续播用）
@@ -62,6 +65,10 @@ data class Vod(
             vodYear = o.optString("vod_year"),
             vodArea = o.optString("vod_area"),
             vodContent = o.optString("vod_content"),
+            // 详情页「导演：/ 演员：」两行，字段名同原版 bean 的 @SerializedName
+            vodDirector = o.optString("vod_director"),
+            vodActor = o.optString("vod_actor"),
+            vodTypeName = o.optString("type_name").ifBlank { o.optString("vod_type") },
             vodPlayFrom = o.optString("vod_play_from"),
             vodPlayUrl = o.optString("vod_play_url"),
             vodFlag = o.optString("vod_flag"),

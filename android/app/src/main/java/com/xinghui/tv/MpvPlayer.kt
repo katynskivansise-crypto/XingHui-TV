@@ -6,7 +6,12 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.media3.common.C
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.SimpleBasePlayer
@@ -45,6 +50,10 @@ class MpvPlayer(
         private const val MIME_TEXT_GENERIC = "application/x-subrip"
         private const val TAG = "XingHuiTV"
         private const val UID = "xinghui-mpv"
+        // 跳转目标保护：命中容差或超时才交回真实位置
+        private const val NO_SEEK_TARGET = -1L
+        private const val SEEK_TARGET_TOLERANCE_MS = 1_500L
+        private const val SEEK_TARGET_TIMEOUT_MS = 15_000L
         @Volatile
         var liveCount: Int = 0
             private set
@@ -75,9 +84,28 @@ class MpvPlayer(
     private val logFile: java.io.File by lazy { java.io.File(activity.filesDir, "mpv.log") }
     private var pendingStartMs = 0L
     private var pendingStartPaused = false
+
     private var pendingSeekMs = 0L
     private var paused = true
     private var eofReached = false
+    // mpv 在等缓冲时为 true。不观察它的话起播后 playbackState 永远是 READY，
+    // 上层拿不到"正在缓冲"，加载圈永远不显示。
+    private var pausedForCache = false
+    // demuxer-cache-time：已缓冲到的位置（秒），0 表示没有前向缓存
+    private var cacheEndSec = 0.0
+    private var seekable = true
+    // 轨道选择的当前值，属性驱动，取代轮询 getPropertyString
+    private var selSid = ""
+    private var selAid = ""
+    private var selVid = ""
+    // 与 5.6.0 同名同义：volume 0..1、repeatMode 取 Player.REPEAT_MODE_*、偏移单位毫秒
+    private var volume = 1f
+    private var repeatMode = Player.REPEAT_MODE_OFF
+    private var textOffsetMs = 0L
+    private var audioOffsetMs = 0L
+    private var audioFocusDelegated = false
+    private var deviceVolume = 0
+    private var deviceMuted = false
     private var currentItem: MediaItem? = null
     // ---- media3 状态快照（唯一事实来源）----
     //
@@ -87,6 +115,10 @@ class MpvPlayer(
     // getState() 只负责把它们翻译成 media3 的 State。
     // 这是职责划分问题，与设备性能无关。
     private var snapPosMs = 0L
+    // 跳转目标保护（原项目 MpvSeekPositionState）：跳转后 mpv 的 time-pos 会滞后一段，
+    // 期间对外报目标值，否则进度条先弹回旧位置再跳过去。
+    private var seekTargetMs = NO_SEEK_TARGET
+    private var seekRequestedAtMs = 0L
     private var snapDurMs = C.TIME_UNSET
     private var snapSpeed = 1f
     private var snapVideoW = 0
@@ -167,12 +199,44 @@ class MpvPlayer(
 
     // ---------------------------------------------------------------- 生命周期
 
+    /**
+     * 照 5.6.0 MpvAudioCapabilities.getAudioSpdifCodecs —
+     * 只在真有 HDMI/ARC/eARC/USB 直通路由时才开直通，编码取设备自报的那几个。
+     * 硬编码全套会踩一个坑：功放不吃 DTS 却收到 DTS 码流，结果是没有声音而不是降级。
+     */
+    private fun detectAudioSpdifCodecs(): String {
+        val mgr = runCatching {
+            activity.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+        }.getOrNull() ?: return ""
+        val outputs = runCatching { mgr.getDevices(AudioManager.GET_DEVICES_OUTPUTS) }
+            .getOrNull() ?: return ""
+        val passthroughTypes = mutableSetOf(
+            AudioDeviceInfo.TYPE_HDMI,
+            AudioDeviceInfo.TYPE_HDMI_ARC,
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+        )
+        if (android.os.Build.VERSION.SDK_INT >= 29) passthroughTypes.add(AudioDeviceInfo.TYPE_HDMI_EARC)
+        val hasRoute = outputs.any { it != null && it.isSink && passthroughTypes.contains(it.type) }
+        if (!hasRoute) return ""
+        val codecs = linkedSetOf<String>()
+        outputs.forEach { dev ->
+            if (dev == null || !dev.isSink || !passthroughTypes.contains(dev.type)) return@forEach
+            dev.encodings?.forEach { enc ->
+                when (enc) {
+                    AudioFormat.ENCODING_AC3 -> codecs.add("ac3")
+                    AudioFormat.ENCODING_E_AC3 -> codecs.add("eac3")
+                    AudioFormat.ENCODING_DTS -> codecs.add("dts")
+                    AudioFormat.ENCODING_DTS_HD -> { codecs.add("dts"); codecs.add("dts-hd") }
+                    AudioFormat.ENCODING_DOLBY_TRUEHD -> codecs.add("truehd")
+                    else -> Unit
+                }
+            }
+        }
+        return codecs.joinToString(",")
+    }
+
     private fun initWithOptions() {
         if (inited) return
-        if (android.os.Build.VERSION.SDK_INT < 23) {
-            Log.e(TAG, "[mpv] 系统 API ${android.os.Build.VERSION.SDK_INT} < 23，内嵌 mpv 不可用")
-            return
-        }
         runCatching {
             if (created) {
                 core.addObserver(this)
@@ -183,6 +247,12 @@ class MpvPlayer(
             }
             core.create()
             core.setOptionString("config", "no")
+            // 着色器与 ICC 编译结果落盘（5.6.0 :1768-1769），二次启动少编译一次
+            runCatching {
+                val sub = java.io.File(activity.cacheDir, "mpv").apply { mkdirs() }
+                core.setOptionString("gpu-shader-cache-dir", sub.absolutePath)
+                core.setOptionString("icc-cache-dir", sub.absolutePath)
+            }
             // 让 mpv 把自己的日志写到私有目录。VO 建不起来时平台侧到底报了什么，
             // 只有它自己知道；只报「中断」等于永远查不到真因。
             //
@@ -221,10 +291,10 @@ class MpvPlayer(
             // 否则遇到这类源会多出一条轨道、选轨界面里看着莫名其妙。点播源基本遇不到，设了无害。
             core.setOptionString("flatten-editions", "yes")
             // 只让这些编码走硬解，其余走软解，避免 mediacodec 对不认识的编码直接报错
-            core.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
+            core.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1,avs3")
             // 硬解开关是 mpv 自己的偏好（官方 key hardware_decoding），和 EXO 的软/硬解各存各的
             val mpvSet = Settings(activity)
-            core.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec" else "no")
+            core.setOptionString("hwdec", if (mpvSet.mpvHwdec) "mediacodec,mediacodec-copy" else "no")
             // 官方 MPVView.kt —— API 23+ 用 disp.mode.refreshRate 显式覆盖 display-fps。
             // 不设的话 mpv 自己去"估"面板刷新率，估错会出现两件事：
             //   1) 渲染节拍与面板对不上（24fps 内容在 60Hz 面板上轻微抖、偶发吞帧）
@@ -264,6 +334,19 @@ class MpvPlayer(
             core.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
             // 官方 MPVView.kt：播放位置由宿主自己管（我们记在 HistoryStore），
             // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
+            // 音频硬解优先（MpvAudioDecoderPolicy:7），失败自动回落软解
+            core.setOptionString("ad", "aac_mediacodec,mp3_mediacodec,amrnb_mediacodec,amrwb_mediacodec")
+            // 起播缓冲（5.6.0 applyPreInitOptions:1785-1801）。
+            // cache-pause-initial=no 让首帧不等缓冲填满，这一条是秒开的关键。
+            core.setOptionString("cache-pause", "yes")
+            core.setOptionString("cache-pause-initial", "no")
+            core.setOptionString("cache-pause-wait", "5.000")
+            core.setOptionString("cache-secs", "20")
+            core.setOptionString("demuxer-thread", "yes")
+            core.setOptionString("demuxer-seekable-cache", "auto")
+            // 只预读 1 秒（mpv 默认 30），换起播速度
+            core.setOptionString("demuxer-readahead-secs", "1")
+            core.setOptionString("demuxer-hysteresis-secs", "0")
             core.setOptionString("save-position-on-quit", "no")
             // 官方 MPVView.kt 用 tls-verify=yes + filesDir/cacert.pem。
             // 我们没有这个 ca bundle，留 yes 会让 https 片源在证书链不全时直接失败，
@@ -272,10 +355,16 @@ class MpvPlayer(
             // 直通（官方 MpvPlayer.java `setOption("audio-spdif", config.audioSpdif())`）：
             //   AC3/EAC3/DTS 这类码流原样交给 HDMI，盒子不解码，功放才拿得到多声道。
             //   不设的话这些音轨会被 mpv 解成 PCM 立体声，听感直接降级。
-            core.setOptionString("audio-spdif", "ac3,eac3,dts,dts-hd,truehd")
+            val spdif = detectAudioSpdifCodecs()
+            if (spdif.isNotEmpty()) core.setOptionString("audio-spdif", spdif)
             // 字幕自动挂载（官方默认 fuzzy）：同名字幕文件/内嵌字幕自动识别，
             //   关掉的话 MKV 里的内嵌字幕要手动选，电视盒子上基本等于没有。
             core.setOptionString("sub-auto", "fuzzy")
+            // 下面四条默认就是 yes，显式写死是为了不让外部 profile 把 ASS 渲染关掉
+            core.setOptionString("sub-ass", "yes")
+            core.setOptionString("embeddedfonts", "yes")
+            core.setOptionString("sub-fix-timing", "yes")
+            core.setOptionString("sub-use-margins", "yes")
             // 官方 MPVView.kt 是无条件设 profile=fast（关掉 gradfun/deband 这类高成本滤镜）。
             // 这里做成设置页开关：T1 这类低端芯片默认开，想拿画质细节时可以关掉。
             if (mpvSet.mpvFastProfile) {
@@ -562,14 +651,33 @@ class MpvPlayer(
         // track-list 是 node 类型（MPV_FORMAT_NODE = 6）：只用来触发"变了"，具体内容读子属性。
         // 换集 / 加字幕 / 切轨都会推这个属性，是轨道快照的唯一刷新信号。
         core.observeProperty("track-list", 6)
+        // 缓冲与可跳转：media3 靠这两个上报 BUFFERING / 时间条可拖
+        core.observeProperty("paused-for-cache", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
+        core.observeProperty("demuxer-cache-time", MpvCore.MpvFormat.MPV_FORMAT_DOUBLE)
+        core.observeProperty("seekable", MpvCore.MpvFormat.MPV_FORMAT_FLAG)
+        // 轨道当前选择，属性驱动（这之前是轮询 getPropertyString("sid")）
+        core.observeProperty("sid", MpvCore.MpvFormat.MPV_FORMAT_STRING)
+        core.observeProperty("aid", MpvCore.MpvFormat.MPV_FORMAT_STRING)
+        core.observeProperty("vid", MpvCore.MpvFormat.MPV_FORMAT_STRING)
     }
 
     private fun doPlay(url: String) {
         if (!inited) return
         runCatching {
-            val headerLine = pendingHeaders.entries
-                .filter { it.key.isNotBlank() }
-                .joinToString(",") { "${it.key}: ${it.value}" }
+            // 对齐原项目 MpvRequestHeaderPolicy：缺 Accept 时补 */*，
+            // 缺 User-Agent 时用全局 user-agent 兜底。很多源站不接受无 Accept 的请求。
+            val hdr = LinkedHashMap<String, String>()
+            pendingHeaders.forEach { (k, v) ->
+                if (k.isNotBlank() && v.isNotBlank()) hdr[k.trim()] = v.trim()
+            }
+            val hasAccept = hdr.keys.any { it.equals("Accept", ignoreCase = true) }
+            val hasUa = hdr.keys.any { it.equals("User-Agent", ignoreCase = true) }
+            if (!hasAccept) hdr["Accept"] = "*/*"
+            if (!hasUa) {
+                runCatching { core.getPropertyString("user-agent") }.getOrNull()
+                    ?.takeIf { it.isNotBlank() }?.let { hdr["User-Agent"] = it.trim() }
+            }
+            val headerLine = hdr.entries.joinToString(",") { "${it.key}: ${it.value}" }
             core.setPropertyString("http-header-fields", headerLine)
             // 起播前的定位必须等 FILE_LOADED：文件还没加载时 seek absolute 会直接失败
             pendingSeekMs = pendingStartMs
@@ -756,7 +864,7 @@ class MpvPlayer(
     fun setHardwareDecode(hard: Boolean) {
         if (!inited) return
         runCatching {
-            core.setPropertyString("hwdec", if (hard) "mediacodec" else "no")
+            core.setPropertyString("hwdec", if (hard) "mediacodec,mediacodec-copy" else "no")
         }
         // hwdec 是加载期选项：只对之后加载的文件生效，当前文件不重新加载就切不过去。
         // 跟 EXO 那边"重建播放器再回到原位置"的做法对齐。
@@ -852,12 +960,16 @@ class MpvPlayer(
     override fun eventProperty(property: String, value: Double) {
         when (property) {
             "time-pos" -> {
-                snapPosMs = (value * 1000.0).toLong().coerceAtLeast(0L)
+                snapPosMs = resolveSeekPosition((value * 1000.0).toLong().coerceAtLeast(0L))
                 ui {
                     onTimePos?.invoke(snapPosMs)
                     // 位置本身由 media3 外推，这里只做低频校准
                     pushStateCalibrate()
                 }
+            }
+            "demuxer-cache-time" -> {
+                cacheEndSec = value
+                ui { pushStateCalibrate() }
             }
             "duration" -> {
                 snapDurMs = (value * 1000.0).toLong().takeIf { it > 0L } ?: C.TIME_UNSET
@@ -885,6 +997,14 @@ class MpvPlayer(
                     pushStateNow()
                 }
             }
+            "paused-for-cache" -> {
+                pausedForCache = value
+                ui { pushStateNow() }
+            }
+            "seekable" -> {
+                seekable = value
+                ui { pushStateNow() }
+            }
         }
     }
 
@@ -905,7 +1025,13 @@ class MpvPlayer(
             }
         }
     }
-    override fun eventProperty(property: String, value: String) = Unit
+    override fun eventProperty(property: String, value: String) {
+        when (property) {
+            "sid" -> selSid = value
+            "aid" -> selAid = value
+            "vid" -> selVid = value
+        }
+    }
 
     // ============================================================ Player 接口
     //
@@ -925,8 +1051,9 @@ class MpvPlayer(
             // release() 会检查这条：没声明时 release() 直接抛，上层的 runCatching 会把它吞成
             // "释放失败但不报错"，内核就泄漏了 —— 这是白名单改造最容易踩的坑。
             Player.COMMAND_RELEASE,
-            // 不声明 COMMAND_STOP：没有 handleStop 实现。上层也没有调 stop()，
-            // 声明了反而给"声明做不到的能力"留口子。
+            Player.COMMAND_STOP,
+            Player.COMMAND_SET_REPEAT_MODE,
+            Player.COMMAND_SET_VOLUME,
             Player.COMMAND_SET_SPEED_AND_PITCH,
             Player.COMMAND_SET_MEDIA_ITEM,
             Player.COMMAND_CHANGE_MEDIA_ITEMS,
@@ -939,10 +1066,29 @@ class MpvPlayer(
             Player.COMMAND_SET_TRACK_SELECTION_PARAMETERS,
             // media3 1.11.1 只有这一个画面命令，clearVideoSurface 也归它管
             Player.COMMAND_SET_VIDEO_SURFACE,
+            Player.COMMAND_SET_SHUFFLE_MODE,
+            Player.COMMAND_SET_PLAYLIST_METADATA,
+            Player.COMMAND_SET_AUDIO_ATTRIBUTES,
+            Player.COMMAND_SET_DEVICE_VOLUME,
+            Player.COMMAND_ADJUST_DEVICE_VOLUME,
+            Player.COMMAND_GET_DEVICE_VOLUME,
         )
         .build()
 
     private fun posMsNow(): Long = if (!inited) 0L else snapPosMs
+
+    /** 跳转目标已到达（容差内）或超时，就交回真实位置 */
+    private fun resolveSeekPosition(observedMs: Long): Long {
+        if (seekTargetMs == NO_SEEK_TARGET) return observedMs
+        val delta = if (observedMs >= seekTargetMs) observedMs - seekTargetMs else seekTargetMs - observedMs
+        val elapsed = android.os.SystemClock.elapsedRealtime() - seekRequestedAtMs
+        if (delta <= SEEK_TARGET_TOLERANCE_MS || elapsed >= SEEK_TARGET_TIMEOUT_MS) {
+            seekTargetMs = NO_SEEK_TARGET
+            seekRequestedAtMs = 0L
+            return observedMs
+        }
+        return seekTargetMs
+    }
     private fun durMsNow(): Long = if (!inited) C.TIME_UNSET else snapDurMs
 
     // ============================================================ 轨道（标准 media3 Tracks）
@@ -994,9 +1140,10 @@ class MpvPlayer(
             playlistForItem = null
             return
         }
-        val selVid = runCatching { core.getPropertyString("vid") }.getOrNull().orEmpty()
-        val selAid = runCatching { core.getPropertyString("aid") }.getOrNull().orEmpty()
-        val selSid = runCatching { core.getPropertyString("sid") }.getOrNull().orEmpty()
+        // 优先用属性推送过来的值，为空再读一次当下值（推送可能在刷新前一刻还没到）
+        val curVid = selVid.ifBlank { runCatching { core.getPropertyString("vid") }.getOrNull().orEmpty() }
+        val curAid = selAid.ifBlank { runCatching { core.getPropertyString("aid") }.getOrNull().orEmpty() }
+        val curSid = selSid.ifBlank { runCatching { core.getPropertyString("sid") }.getOrNull().orEmpty() }
 
         val types = ArrayList<Int>(count)
         val formats = ArrayList<Format>(count)
@@ -1017,9 +1164,9 @@ class MpvPlayer(
             val lang = runCatching { core.getPropertyString("track-list/$i/lang") }.getOrNull().orEmpty()
             val title = runCatching { core.getPropertyString("track-list/$i/title") }.getOrNull().orEmpty()
             val cur = when (type) {
-                C.TRACK_TYPE_VIDEO -> selVid
-                C.TRACK_TYPE_AUDIO -> selAid
-                else -> selSid
+                C.TRACK_TYPE_VIDEO -> curVid
+                C.TRACK_TYPE_AUDIO -> curAid
+                else -> curSid
             }
             val isSel = normalizeTrackId(cur) == id.toString()
             val fmt = Format.Builder()
@@ -1114,7 +1261,7 @@ class MpvPlayer(
         val pb = when {
             item == null || !inited -> Player.STATE_IDLE
             eofReached -> Player.STATE_ENDED
-            playPending -> Player.STATE_BUFFERING
+            playPending || pausedForCache -> Player.STATE_BUFFERING
             else -> Player.STATE_READY
         }
         val builder = State.Builder()
@@ -1133,7 +1280,10 @@ class MpvPlayer(
         // playlist 只在 item / 时长变化时重建，避免 getState 每次都新建对象
         var playlist = playlistData
         if (playlist == null || playlistForItem !== item) {
-            val dataBuilder = MediaItemData.Builder(UID).setMediaItem(item)
+            val dataBuilder = MediaItemData.Builder(UID)
+                .setMediaItem(item)
+                // 可跳转是项级别属性（1.11.1 的 State.Builder 没有 setSeekable）
+                .setIsSeekable(seekable)
             if (snapDurMs > 0L) dataBuilder.setDurationUs(snapDurMs * 1000L)
             // 轨道挂在 MediaItemData 上（State.Builder 没有 setTracks）
             dataBuilder.setTracks(currentTracks)
@@ -1150,12 +1300,29 @@ class MpvPlayer(
         // 位置：真正在播时交给 media3 按时钟外推，暂停 / 缓冲 / 播完才给恒定值。
         //   这样进度条平滑前进而不需要宿主按帧推送 —— media3 给的官方形态，
         //   不是为某台设备做的妥协。
+        builder.setVolume(volume)
+        builder.setRepeatMode(repeatMode)
         builder.setContentPositionMs(
             if (pb == Player.STATE_READY && !paused)
                 PositionSupplier.getExtrapolating(posMsNow(), snapSpeed)
             else
                 PositionSupplier.getConstant(posMsNow())
         )
+        // 缓冲端点：进度条上那条浅色预览，取"当前位置"与 demuxer 缓存端点中较大者
+        run {
+            val posMs = posMsNow()
+            val cacheMs = (cacheEndSec * 1000.0).toLong()
+            val durMs = snapDurMs
+            val bufferedMs = when {
+                durMs <= 0L -> posMs
+                cacheMs > posMs -> cacheMs.coerceAtMost(durMs)
+                else -> posMs
+            }
+            // 官方签名要 PositionSupplier（常量型即可），不是 Long
+            builder.setContentBufferedPositionMs(
+                PositionSupplier.getConstant(bufferedMs.coerceIn(posMs, maxOf(posMs, durMs)))
+            )
+        }
 
         // 尺寸只在 mpv 报了有效宽高时才设
         if (snapVideoW > 0 && snapVideoH > 0) {
@@ -1173,6 +1340,38 @@ class MpvPlayer(
         currentItem = item
         val uri = item.localConfiguration?.uri?.toString()
         if (uri != null) play(uri, emptyMap(), startPositionMs, emptyList(), startPaused = true)
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 照 5.6.0 handleAddMediaItems:592 —— 单集形态下只记下第一项，不触发播放。 */
+    override fun handleAddMediaItems(index: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
+        if (currentItem == null && mediaItems.isNotEmpty()) currentItem = mediaItems[0]
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 照 5.6.0 handleReplaceMediaItems:598 —— 空列表等同清空并停止，否则只换项。 */
+    override fun handleReplaceMediaItems(
+        fromIndex: Int, toIndex: Int, mediaItems: List<MediaItem>,
+    ): ListenableFuture<*> {
+        if (mediaItems.isEmpty()) {
+            if (inited) runCatching { core.command(arrayOf("stop")) }
+            currentItem = null
+            paused = true
+            eofReached = false
+            pushStateNow()
+        } else {
+            currentItem = mediaItems[0]
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 照 5.6.0 handleRemoveMediaItems:611 —— 停止并清空。 */
+    override fun handleRemoveMediaItems(fromIndex: Int, toIndex: Int): ListenableFuture<*> {
+        if (inited) runCatching { core.command(arrayOf("stop")) }
+        currentItem = null
+        paused = true
+        eofReached = false
+        pushStateNow()
         return Futures.immediateVoidFuture()
     }
 
@@ -1194,6 +1393,8 @@ class MpvPlayer(
     override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
         // 外推起点必须立刻对齐到 seek 目标，否则进度条会从旧位置继续走
         snapPosMs = positionMs.coerceAtLeast(0L)
+        seekTargetMs = snapPosMs
+        seekRequestedAtMs = android.os.SystemClock.elapsedRealtime()
         pushStateNow()
         seekToMs(positionMs)
         return Futures.immediateVoidFuture()
@@ -1210,13 +1411,128 @@ class MpvPlayer(
     }
 
     /**
+     * 照 5.6.0 handleStop:654 —— stopInternal 里只有 stopMpv 是必须的，
+     * 其余（HLS 广告边界、帧率、预载缓存）我们没有对应设施。
+     */
+    override fun handleStop(): ListenableFuture<*> {
+        if (inited) runCatching { core.command(arrayOf("stop")) }
+        paused = true
+        playPending = false
+        eofReached = false
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /**
+     * 照 5.6.0 handleSetRepeatMode:687 —— 单集循环落成 mpv 的 loop-file=inf。
+     * 不落成"播完 seekTo(0) 再 play"，那样每次循环都有一次 ENDED → 重开，
+     * 会黑一帧、有音频断点。
+     */
+    override fun handleSetRepeatMode(mode: Int): ListenableFuture<*> {
+        repeatMode = mode
+        if (inited) {
+            core.setPropertyString("loop-file",
+                if (mode == Player.REPEAT_MODE_ONE) "inf" else "no")
+        }
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 照 5.6.0 handleSetVolume:867 —— mpv 的 volume 是 0..100。 */
+    override fun handleSetVolume(volume: Float, volumeOperationType: Int): ListenableFuture<*> {
+        this.volume = volume.coerceIn(0f, 1f)
+        if (inited) core.setPropertyDouble("volume", this.volume * 100.0)
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /**
+     * 照 5.6.0 applyTextOffset:5928 —— sub-delay 以秒为单位。
+     *
+     * 这是普通方法不是 override：media3 1.11.1 的 SimpleBasePlayer 没有
+     * handleSetTextOffsetMs 扩展点（5.6.0 用的版本比 1.11.1 新）。能力照搬，接口位置不同。
+     */
+    fun setSubtitleOffsetMs(offsetMs: Long) {
+        textOffsetMs = offsetMs
+        if (inited) core.setPropertyDouble("sub-delay", offsetMs / 1000.0)
+        pushStateNow()
+    }
+
+    /** 照 5.6.0 applyAudioOffset:5932 —— audio-delay 以秒为单位。理由同 setSubtitleOffsetMs。 */
+    fun setAudioOffsetMs(offsetMs: Long) {
+        audioOffsetMs = offsetMs
+        if (inited) core.setPropertyDouble("audio-delay", offsetMs / 1000.0)
+        pushStateNow()
+    }
+
+    /**
      * 视频输出：PlayerView.setPlayer 时把它的 SurfaceView/SurfaceHolder/Surface 交进来。
      * media3 1.4.1 的 SimpleBasePlayer 提供这个扩展点（1.3.1 没有）。
-     */
-    /**
      * 轨道选择：preferredAudioLanguages → alang，disabledTrackTypes → aid/sid=no，
      * overrides → 从 Format.id 抠出 mpv 原生轨道号直接写属性。
      */
+    /** 单集形态：移动/换序对播放列表无意义，只同步首项。 */
+    override fun handleMoveMediaItems(fromIndex: Int, toIndex: Int, newIndex: Int): ListenableFuture<*> =
+        Futures.immediateVoidFuture()
+
+    /** 单集形态：洗牌无意义。 */
+    override fun handleSetShuffleModeEnabled(shuffleModeEnabled: Boolean): ListenableFuture<*> {
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 单集形态：播放列表元数据不参与播放。 */
+    override fun handleSetPlaylistMetadata(playlistMetadata: MediaMetadata): ListenableFuture<*> {
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /**
+     * 音频属性：只记下来给焦点用，分辨率由 mpv 自己按码流派生。
+     * handlesAudioFocus 为真时由 handleAudioFocus 走我们的 requestAudioFocus。
+     */
+    override fun handleSetAudioAttributes(
+        audioAttributes: AudioAttributes, handlesAudioFocus: Boolean,
+    ): ListenableFuture<*> {
+        // 1.11.1 没有 handleAudioFocus 扩展点，焦点由这一条委托
+        audioFocusDelegated = handlesAudioFocus
+        if (handlesAudioFocus) requestAudioFocus()
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 设备音量：改变系统音量流，不动本次播放的 volume 增益。 */
+    override fun handleSetDeviceVolume(volume: Int, volumeOperationType: Int): ListenableFuture<*> {
+        deviceVolume = volume.coerceAtLeast(0)
+        runCatching { audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, deviceVolume, 0) }
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 官方签名只收 flags（1.11.1 SimpleBasePlayer:3420），增减 1 格由我们自己做。 */
+    override fun handleIncreaseDeviceVolume(flags: Int): ListenableFuture<*> =
+        handleSetDeviceVolume(deviceVolume + 1, flags)
+
+    override fun handleDecreaseDeviceVolume(flags: Int): ListenableFuture<*> =
+        handleSetDeviceVolume(deviceVolume - 1, flags)
+
+    override fun handleSetDeviceMuted(muted: Boolean, volumeOperationType: Int): ListenableFuture<*> {
+        deviceMuted = muted
+        runCatching {
+            val mgr = audioManager ?: return@runCatching
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                mgr.adjustStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    if (muted) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE, 0,
+                )
+            } else {
+                mgr.setStreamMute(AudioManager.STREAM_MUSIC, muted)
+            }
+        }
+        pushStateNow()
+        return Futures.immediateVoidFuture()
+    }
+
     override fun handleSetTrackSelectionParameters(
         parameters: TrackSelectionParameters,
     ): ListenableFuture<*> {

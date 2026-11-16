@@ -30,8 +30,6 @@ import org.json.JSONObject
  * - 播放成功自动写入历史（含线路+集地址，供历史页续播）
  * 入参（Intent extra）：
  *   vod_id / vod_name / vod_pic / flag(线路名) / ep_url(集地址) / direct_url(直播直链，可空)
- */
-/**
  * 播放层。宿主 MainActivity 里的一个 View 层，不是 Activity。
  *
  * 不拆成独立 Activity 的理由只有一个：窗口只能创建一次，SurfaceView 只能有一块。
@@ -46,8 +44,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private var args: android.content.Intent? = null
     fun prepare(a: android.content.Intent) { args = a }
 
-/**
-     */
     fun mpvInstance(): MpvPlayer? = if (isMpvMode()) mpv else null
 
     fun currentPlayer(): androidx.media3.common.Player? =
@@ -55,8 +51,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     fun isAttached(): Boolean = attached
 
-/**
-     */
     /**
      * 解析 Intent 字段。
      * 从 bind() 里抽出来的：bind() 只 inflate 一次（attached 后立刻 return），
@@ -76,15 +70,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         if (directUrl.isBlank() && (looksLikeMedia(vodId) || ThunderPlay.match(vodId))) directUrl = vodId
         siteKey = SubscriptionStore(host).currentKey() ?: ""
         runCatching {
-            // 两张表顺序完全一致（0.25/0.5/0.75/1.0/1.25/1.5/2.0），设置里的档位下标就是这里的下标
+            // 设置页与这里共用同一张 7 档表（5.0.8 exo_controls_playback_speeds），下标可直接用
             val at = Settings(host).playSpeed.coerceIn(0, speedSteps.lastIndex)
             speedIdx = at
             savedSpeedIdx = at
         }
     }
 
-/**
-     */
     /**
      * @param reuseUrl 非空表示**这一路已经在播**（详情页小窗正在播的就是它）。
      *        此时只接管界面状态，不重新拉站点详情、不重新 setMediaSource ——
@@ -340,8 +332,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 但 setPosition / marks / setOpeningOf 都会先判 vodId 为空直接 return。
      * 详情接口不返回 vod_id 的站点就会写不进进度，读出来恒为 0。
      * 统一走这个 key，写入与读取才是同一条记录。
-     */
-    /**
      * 历史键 —— **进页面时算一次，之后冻结**。
      *
      * 为什么必须冻结：`vodId` 在本页里会被两处改写
@@ -378,12 +368,13 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private var vodLines: List<PlayLine> = emptyList()
 
+    // 5.0.8 res/values-zh-rCN/arrays.xml exo_controls_playback_speeds：
+    //   0.25 倍 / 0.5 倍 / 0.75 倍 / 正常 / 1.25 倍 / 1.5 倍 / 2 倍
+    // 档位数属于 UI 表现，按 5.0.8 走；底层 setPlaybackSpeed 收任意浮点，不需要跟着扩到 5.6.0 的 11 档。
     private val speedSteps = listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-    private var speedIdx = 3 // 默认 1.0x（本表下标 3）
+    private var speedIdx = 3 // 默认「正常」，本表下标 3
     private var fastForwarding = false
     private var savedSpeedIdx = speedIdx
-/**
-     */
     private val videoHost: VideoHost get() = host.videoHost
     private lateinit var session: PlaybackSession
     // 对齐原版 PlayerSetting.getScale():150 —— "scale" 未设置时默认 0，即「原始」= FIT。
@@ -398,6 +389,29 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
     )
     private val scaleNames = arrayOf("原始", "16:9", "4:3", "填充", "裁剪")
+
+    /**
+     * 对应 MpvPlayerEngine.isSurfaceDirect:316 —— 判据是当前 vo 观察值等于 mediacodec_embed，
+     * 不是"是不是 mpv"。我们固定 vo=gpu / gpu-context=android（MpvPlayer:199-200），恒为 false。
+     *
+     * 放大说清楚：mpv 的画面比例根本不由 AspectRatioFrameLayout 决定 —— libmpv 按
+     * video-aspect-override（MpvPlayer:726-748）自己排 box，resize_mode 对它无效果。
+     * 所以这个改写只影响 PlayerView 那一侧（EXO），对 mpv 只是让它的容器别留旧背景。
+     */
+    private fun isMpvSurfaceDirect(): Boolean = false
+
+    /**
+     * 照 PlaybackActivity.applyResizeMode:299 + effectiveResizeMode:311。
+     * mpv 且非 mediacodec_embed 直连时，FIT 改写成 FILL —— 那一路 PlayerView 的
+     * AspectRatioFrameLayout 仍参与排版，留 FIT 会在容器边角露旧背景。
+     */
+    private fun applyResizeMode(index: Int) {
+        val mode = scaleModes[index]
+        val effective = if (isMpvMode() && !isMpvSurfaceDirect()
+            && mode == AspectRatioFrameLayout.RESIZE_MODE_FIT
+        ) AspectRatioFrameLayout.RESIZE_MODE_FILL else mode
+        videoHost?.resizeMode = effective
+    }
 
     // 清晰度（对齐原版 Url.values）：多清晰度切换；单清晰度时隐藏按钮
     private val qualities = mutableListOf<Pair<String, String>>() // (name, v)
@@ -489,7 +503,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         scaleIdx = HistoryStore(host).scaleOf(historyKey)
             .takeIf { it >= 0 } ?: Settings(host).playerScale
         scaleIdx = scaleIdx.coerceIn(0, scaleModes.size - 1)
-        videoHost?.resizeMode = scaleModes[scaleIdx]
+        applyResizeMode(scaleIdx)
+        // onSizeChanged / onSurfaceAttached 的接法：换内核、视频尺寸变化后重应用一次档位
+        videoHost?.onResizeTargetChanged = { applyResizeMode(scaleIdx) }
         findViewById<TextView>(R.id.btnScale)?.text = scaleNames[scaleIdx]
         // mpv 内核下不必先建 EXO 实例：T1 只有 2GB 内存，两套解码器并存很吃紧。
         // 切回 EXO 时 rebuildPlayer() 会补建，所以这里可以省。
@@ -1102,8 +1118,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private var pendingSeek: Long = 0
 
-/**
-     */
 
     private var lastSeekCommitAt = 0L
 
@@ -1190,6 +1204,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
                 val target = pendingSeek
                 pendingSeek = 0
                 if (p.duration > 0 && target < p.duration - 5_000) p.seekTo(target)
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                loopOn = repeatMode == Player.REPEAT_MODE_ONE
+                findViewById<View>(R.id.btnLoop)?.isActivated = loopOn
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -1307,16 +1326,24 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         endingDone = false
         updateOpeningText()
         updateEndingText()
+        // 「同集再次起播」必须同时满足两条：集地址相同 + 历史行还在。
+        //   只判地址相等是错的：清空历史后 lastPlayedUrl 仍在内存里，
+        //   再点同一集会走进 currentPosMs()（内核实时位置，与磁盘无关），
+        //   表现为「历史清了还能接着播」。
+        //   原版同一处的判据是 sameEpisode ? mHistory.getPosition() : TIME_UNSET，
+        //   而 mHistory 是进页面时从库里读的——库里没了就是 TIME_UNSET，从头播。
         val sameEpisodeAgain = url == lastPlayedUrl
+        val historyAlive = marks[2] > 0L
         val atSrc = when {
             resumeOverride >= 0 -> "强制"
-            sameEpisodeAgain -> "续接当前"
+            sameEpisodeAgain && historyAlive -> "续接当前"
+            sameEpisodeAgain -> "历史已清，从头"
             else -> "历史"
         }
         val at = when {
             resumeOverride >= 0 -> resumeOverride
-            // 同集再次起播：用当前真实位置，绝不回头读磁盘上的旧续播点
-            sameEpisodeAgain -> currentPosMs()
+            // 同集再次起播且历史行仍在：用当前真实位置，不回头读磁盘上的旧续播点
+            sameEpisodeAgain && historyAlive -> currentPosMs()
             else -> maxOf(openingMs, marks[2])
         }
         lastPlayedUrl = url
@@ -1540,8 +1567,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 原版这个值存了没人读；不设 LoadControl 时 ExoPlayer 用的是
      * min=13MB / 起播=2.5s / 重缓冲=5s / 上限=50s 的默认档。
      * 这里按秒数换算：起播前攒 N 秒，卡顿重缓冲后等 2N 秒，上限仍保持 50 秒。
-     */
-    /**
      * 签名是 setBufferDurationsMs(minBufferMs, maxBufferMs, bufferForPlaybackMs, bufferForPlaybackAfterRebufferMs)。
      * media3 有硬校验：minBufferMs 必须 >= bufferForPlaybackMs，也必须 >= bufferForPlaybackAfterRebufferMs，
      * 否则构造时直接抛 IllegalArgumentException，Activity 起不来。
@@ -1599,7 +1624,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun toggleScale() {
         scaleIdx = (scaleIdx + 1) % scaleModes.size
-        if (isMpvMode()) mpv?.applyScale(scaleIdx) else videoHost?.resizeMode = scaleModes[scaleIdx]
+        if (isMpvMode()) mpv?.applyScale(scaleIdx) else applyResizeMode(scaleIdx)
         findViewById<TextView>(R.id.btnScale).text = scaleNames[scaleIdx]
         // 对齐原版 VideoActivity.onScale：档位写进本片 History，不动全局 Setting
         if (!HistoryStore(host).setScaleOf(historyKey, scaleIdx)) Settings(host).playerScale = scaleIdx
@@ -1644,8 +1669,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      *   系统：跟随系统「字幕样式」设置（CaptioningManager.getUserStyle()）
      * 原版同时设了 setApplyEmbeddedStyles(!isCaption())：选「预设」时用 ASS 里自带样式，
      * 选「系统」时用系统样式覆盖内嵌样式。
-     */
-    /**
      * 委托给宿主那一份实现。
      *   （MainActivity:380 取到的 subtitleView 就是 VideoHost 构造时传进去的那一个），
      *   代码双写意味着以后改一处漏一处，字幕样式就会在小窗和全屏两个形态下变得不一致。
@@ -1674,8 +1697,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun isMpvMode(): Boolean =
-        !mpvFallbackExo && PlayerManager.shouldUseMpv(host) &&
-            android.os.Build.VERSION.SDK_INT >= 23   // 官方 libmpv 构建要求 API 23+
+        !mpvFallbackExo && PlayerManager.shouldUseMpv(host)
 
     /**
      * 起播前按键意图（两个内核共用）。原版按键先记在界面层再落到内核
@@ -1825,15 +1847,8 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     private fun handleEnded() {
-        if (loopOn) {
-            if (isMpvMode()) {
-                // resume() 内部已处理 eof-reached → seek 0 + play，这里不再重复 seek
-                mpv?.resume()
-            } else {
-                player?.seekTo(0)
-                player?.play()
-            }
-        } else if (directUrl.isBlank()) {
+        // 单集循环交给内核原生循环（mpv loop-file=inf / EXO setRepeatMode），不会走到 ENDED
+        if (directUrl.isBlank()) {
             setKeepScreenOn(false)
             // 线路播放（原版 select_flag）：全自动=切下一集；手动=只提示，等用户自己选。
             // 原版 VideoActivity.seamless() 的 true 分支就是只做临时高亮、不写历史、不自动切。
@@ -2131,7 +2146,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             // mpv 走了，EXO 需要重建播放器后接管
             if (player == null) rebuildPlayer(activeHeaders)
             // mpv 期间 scaleIdx 只作用在 mpv 上，切回 EXO 要把档位同步回 EXO 侧的 resizeMode
-            videoHost?.resizeMode = scaleModes[scaleIdx]
+            applyResizeMode(scaleIdx)
             resumeOverride = at
             playUrl(url, activeHeaders)
         }
@@ -2162,8 +2177,16 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         findViewById<TextView>(R.id.btnDecode)?.text = if (hard) "硬解" else "软解"
     }
 
+    /**
+     * 对齐 5.6.0：MpvPlayerEngine:138 / ExoPlayerEngine:450 都是 player.setRepeatMode，
+     * 内核自己原生循环，不靠"播完 seekTo(0) 再 play"（那样每轮都有 ENDED→重开，黑一帧）。
+     */
     private fun toggleLoop() {
         loopOn = !loopOn
+        runCatching {
+            player?.repeatMode =
+                if (loopOn) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        }
         findViewById<View>(R.id.btnLoop)?.isActivated = loopOn
     }
 
@@ -2183,8 +2206,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             cur = p.currentPosition
             dur = runCatching { p.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
         }
-        if (cur <= 0 || dur <= 0 || cur > dur / 2) {
-            showPlayError("请播到片头附近再按（需在前半段）")
+        // 原版 canSetOpening：position > 0 && duration > 0 && position <= getOpEdLimit(duration)
+        if (cur <= 0 || dur <= 0 || cur > opEdLimit(dur)) {
+            showPlayError("请播到片头附近再按（需在前段）")
             return
         }
         setOpening(cur)
@@ -2201,11 +2225,23 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             cur = p.currentPosition
             dur = runCatching { p.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
         }
-        if (cur <= 0 || dur <= 0 || cur < dur / 2) {
-            showPlayError("请播到片尾附近再按（需在后半段）")
+        // 原版 canSetEnding：duration - position <= getOpEdLimit(duration)
+        if (cur <= 0 || dur <= 0 || dur - cur > opEdLimit(dur)) {
+            showPlayError("请播到片尾附近再按（需在后段）")
             return
         }
         setEnding(dur - cur)
+    }
+
+    /**
+     * 片头/片尾可设阈值（原项目 Constant.getOpEdLimit:22）。
+     * 是绝对时长不是比例：<15 分钟片给 3 分钟，<30 分钟给 6 分钟，其余 10 分钟。
+     */
+    private fun opEdLimit(durationMs: Long): Long = when {
+        durationMs <= 0L -> 0L
+        durationMs < 15 * 60_000L -> 3 * 60_000L
+        durationMs < 30 * 60_000L -> 6 * 60_000L
+        else -> 10 * 60_000L
     }
 
     private fun setOpening(ms: Long) {
@@ -2290,8 +2326,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     }
 
     // ---------- EXO 三秒黑屏探针（只写 /debug，不改任何 UI 与播放行为） ----------
-/**
-     */
 
     private fun handleMenuKey() {
         val toEpisodes = Settings(host).fullscreenMenuKey == 1
@@ -2326,8 +2360,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     /**
      * 双入口兜底：极少数 ROM 的按键不经过 Activity.dispatchKeyEvent 直接落到 onKeyDown，
      * 这里再认一次菜单键。dispatchKeyEvent 已经 return true 时不会走到这里，所以不会双触发。
-     */
-    /**
      * 呼出控制条（对齐原版 VideoActivity.showControl:1148-1157）。
      *
      * focusId / withTitle 也照原版分开：
@@ -2360,8 +2392,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     @Volatile private var snapPlaying = false
     private var snapAt = 0L
 
-/**
-     */
     private val snapTick = object : Runnable {
         override fun run() {
             runCatching {
@@ -2404,8 +2434,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   接下来这一帧要同时合成「视频层 + 控制条」，如果视频层这次没提交新帧，
         //   合成器就会拿到空队列 → 整屏黑一下。先把同一帧重新贴上去，黑的那一下就不存在。
         // 菜单路径上一个 native 调用都不做。
-        //   历史：这里曾是 redrawFor(1200)（36 次 render+swap），后改成单次 redrawNow()，
-        //   真机仍闪退 —— 说明 mpv 内核按菜单键的崩溃点就在"窗口变化期间调 render API"本身。
         //   控制条并不覆盖视频矩形（它在留边/画面之上，由窗口层合成），根本不需要重贴视频帧；
         //   要恢复画面是在隐/显切换之后（onWindowFocusChanged 的 recoverRendering）再处理。
         findViewById<View>(R.id.playTitle)?.alpha = if (withTitle) 1f else 0f
@@ -2512,8 +2540,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 对齐原版 setControlNextFocus(:1128-1145)：把不可见 / 禁用的按钮从左右焦点链里摘掉。
      * 控制条里片头、片尾、字幕、音轨、视轨这些按钮是按能力显隐的，
      * 不重算 nextFocus 时方向键会跳进 GONE 的按钮，看着像"跳不动"。
-     */
-    /**
      * 把焦点交回画面层（原版 getFocus1:1670 的落点）。
      *
      * 真机日志里 hideControl 之后 host.currentFocus 是 -1（无任何视图持有焦点），
@@ -2702,8 +2728,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private var seekAccumMs = 0L         // 按住期间累计的偏移
     private var seekingByKey = false
 
-/**
-     */
     private fun currentPosMs(): Long = session.positionMs()
 
     /**
@@ -2820,8 +2844,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 方向键 / 媒体快进键共用的累加逻辑。
      *
      * 参数只有一套：首按 +10s；长按每 300ms 再 +10s；最后一次按下后 400ms 自动提交。
-     */
-    /**
      * 隐藏态左右键，完全对齐原版 CustomKeyDownVod.check()：
      *   LEFT/RIGHT + ACTION_DOWN → onSeeking(subTime()/addTime())，只累积 holdTime 并更新居中提示；
      *   LEFT/RIGHT + ACTION_UP   → App.post(onSeekEnd(holdTime), 250)，按「当前位置 + holdTime」只跳一次。
@@ -2876,11 +2898,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }
     }
 
-/**
-     */
 
-/**
-     */
     private var progressTick: Runnable? = null
 
     private var rxSample = -1L
@@ -3141,12 +3159,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             if ((fid == R.id.btnOpening || fid == R.id.btnEnding) && (isUpKey(event) || isDownKey(event))) {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     val add = isUpKey(event)
-                    val dur = player?.duration ?: 0L
-                    val half = if (dur > 0) dur / 2 else Long.MAX_VALUE
+                    // 原版 onOpeningAdd/onEndingAdd 只夹下限 0，没有上限
                     if (fid == R.id.btnOpening) {
-                        setOpening(if (add) minOf(openingMs + 1000, half) else maxOf(0L, openingMs - 1000))
+                        setOpening(if (add) openingMs + 1000 else maxOf(0L, openingMs - 1000))
                     } else {
-                        setEnding(if (add) minOf(endingMs + 1000, half) else maxOf(0L, endingMs - 1000))
+                        setEnding(if (add) endingMs + 1000 else maxOf(0L, endingMs - 1000))
                     }
                 }
                 return true
@@ -3226,8 +3243,6 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
      * 关弹窗都会触发 onWindowFocusChanged），WMS 重新布局、SurfaceView 重新挖洞，
      * 本机 ROM 上重算结果是整屏被窗口盖住 —— 画面全黑、声音照走。
      * 白边由主题 windowFullscreen=true 兜，不需要窗口 flag。
-     */
-    /**
      * 沉浸式全屏 —— 完全照原版 `Util.hideSystemUI(Window)`：
      *
      *     只设 systemUiVisibility，**不碰任何窗口 flag**。

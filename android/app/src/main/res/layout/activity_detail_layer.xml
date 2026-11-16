@@ -16,10 +16,7 @@
         android:layout_marginStart="24dp"
         android:layout_marginTop="24dp"
         android:layout_marginBottom="12dp"
-        android:background="@android:color/transparent"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
-        android:foreground="@drawable/selector_video">
+        android:background="@android:color/transparent">
 
         <ImageView
             android:id="@+id/detailImage"
@@ -119,10 +116,10 @@
         android:textStyle="bold"
         android:text="影片详情" />
 
-    <!-- 站源/年份/地区/更新：原版 row1，16sp，各项间隔 12dp -->
+    <!-- 更新进度：原版 @id/remark，16sp 单行，位于片名之下、row1 之上 -->
     <TextView
-        android:id="@+id/detailInfo"
-        android:layout_width="match_parent"
+        android:id="@+id/detailRemark"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_below="@id/detailName"
         android:layout_alignStart="@id/detailName"
@@ -132,19 +129,64 @@
         android:ellipsize="end"
         android:textColor="@color/white"
         android:textSize="16sp"
+        android:visibility="gone" />
+
+    <!-- 站源/年份/地区/类型：原版 row1，16sp，各项间隔 12dp -->
+    <TextView
+        android:id="@+id/detailInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/detailRemark"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="16sp"
         android:text="年份 · 地区 · 备注" />
 
+    <!-- 导演：原版 @id/director，16sp 单行，位于信息行之下 -->
     <TextView
-        android:id="@+id/detailDesc"
+        android:id="@+id/detailDirector"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_below="@id/detailInfo"
         android:layout_alignStart="@id/detailName"
         android:layout_marginTop="6dp"
         android:layout_marginEnd="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:visibility="gone" />
+
+    <!-- 演员：原版 @id/actor，16sp 单行 -->
+    <TextView
+        android:id="@+id/detailActor"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/detailDirector"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/detailDesc"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/detailActor"
+        android:layout_alignStart="@id/detailName"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="24dp"
         android:ellipsize="end"
         android:lineSpacingExtra="4dp"
-        android:maxLines="4"
+        android:maxLines="1"
         android:textColor="@color/white"
         android:textSize="16sp"
         android:text="简介" />

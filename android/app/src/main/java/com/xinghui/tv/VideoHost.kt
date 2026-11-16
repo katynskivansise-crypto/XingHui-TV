@@ -41,6 +41,13 @@ class VideoHost(
 
     private var bound: Player? = null
 
+    /**
+     * 对应 PlaybackActivity.onSizeChanged:293 / onSurfaceAttached:296 —— 两处都只是
+     * applyResizeMode(getScale())。换内核或视频尺寸变化后必须重应用一次，
+     * 否则档位停在上一颗内核的状态上（mpv↔EXO 的 FIT/FILL 改写就会失配）。
+     */
+    var onResizeTargetChanged: (() -> Unit)? = null
+
     private val diagnostics = ArrayList<SurfaceHolder.Callback>()
 
     /**
@@ -52,9 +59,14 @@ class VideoHost(
             val h = videoSize.height
             val ratio = if (h == 0) 0f
             else videoSize.width * videoSize.pixelWidthHeightRatio / h
+            // AspectRatioFrameLayout 在 aspectRatio <= 0 时整段 onMeasure 直接 return，
+            // resize_mode 就完全不生效 —— 容器按 LayoutParams 填满、画面被拉伸。
+            // PlayerView 内部也是这么设的（updateAspectRatio → contentFrame.setAspectRatio）。
             frame.setAspectRatio(ratio)
             frame.requestLayout()
             surface.requestLayout()
+            MpvDebug.log("[vs] ${videoSize.width}x${videoSize.height} par=${videoSize.pixelWidthHeightRatio} ratio=${"%.3f".format(ratio)} mode=${frame.resizeMode}")
+            onResizeTargetChanged?.invoke()
         }
     }
 
@@ -90,6 +102,7 @@ class VideoHost(
         // 换内核时新引擎常已带尺寸，绑定后立即同步一次
         runCatching { p?.videoSize?.let { videoSizeListener.onVideoSizeChanged(it) } }
         bound = p
+        onResizeTargetChanged?.invoke()
     }
 
     init {

@@ -222,8 +222,6 @@ class MpvCore(private val appContext: Context) {
     }
 
     /** vo=gpu 自己上屏；保留这个方法让上层调用点不用改 */
-    fun redrawNow() = Unit
-
     fun destroy() {
         if (dead) return
         dead = true

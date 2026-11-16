@@ -994,7 +994,6 @@ class HomeActivity : Activity() {
      * targetSdk 34 在 API 25 上同样走运行时权限，必须显式请求。
      */
     private fun ensureStoragePermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val need = arrayOf(
             Manifest.permission.WRITE_EXTERNAL_STORAGE,
             Manifest.permission.READ_EXTERNAL_STORAGE
