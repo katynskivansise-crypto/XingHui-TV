@@ -347,8 +347,6 @@ class MpvPlayer(
                     MpvDebug.log("[mpv] display-fps-override=$hz display=${disp.displayId}")
                 }
             }
-            core.setOptionString("keep-open", "no")
-            core.setOptionString("pause", "yes")
             core.setOptionString("osc", "no")
             core.setOptionString("input-default-bindings", "no")
             core.setOptionString("input-vo-keyboard", "no")
@@ -854,11 +852,14 @@ class MpvPlayer(
             core.setPropertyString("http-header-fields", headerLine)
             // 起播前的定位必须等 FILE_LOADED：文件还没加载时 seek absolute 会直接失败
             pendingSeekMs = pendingStartMs
-            core.command(arrayOf("loadfile", url, "replace"))
-            // 尊重起播前按下的暂停意图：不能无条件解暂停
+            // 顺序照 5.6.0 openCurrent:1580-1581：bindVideoOutput → 设 pause → loadfile。
+            // loadfile 会让 mpv 按选项里的 pause 重新决定一次暂停态，
+            // 若先 loadfile 再设 pause，这次设置会被重置吃掉 ——
+            // 表现为首帧停在画面上、进度一直 0、音频也不出。
             val startPaused = pendingStartPaused
             paused = startPaused
             core.setPropertyBoolean("pause", startPaused)
+            core.command(arrayOf("loadfile", url, "replace"))
             MpvDebug.log("[mpv] 起播 ${url.take(60)} start=${pendingStartMs}ms")
         }.onFailure { Log.e(TAG, "[mpv] 起播失败", it) }
     }
