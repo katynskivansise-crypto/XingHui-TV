@@ -32,7 +32,7 @@ import org.json.JSONObject
 /**
  * 唯一宿主 Activity。
  *
- * ★ 为什么详情页和播放页必须同一个窗口：
+ * 为什么详情页和播放页必须同一个窗口：
  *   1. 新窗口要重新拿 hasWindowFocus（真机实测 199~434ms）。这段窗口期里按键没有接收者，
  *      所以"从详情页进播放页、不按菜单直接按 ←/→"没有任何记录 —— 事件根本没到。
  *   2. SurfaceView 在**新窗口**里第一次出现会触发一次 IWindowSession.relayout，那一帧被跳过，
@@ -76,21 +76,12 @@ class MainActivity : Activity() {
         throw IllegalStateException("画面层宿主缺失：布局里没有 @id/videoSurface")
     }
 
-    private fun resolveMpvSurface(): android.view.SurfaceView {
-        val id = resources.getIdentifier("mpvSurface", "id", packageName)
-        if (id != 0) {
-            findViewById<android.view.View>(id)?.let { if (it is android.view.SurfaceView) return it }
-        }
-        throw IllegalStateException("画面层宿主缺失：布局里没有 @id/mpvSurface")
-    }
-
     internal val videoHost: VideoHost by lazy {
-        VideoHost(videoFrame, resolveSurfaceView(), resolveMpvSurface(), subtitleView)
+        VideoHost(videoFrame, resolveSurfaceView(), subtitleView)
     }
     private var surfaceValid = false
     private var playMode = false
 
-    // 返回可空类型：`findViewById` 本身就可能返回 null。原来声明成非空 `T`，
     // 一旦 id 不在 detailRoot 那棵树里就抛 `NullPointerException: findViewById(...) must not be null`，
     // 崩溃栈只指向这一行，看不出调用方。原版用 ViewBinding（`mBinding.xxx`）是编译期保证的，
     // 我们手工实现没有那层保证，所以这里必须如实声明可空，让调用方逐个处理。
@@ -106,7 +97,7 @@ class MainActivity : Activity() {
     internal var player: ExoPlayer? = null
     /**
      * 小窗形态的原始 LayoutParams —— 原版的 mFrameParams。
-     * ★保存的是 XML 里那个对象本身，退出全屏时原样还回去。
+     * 保存的是 XML 里那个对象本身，退出全屏时原样还回去。
      *   原版：VideoActivity.exitFullscreen() → mBinding.video.setLayoutParams(mFrameParams);
      *   我之前是手算 400dp×225dp 再补 margin，等于重新拼一个"差不多"的参数，
      *   漏掉的属性就会表现为位置或尺寸不对。
@@ -134,8 +125,7 @@ class MainActivity : Activity() {
      * `VideoActivity:5462 onError(msg)` → reset + `showError(msg)` + `startFlow()` → `checkFlag()` 换下一线路。
      * 文案 `values-zh-rCN/strings.xml:93 error_play_timeout = 连接超时`。
      *
-     * 我们原来完全没有这一层：某一路源一直 buffering 时，小窗圈会永远转、也不会自动换源。
-     * 现在把 15s 计时挂在 `setMediaItem + prepare + play` 之后（原版也是在 setMediaItem 处挂），
+     * 计时挂在 `setMediaItem + prepare + play` 之后（原版也是在 setMediaItem 处挂），
      * 到点未 READY 就按 `onError` 的语义处理：灭圈 + 提示 + 走 handlePlayFailure 换下一线路。
      */
     private val playTimeoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -164,15 +154,14 @@ class MainActivity : Activity() {
         runCatching { videoHost.setPlayer(null) }
     }
 
-    // ★previewAttached() 已删。它只判断 `surfaceConsumer != null`，不判断是不是"这一颗"，
+    // previewAttached() 已删。它只判断 `surfaceConsumer != null`，不判断是不是"这一颗"，
     //   实例换过之后必然误判成"已绑"，新实例一个 surface 都拿不到（只有声音、画面停在旧帧）。
     //   现在已经换过三次实例的地方各踩了一次，所以连函数一起删掉，避免再被拿来当闸门。
     //   绑定统一走 attachPreviewTo(p)，VideoHost.setPlayer 内部 `old === p` 会短路，幂等。
 
     /**
-     * 预览显隐。★ 画面本体是宿主那块 SurfaceView，挡在它前面的是海报 detailImage，
+     * 预览显隐。画面本体是宿主那块 SurfaceView，挡在它前面的是海报 detailImage，
      * 所以"显示预览" = 把海报收起来；"隐藏预览" = 海报回来。
-     * 原来 inlineView 是 PlayerView，它自己就是画面，所以只切它一个就够；现在必须两个一起切，
      * 否则要么一片黑（海报盖着），要么两幅画面打架。
      */
     private fun setPreviewVisible(visible: Boolean) {
@@ -190,15 +179,14 @@ class MainActivity : Activity() {
     /**
      * 宿主持有的线路与集列表（只读口，给播放层用）。
      *
-     * ★原版依据：5.6.0 `VideoActivity` 的集列表一直挂在 Flag 对象上，
+     * 原版依据：5.6.0 `VideoActivity` 的集列表一直挂在 Flag 对象上，
      *   `setEpisodeAdapter(getFlag().getEpisodes())`（`:1266` / `:1275` / `:1303` / `:1347`）
      *   四处都是直接取，**从不重新请求详情**。详情与播放是同一个 Activity 的两个形态，
      *   所以集列表天然一直在手。
      *
      *   我们是「详情层 → 播放层」同一 Activity 内切层，宿主里已经有这份列表（还可能是 expandThunder
-     *   展开过的那一份），播放层没有理由再去解析一遍 vod 详情。
-     *   之前播放层的 vodLines 只在自己 fetchAndPlay 里赋值，而复用进入（attach_only / pre_url 命中）
-     *   根本不走那条路径 —— 结果进页面时 vodLines 永远是空，上下集直接 return、选集报"未获取线路"。
+     *   展开过的那一份），播放层没有理由再去解析一遍 vod 详情 ——
+     *   复用进入（attach_only / pre_url 命中）不走 fetchAndPlay，自己取会永远是空。
      */
     internal fun hostLines(): List<PlayLine> {
         val v = vod ?: return emptyList()
@@ -214,7 +202,7 @@ class MainActivity : Activity() {
     internal fun hostFlagName(): String = currentLine?.name.orEmpty()
 
     private fun videoFrameToMini() {
-        // ★原版 VideoActivity.exitFullscreen() 就这一句：
+        // 原版 VideoActivity.exitFullscreen() 就这一句：
         //     mBinding.video.setLayoutParams(mFrameParams);
         //   保存的是 XML 里那个对象，原样还回去 —— 宽高、margin、gravity 一个不落。
         frameParams?.let { videoFrame.layoutParams = it }
@@ -235,7 +223,7 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 进播放层。★ 只换层，不换窗口、不换 surface。
+     * 进播放层。只换层，不换窗口、不换 surface。
      * 这就是 OwnTV 的 "promotes the running preview straight to full screen with no reload"。
      */
     /**
@@ -264,7 +252,7 @@ class MainActivity : Activity() {
      * 所以错误块出现在**小窗内部**。
      */
     private fun showError(text: String) {
-        // ★这里必须用 Activity 级的 findViewById，不能用 findDetail：
+        // 这里必须用 Activity 级的 findViewById，不能用 findDetail：
         //   `findDetail(id): T = detailRoot.findViewById(id)` 只在 **activity_detail_layer** 那棵树里找，
         //   而 inlineError 在 `activity_host.xml` 的 videoFrame 里（宿主层，不在 detailRoot 内）。
         //   用 findDetail 会拿到 null，而 findDetail 的返回类型是非空 T →
@@ -397,18 +385,13 @@ class MainActivity : Activity() {
     fun showPlayLayer(extras: Intent) {
         val layer = playLayer ?: PlayLayer(this) { exitPlayLayer() }.also { playLayer = it }
         // gate 日志：进入这条链路每一步的输入状态。有它才不用靠猜。
-        // ★这里只用 PlayLayer 已有的公开 API（mpvInstance / takePlayer / enter / reconnect），
+        // 这里只用 PlayLayer 已有的公开 API（mpvInstance / takePlayer / enter / reconnect），
         //   不再引用后加的调试方法 —— 少一个跨文件依赖，就少一次"只覆盖了一个文件"导致的编译失败。
         MpvDebug.log("[gate] showPlayLayer ep=${extras.getStringExtra("ep_url").orEmpty().take(40)} " +
             "exoPlayer=${if (player != null) "ok" else "null"} mpv=${if (layer.mpvInstance() != null) "ok" else "-"}")
         playMode = true
-        // ★★不再 GONE↔VISIBLE 对调。两者都常驻 VISIBLE，只切 alpha。
-        //
-        //   依据：这台机器上"整片有内容区域变透明"会让 ViewRootImpl 重算挖洞区域
-        //   （setTransparentRegionHint），窗口层那一帧被合成器跳过 —— 用户看到的就是黑一帧。
-        //   退出时最严重：播放层（整屏不透明）消失 + 详情层（大面积透明）出现，同一帧发生。
-        //   本文件里 playProgress / playCenter / controlBar 三层早就统一成"常驻 + alpha"了，
-        //   只有最外面这两层还留着 GONE，黑帧就一直是这里漏出来的。
+        // 两层都常驻 VISIBLE，只切 alpha。「有内容区域」变透明会让 ViewRootImpl 重算挖洞区域，
+        // 窗口层那一帧被合成器跳过 —— 退出时最严重：播放层消失 + 详情层出现发生在同一帧。
         showDetailLayer(false)
         showPlayLayerView(true)
         // 画面层一直是 VISIBLE：小窗形态下它只有 400x225，剩下的区域露出窗口壁纸；
@@ -417,7 +400,7 @@ class MainActivity : Activity() {
         // enter 单独兜住：起播失败不该把用户挡在详情页外面
         runCatching { layer.enter(extras, playContainer) }
             .onFailure {
-                MpvDebug.log("[gate] ★enter 抛异常（层已切换，起播未完成）：$it")
+                MpvDebug.log("[gate] enter 抛异常（层已切换，起播未完成）：$it")
                 runCatching {
                     android.widget.Toast.makeText(this, "[enter] 异常：${it.javaClass.simpleName}", android.widget.Toast.LENGTH_LONG).show()
                 }
@@ -428,7 +411,7 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 把详情页的监听器挂到某个引擎上。★ 退出播放层时播放层会把引擎原样交回来，
+     * 把详情页的监听器挂到某个引擎上。退出播放层时播放层会把引擎原样交回来，
      * 但监听器不会跟着回来 —— 不重新挂，小窗就没有 onVideoSizeChanged，画面比例和分辨率都会停在旧值。
      */
     /**
@@ -464,7 +447,7 @@ class MainActivity : Activity() {
                 if (w > 0 && h > 0) {
                     findDetail<TextView>(R.id.vodInfoSize)?.text = "$w x $h"
                 }
-                // ★不要调 videoFrame.setAspectRatio()。
+                // 不要调 videoFrame.setAspectRatio()。
                 //   那是我上一轮加的错误优化：AspectRatioFrameLayout 在宽度约束为 EXACTLY 时
                 //   会**强制按比例重算高度**（它为 PlayerView 设计的行为）。
                 //   我们是拿它当固定尺寸的容器用：设了 2.398 之后，
@@ -475,7 +458,7 @@ class MainActivity : Activity() {
             }
 
             /**
-             * ★唯一能证明「帧有没有真的进到这块 surface」的信号。
+             * 唯一能证明「帧有没有真的进到这块 surface」的信号。
              *   st=READY + playing=true 只能说明解码器在跑，不能说明画面进了我们这块面。
              *   这个回调只在渲染器真的把第一帧送到 surface 时触发一次。
              */
@@ -538,16 +521,16 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_host)
-        // ★版本戳。前几轮改完都是"问题依旧"，但谁也说不清是代码没生效、还是改错了方向 ——
+        // 版本戳。前几轮改完都是"问题依旧"，但谁也说不清是代码没生效、还是改错了方向 ——
         //   从这一版起第一眼就能确认装的是哪一版：开机看到这条 Toast / 日志就说明进了包。
         runCatching {
-            MpvDebug.log("[boot] build=tk20 handoff=playerView gate=on sdk=${android.os.Build.VERSION.SDK_INT}")
+            MpvDebug.log("[boot] build=tk21 handoff=surface gate=on sdk=${android.os.Build.VERSION.SDK_INT}")
             android.widget.Toast.makeText(this, "tk20 · 画面层归一", android.widget.Toast.LENGTH_LONG).show()
         }
 
         hostRoot = findViewHost<android.widget.FrameLayout>(R.id.hostRoot)!!
         detailLayer = findViewHost(R.id.detailLayer)!!
-        // ★不依赖 XML：布局文件的背景一律在这里强制成透明。
+        // 不依赖 XML：布局文件的背景一律在这里强制成透明。
         //   壁纸现在是布局里那块 contextWall（全屏 ImageView），不再依赖窗口背景；
         //   这两层只要有一层不是 transparent，详情页就是纯黑 ——
         //   而历史上有过"只覆盖 kt 没覆盖 xml"的情况，所以不能把这件事交给 XML 决定。
@@ -557,7 +540,7 @@ class MainActivity : Activity() {
         }
         playContainer = findViewHost(R.id.playLayer)!!
         videoFrame = findViewHost(R.id.videoFrame)!!
-        // 画面层是两块 SurfaceView，videoSurface 是 EXO 用的那一块
+        // 画面层是一块 SurfaceView，EXO 与 mpv 轮流接管
         videoSurface = resolveSurfaceView()
         frameParams = videoFrame.layoutParams
         subtitleView = findViewHost(R.id.subtitleView)!!
@@ -570,8 +553,7 @@ class MainActivity : Activity() {
             detailLayer.post { runCatching { showPlayLayer(intent!!) } }
         }
 
-        // 唯一一块 surface 的生死只由宿主掌握：创建/销毁都记一笔，
-        // 之后任何引擎要挂画面都走 surfaceConsumer，不许自己去拿 holder.surface。
+        // 唯一一块 surface 的生死只由宿主掌握，引擎要挂画面一律走 VideoHost。
         videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(h: android.view.SurfaceHolder) {
                 surfaceValid = true
@@ -579,20 +561,10 @@ class MainActivity : Activity() {
             }
             override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) {
                 MpvDebug.log("[sv2] changed $w x $ht")
-                // ★这是整条链路里我们一直漏掉的一步。
-                //   media3 的 PlayerView 内部有个 ComponentListener，surface 尺寸一变它就调
-                //     player.setVideoSurfaceSize(width, height)
-                //   （原版 PlaybackActivity 里对应的就是 syncVideoSurfaceSize）。
-                //   我们用的是裸 SurfaceView + setVideoSurfaceView，PlayerView 那一层不在了，
-                //   而 setVideoSurfaceView 本身**不会**把尺寸变化转给解码器。
-                //   结果：容器从小窗 400x225 撑到全屏，surface 变了，解码器却还按旧尺寸写帧 ——
-                //   画面停住、声音照常。
-                //   原版 PlaybackActivity.syncVideoSurfaceSize 的默认路径就一句：
-                //     surfaceView.getHolder().setSizeFromLayout();
-                //   它让 surface 的 buffer 尺寸按布局重新算 —— View 尺寸变化只有经过这一步，
-                //   才真正落到 buffer 上。我们 resize 了 videoFrame、view 变了，
-                //   却从没通知 holder，buffer 一直是旧尺寸，解码器继续往旧 buffer 写帧。
-                //   ★不是 setVideoSurfaceSize：那个 API 在 media3 里不存在（编译会直接报错）。
+                // setVideoSurfaceView 不会把尺寸变化转给解码器（那原本是 PlayerView 内部
+                // ComponentListener 的职责，对应原版 PlaybackActivity.syncVideoSurfaceSize）。
+                // 不通知 holder，buffer 会一直是旧尺寸，解码器继续往旧 buffer 写帧 —— 画面停住、
+                // 声音照常。尺寸落到 buffer 上只能靠这一句。
                 runCatching { h.setSizeFromLayout() }
             }
             override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
@@ -623,23 +595,18 @@ class MainActivity : Activity() {
             Toast.makeText(this, if (epOrder) "已倒序" else "已正序", Toast.LENGTH_SHORT).show()
         }
 
-        // 对齐原版 VideoActivity：那里播放器和集数在同一页，点上方视频框即进全屏。
-        // 我们是 DetailActivity + PlayActivity 两页，就在这里补上同样的直达：
-        // 点海报→播第一集，点任意集数→直接全屏播那一集（省掉「先看详情、再点进去」这一步）。
-        // 对齐原版 VideoActivity：视频框和集数在同一页，点框进全屏（onVideo 的语义）
+        // 对齐原版 VideoActivity：视频框和集数在同一页，点框进全屏（onVideo 的语义）。
         // 原版 BaseActivity.refreshWall：壁纸设在 window 层，布局透明透出来。
-        // 注意必须走 WallpaperStore.apply：它才有「用户自设图 > 内置 wallpaper_1」的分支。
-        // 之前这里写死 setBackgroundDrawableResource(wallpaper_1)，用户换了壁纸详情页仍是绿的。
+        // 必须走 WallpaperStore.apply，「用户自设图 > 内置 wallpaper_1」的分支在它里面。
         runCatching { WallpaperStore.apply(this) }
-        // ★同时把同一张图画到布局里的 contextWall（原版做法）。
-        //   只靠 window 背景在这一版上实测会间歇失效（同样是这套代码，之前绿过也黑过），
-        //   实打实的 ImageView 不会因为窗口层级或 decor 重建而丢。
+        // 同时把同一张图画到布局里的 contextWall（原版做法）。
+        // 只靠 window 背景会间歇失效，实打实的 ImageView 不会因窗口层级或 decor 重建而丢。
         runCatching {
             val wall = findViewHost<android.widget.ImageView>(R.id.contextWall)
             wall?.setImageDrawable(WallpaperStore.drawableFor(this))
             wall?.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
         }
-        // ★布局自检：一次回答三件事 —— 工程里跑的是新布局还是旧布局、壁纸有没有加载、
+        // 布局自检：一次回答三件事 —— 工程里跑的是新布局还是旧布局、壁纸有没有加载、
         //   画面层当前是什么控件多大。下面这些值如果和仓库里的 XML 对不上，
         //   就说明装上去的不是这一版（res 没重新编译 / 只覆盖了 kt 没覆盖 xml）。
         runCatching {
@@ -654,7 +621,7 @@ class MainActivity : Activity() {
             )
         }
         inlineView = findDetail(R.id.inlinePlayer)!!
-        // ★这一行是「详情页预览到底创建的是 SurfaceView 还是 TextureView」的唯一直接证据。
+        // 这一行是「详情页预览到底创建的是 SurfaceView 还是 TextureView」的唯一直接证据。
         //   PlayerView 在 surface_type=surface_view 下 getVideoSurfaceView() 返回内部的 SurfaceView；
         //   改成 texture_view 后它返回 null。所以 /debug 里这一行打「null」就说明 texture_view 生效了，
         //   打「SurfaceView」就说明 XML 没被覆盖（装的还是旧包 / 没重新编译）。
@@ -678,7 +645,7 @@ class MainActivity : Activity() {
         }
         // 原版同一个站点有多个播放源时，某个源播不动会自动切下一个
         player?.let { bindDetailListener(it) }
-        // ★点小窗 = 进全屏播放层（原版 VideoActivity 点视频框即进全屏）。
+        // 点小窗 = 进全屏播放层（原版 VideoActivity 点视频框即进全屏）。
         //   不再走 enterInlineFullscreen：那条路铺满的是 playerBox，而画面在宿主层的 videoFrame。
         findDetail<View>(R.id.playerBox)?.setOnClickListener {
             openPlayPageAt(playingIdx.coerceAtLeast(0))
@@ -707,13 +674,13 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 vod = first
-                // ★每换一部影片都必须重置这个闸门。
+                // 每换一部影片都必须重置这个闸门。
                 //   autoStarted 是 Activity 级一次性闸门，只有进程内第一次进详情时是 false；
                 //   不重置的话第二次进详情 autoPlayFromHistory() 第一行就 return，
                 //   小窗永远不起播 —— 表现就是「详情页秒开、小窗没画面、进播放页才加载」。
                 autoStarted = false
                 autoPlayAfterExpand = false
-                // ★必须是 -1，不能是 0。
+                // 必须是 -1，不能是 0。
                 //   renderEpisodes 里的历史定位守的是 `if (playingIdx < 0)`（对齐原版 seamless:1311）；
                 //   这里一旦先写成 0，那条定位永远不会执行，详情页就永远停在第 1 集。
                 playingIdx = -1
@@ -832,9 +799,8 @@ class MainActivity : Activity() {
             adapter.notifyDataSetChanged()
             return
         }
-        // ★对齐原版 checkFlag（5.6.0:3642）—— `onItemClick(mHistory.getFlag())`：
+        // 对齐原版 checkFlag（5.6.0:3642）—— `onItemClick(mHistory.getFlag())`：
         //   进详情页用的是**历史里记的那条线路**，不是 flags.get(0)。
-        //   我们原来固定 lines.first()，于是「上次在第 3 条线路看第 25 集」再进来时：
         //   线路回到第 1 条 → 集数列表换成另一批 → 按 url 定位必然匹配失败 → 永远第 1 集。
         val hKey0 = HistoryStore.keyOf(v.vodId, v.vodName)
         val histFlag = runCatching { HistoryStore(this).lastFlag(hKey0) }.getOrDefault("")
@@ -845,7 +811,7 @@ class MainActivity : Activity() {
         findDetail<RecyclerView>(R.id.detailList)?.let { rv ->
             rv.post {
                 rv.requestFocus()
-                // ★requestFocus 会把焦点落到首个可聚焦项、可视区一并拉回顶部 ——
+                // requestFocus 会把焦点落到首个可聚焦项、可视区一并拉回顶部 ——
                 //   必须在这之后再滚一次，否则 showGroup 里那次 scrollToPosition 白做。
                 val start = activeSection * GROUP_SIZE
                 val end = minOf(start + GROUP_SIZE, episodes.size)
@@ -869,7 +835,6 @@ class MainActivity : Activity() {
         if (autoStarted) return
         autoStarted = true
         // playingIdx 已在 renderEpisodes 里按历史定位（对齐原版 seamless:1311），这里直接用。
-        // 原来那段是「拿 episodes.getOrNull(playingIdx) 拼历史 key」，而 playingIdx 此时恒为 -1，
         // 拼出来的 key 与写入时的 key 不是同一串 → 永远查不到 → 永远回落第 0 集。
         val idx = playingIdx.coerceAtLeast(0)
         Log.e("XingHuiTV", "[detail] 自动起播 idx=$idx 共${episodes.size}集")
@@ -964,10 +929,10 @@ class MainActivity : Activity() {
     private fun renderEpisodes(line: PlayLine, preferName: String? = null) {
         episodeSeq++          // 切线路/重渲染即作废上一轮异步展开
         episodes = line.episodes
-        // 对齐原版 seamless(Flag)（5.6.0:1311）：列表渲染之前先把「上次打开的那一集」定位出来。
-        // 原版是 setEpisodeAdapter → seamless(find) → selectEpisode(toggle + notifyItemChanged) 两段式；
-        // 我们原来把定位挪到了 autoPlayFromHistory 里，而那时 applyEpisodeGrid/showGroup 已经拿着
-        // playingIdx 的初值 -1 刷过一遍、之后再没有回刷 —— 于是在第 N 集，详情页永远显示第 1 集。
+        // 对齐原版 seamless(Flag)（5.6.0:1311）：列表渲染之前先定位「上次打开的那一集」。
+        // 原版是 setEpisodeAdapter → seamless(find) → selectEpisode 两段式。
+        // 必须先定位再 applyEpisodeGrid：网格按 playingIdx 上色，晚一步就用 -1 刷过一遍且不回刷，
+        // 于是在第 N 集，详情页永远显示第 1 集。
         if (playingIdx < 0) {
             // 换线路时传了 preferName：在新线路里找「同名那一集」（原版 seamless → flag.find(name)）；
             // 首次进详情页没有 preferName，走历史定位。
@@ -977,8 +942,7 @@ class MainActivity : Activity() {
         // 原版这一行是线路 tab（超级无敌4K / 高清4K / …），选中项标黄
         markActiveFlag(line.name)
         applyEpisodeGrid()
-        // 对齐原版 updateEpisodeWindow：当前集在第几页就显示第几页，不能固定第 0 页（原来这里是 showGroup(0)）。
-        // ★必须在 rebuildGroups() 之前改 —— 分页标签的黄色高亮是按 activeSection 上色的，晚一步就涂错。
+        // 必须在 rebuildGroups() 之前改 —— 分页标签的黄色高亮是按 activeSection 上色的，晚一步就涂错。
         if (episodes.size > GROUP_SIZE && playingIdx >= 0) activeSection = playingIdx / GROUP_SIZE
         rebuildGroups()
         showGroup(activeSection * GROUP_SIZE)
@@ -1029,7 +993,7 @@ class MainActivity : Activity() {
      * （VideoActivity.java 686-712 行实读）：
      *   numColumns 默认 10，按「集数名称最大长度」逐档降到 1/2/3/4/6/8；
      *   行高固定 44dp，列间隙 8dp（原版 colWidth = (屏宽-48dp-(cols-1)*8dp)/cols）。
-     * 之前是硬编码 GridLayoutManager(this, 4)，且空格子靠 padding 12dp 撑，所以格距显得很大。
+     * 列数按名称长度自适应，不能写死。
      */
     private fun applyEpisodeGrid() {
         val rv = findDetail<RecyclerView>(R.id.detailList)
@@ -1113,8 +1077,7 @@ class MainActivity : Activity() {
 
     private fun switchToLine(line: PlayLine) {
         if (line.name == currentLine?.name) return
-        // ★换线路 = 换了一批集，必须按**集名**在新线路里重新定位。
-        //   原来这里把旧下标 keep 直接拿去 playInline —— 新线路集序/集数不同，
+        // 换线路 = 换了一批集，必须按**集名**在新线路里重新定位。
         //   播的就是「新线路的第 keep 集」，用户看到的是集数跳了、内容也对不上。
         val keepName = episodes.getOrNull(playingIdx)?.first.orEmpty()
         currentLine = line
@@ -1128,8 +1091,8 @@ class MainActivity : Activity() {
      * 原版任何失败都走这里 —— 先 checkParse 轮解析源，再 checkFlag 逐条往后换线路，
      * 走到最后一条才 checkSearch 跨站。
      *
-     * 我们之前只在 onPlayerError 里换源，而「解析返回空 url」「内核不支持该源」这两种
-     * 失败发生在起播之前，根本触发不到 onPlayerError，所以自动换源永远不生效、只能手动点。
+     * 「解析返回空 url」「内核不支持该源」这两种失败发生在起播之前，触发不到 onPlayerError，
+     * 必须走这个统一入口才会自动换源。
      */
     private fun handlePlayFailure(idx: Int, auto: Boolean, reason: String, depth: Int) {
         val v = vod ?: return
@@ -1246,7 +1209,6 @@ class MainActivity : Activity() {
                 val line = v.parseLines().getOrNull(idx) ?: return
                 // 用户主动选线路：同样要保住「正在看的这一集」
                 // （原版 onItemClick(Flag) → setEpisodeAdapter + seamless(item) 会重新 find 一次）。
-                // 原来这里直接 renderEpisodes(line)，playingIdx 还是旧下标 → 串集。
                 val keepNameL = episodes.getOrNull(playingIdx)?.first.orEmpty()
                 val wasPlayingL = playingIdx >= 0
                 currentLine = line
@@ -1358,8 +1320,7 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 inlineUrl = url
-                // ★这里必须拿到一颗**非空**播放器再下发。
-                //   原来整段都是 player?.xxx —— player 为 null 时四次调用全部空转，
+                // 这里必须拿到一颗**非空**播放器再下发。
                 //   却仍然返回 true，于是"成功了但什么都没加载"，没有任何日志，也不进换源。
                 //   这是静默失败，不是容错。
                 val p = player ?: runCatching { buildInlinePlayer() }.getOrNull()?.also {
@@ -1373,13 +1334,12 @@ class MainActivity : Activity() {
                 }
                 // 画面绑定同样要在这里确认：小窗能出画面靠的是这块常驻 SurfaceView 上有播放器，
                 // 只 prepare 不绑定 = 只有声音、画面留在海报上。
-                // ★无条件重绑（setPlayer 内部 `old === p` 会短路，幂等）。
-                //   原来写的是 `if (!previewAttached())`，而 previewAttached 只判断
+                // 无条件重绑（setPlayer 内部 `old === p` 会短路，幂等）。
                 //   `surfaceConsumer != null`，不判断是不是**这一颗** —— 一旦玩家实例换过，
                 //   这句就误判成"已绑"，新实例一个 surface 都没拿到：只有声音、画面留在旧帧上。
                 attachPreviewTo(p)
                 val ok = runCatching {
-                    // ★对齐原版 `onRefresh:3275`：
+                    // 对齐原版 `onRefresh:3275`：
                     //     `player().stop(); player().clear(); ... getPlayer(getFlag(), getEpisode());`
                     //   `PlayerManager.stop():1245` 里是真的 `engine.stop()`。
                     //   同一颗 player 从 READY 直接 `setMediaItem` 时，部分状态下不会重新准备 ——
@@ -1443,17 +1403,16 @@ class MainActivity : Activity() {
         val ep = line.episodes.getOrNull(idx) ?: return
         // 先把预览那一路停掉，再起播放页：两边同时出声就是「两个不同的声音」
         detachInlinePlayback()
-        // ★再把预览从窗口里摘掉。
+        // 再把预览从窗口里摘掉。
         //   官方 Surface types 文档："The lifecycle of a SurfaceView's surface is tied to **view visibility**"
         //   —— 只 release player 不动 View 的时候，这块 SurfaceView 仍然 VISIBLE，
         //   它的 surface 就一直挂在 SurfaceFlinger 的 overlay plane 上，跟播放页那块抢。
         //   texture_view 已经把"新装包"这一侧从根上去掉了；这一行是给"万一 XML 没覆盖到"留的兜底：
         //   GONE 才是可见性变化，才真正让 surface 销毁。返回时 onResume 会重建预览（playInline 里设回 VISIBLE）。
-        // ★记住离开时的形态，返回时按它还原（见 onResume）。
+        // 记住离开时的形态，返回时按它还原（见 onResume）。
         //   这里**不调 exitInlineFullscreen()**：它会让列表在跳转前就冒出来。
         inlineLeaveFullscreen = inlineFullscreen
         runCatching { setPreviewVisible(false) }
-        // ★转场动画保留（曾经想去掉，已撤）。
         // 这是「去播放页」，不是「离开详情页」：回来应当自动续上
         inlineResumeOnReturn = true
         showPlayLayer(Intent(this, MainActivity::class.java).apply {
@@ -1467,7 +1426,7 @@ class MainActivity : Activity() {
 
     /**
      * 进全屏：播放器铺满整页，其余区域隐藏（对齐原版 enterFullscreen）。
-     * ★ 这里必须用 RelativeLayout.LayoutParams：playerBox 的父容器是 activity_detail 的根 RelativeLayout，
+     * 这里必须用 RelativeLayout.LayoutParams：playerBox 的父容器是 activity_detail 的根 RelativeLayout，
      *   之前赋的是 LinearLayout.LayoutParams，运行时被父容器强转成 RelativeLayout 的参数 →
      *   ClassCastException: LinearLayout$LayoutParams cannot be cast to RelativeLayout$LayoutParams，
      *   表现就是「点方框或点集数，一全屏就闪退回首页」。
@@ -1491,7 +1450,7 @@ class MainActivity : Activity() {
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findDetail<View>(it)?.visibility = View.GONE
         }
-        // ★画面在宿主层，铺满 playerBox 不等于铺满画面 —— 必须同时把 videoFrame 拉全屏，
+        // 画面在宿主层，铺满 playerBox 不等于铺满画面 —— 必须同时把 videoFrame 拉全屏，
         //   否则就是「playerBox 占满屏幕，但画面还是左上 400x225」（本 bug 的原始现场）。
         runCatching { videoFrameToFull() }
         box?.requestFocus()
@@ -1511,18 +1470,9 @@ class MainActivity : Activity() {
             R.id.btnDesc, R.id.btnFav, R.id.btnSource, R.id.flagRow, R.id.groupRow, R.id.detailList).forEach {
             findDetail<View>(it)?.visibility = View.VISIBLE
         }
-        // ★预览本身也必须恢复 VISIBLE —— 这一行之前漏了。
-        //
-        // 症状：详情页全屏预览里按菜单 → 转独立播放页 → 返回详情页后小窗**只有声音没有画面**。
-        // 链条：openPlayPageFromCurrent() 里摘掉预览（inlineView = GONE）却没有退出全屏，
-        //       于是 inlineFullscreen 仍为 true；返回时 onResume 的执行顺序是
-        //         ① if (!inlineFullscreen) inlineView = VISIBLE   ← 被跳过
-        //         ② if (inlineFullscreen) exitInlineFullscreen()   ← 只恢复了 9 个文字/列表视图，
-        //            从来没恢复 inlineView 本身
-        //       inlineView 一直是 GONE → PlayerView 内部那块 texture_view 的 surface 被销毁
-        //       （media3 官方：SurfaceView 的 surface 生命周期绑 view visibility；
-        //         PlayerView.setVisibility 会连带设内部 surface view，ExoPlayer#3160）
-        //       → 解码器照常在跑、声音照常在出，画面没有承载层。
+        // 预览本身也必须恢复 VISIBLE。只恢复文字/列表视图时 inlineView 仍为 GONE，
+        // 它的 surface 会被销毁（surface 生命周期绑 view visibility），
+        // 结果解码器照常跑、声音照常出，但没有承载层 —— 表现就是小窗只有声音没画面。
         runCatching { setPreviewVisible(true) }
         findDetail<View>(R.id.detailList)?.requestFocus()
     }
@@ -1533,7 +1483,6 @@ class MainActivity : Activity() {
      * PlayActivity —— 那才是原版 VideoActivity 的形态，控制条、选集、选轨全都在。
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // ★★ 播放层优先：onHostKeyEvent 就是原来 PlayActivity.dispatchKeyEvent 的全套语义。
         //   之前这里**从来没转发过**，进播放层后所有按键都落到 super，于是「除了返回键全无效」。
         if (playMode) {
             val handled = runCatching { playLayer?.onHostKeyEvent(event) ?: false }.getOrDefault(false)
@@ -1541,7 +1490,6 @@ class MainActivity : Activity() {
         }
         val menu = event.keyCode == KeyEvent.KEYCODE_MENU
         // 对齐 KeyUtil.isMenuKey（:43）：只认 ACTION_UP，到了就执行，不做时间去重。
-        // 原来这里是「UP 或 DOWN 首发 + 600ms 去重」，属于自创，已去掉。
         if (inlineFullscreen && menu && event.action == KeyEvent.ACTION_UP) {
             openPlayPageFromCurrent()
             return true
@@ -1549,7 +1497,7 @@ class MainActivity : Activity() {
         return super.dispatchKeyEvent(event)
     }
 
-    // ★补 onKeyUp：这台盒子的菜单键（kc=82）只发 ACTION_UP 不发 DOWN，
+    // 补 onKeyUp：这台盒子的菜单键（kc=82）只发 ACTION_UP 不发 DOWN，
     //   fastForwarding 之类的收尾只在 onKeyUp 里，不接这条就等于长按永远收不回来。
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         if (playMode) {
@@ -1563,8 +1511,7 @@ class MainActivity : Activity() {
         val v = vod ?: return
         val line = currentLine ?: return
         val ep = episodes.getOrNull(playingIdx) ?: line.episodes.getOrNull(playingIdx) ?: return
-        // ★记住离开时的形态（这里一定是全屏 —— 只有全屏时菜单键才会走到这个函数）。
-        //   原来在这里调 exitInlineFullscreen()：它会立刻把 9 个列表/文字视图恢复可见、
+        // 记住离开时的形态（这里一定是全屏 —— 只有全屏时菜单键才会走到这个函数）。
         //   把小窗尺寸还原，而 startActivity 还没执行 —— 转场期间用户看到的就是
         //   「详情页布局 + 小窗黑洞」，也就是"按菜单后回详情页会先显示详情页，再重新加载画面"。
         //   改成只记住形态，返回时由 onResume 按形态还原。
@@ -1580,7 +1527,7 @@ class MainActivity : Activity() {
             putExtra("vod_pic", v.vodPic)
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
-            // ★小窗正在播的就是这一集（全屏预览时菜单键转播放页）：把地址一起交过去，
+            // 小窗正在播的就是这一集（全屏预览时菜单键转播放页）：把地址一起交过去，
             //   播放层据此**复用**这一路，不重新解析、不重新加载。
             putExtra("pre_url", inlineUrl)
         })
@@ -1591,7 +1538,7 @@ class MainActivity : Activity() {
         val v = vod ?: return
         val line = currentLine ?: return
         val ep = episodes.getOrNull(idx) ?: line.episodes.getOrNull(idx) ?: return
-        // ★点的是不是"小窗此刻正在播的那一集"——决定播放层要不要复用现成的这一路。
+        // 点的是不是"小窗此刻正在播的那一集"——决定播放层要不要复用现成的这一路。
         //   必须在 playingIdx 被改写之前取。
         val wasPlayingThis = idx == playingIdx
         val reusableUrl = if (wasPlayingThis) inlineUrl else ""
@@ -1612,10 +1559,10 @@ class MainActivity : Activity() {
             putExtra("vod_pic", v.vodPic)
             putExtra("flag", line.name)
             putExtra("ep_url", ep.second)
-            // ★同集：把已经在播的地址交过去，播放层直接接管这一路（不重载）。
+            // 同集：把已经在播的地址交过去，播放层直接接管这一路（不重载）。
             //   不同集（小窗在播别的集）：留空，播放层照常解析新的一集。
             putExtra("pre_url", reusableUrl)
-            // ★这是原版 VideoActivity.onItemClick 的语义：
+            // 这是原版 VideoActivity.onItemClick 的语义：
             //     if (shouldEnterFullscreen(item)) return;   ← item.isSelected() 时**只放大容器**
             //     selectEpisode(item, true);                  ← 否则才换集
             //   原版从来不去比对"当前播的是不是这个地址"，它相信的是**宿主的意图**：
@@ -1652,13 +1599,9 @@ class MainActivity : Activity() {
     /**
      * 预览播放器只有一路出声：离开本页、或转去独立播放页之前必须先停。
      *
-     * 真机上表现为「播放有时会有两个不同的声音」—— 原因就是这里：
-     * 详情页内嵌预览是我们自己加的（原版 VodActivity 里没有任何播放器，只有列表和详情），
-     * 跳去 PlayActivity 时本页只是走到 onPause，之前只保存进度、没有 pause，
-     * 预览那一路音频继续在响，和新起的播放页叠在一起，所以「有时」（预览正在播时才会）。
-     *
-     * mpv 内核不申请音频焦点，EXO 内核离开焦点也不一定立刻停，
-     * 所以不能指望系统帮忙，必须自己停。
+     * 详情页内嵌预览是本项目加的（原版 VodActivity 只有列表和详情，没有播放器）。
+     * 跳去播放页时本页只走 onPause，若不 pause，预览那一路音频会和新起的播放页叠在一起。
+     * mpv 不申请音频焦点、EXO 离开焦点也不一定立刻停，只能自己停。
      */
 /**
      */
@@ -1673,7 +1616,6 @@ class MainActivity : Activity() {
      * 代价只是一个**暂停态**的 ExoPlayer 在播放页期间活着（不是第二路在播，
      * 不会有两个声音、也不占解码带宽）；onDestroy 里已有 player?.release() 兜底。
      * 若播放页期间进程被回收导致实例没了，onResume 里的 `player ?: buildInlinePlayer()`
-     * 会自动退回原来的重建路径。
      */
 /**
      */
@@ -1756,7 +1698,7 @@ class MainActivity : Activity() {
                 runCatching { setPreviewVisible(true) }
                 if (inlineFullscreen) runCatching { exitInlineFullscreen() }
             }
-            // ★画面层要在这里就挂回去：下面「换过集」那条分支会直接 playInline() 后 return，
+            // 画面层要在这里就挂回去：下面「换过集」那条分支会直接 playInline() 后 return，
             //   走不到后面重建段的挂载。实例被保留时它是 READY，挂上就能出画面。
             runCatching {
                 val p0 = player
@@ -1783,7 +1725,7 @@ class MainActivity : Activity() {
             runCatching {
                 // 进播放页时预览已释放，这里就地重建（参数与首次完全一致）
                 val p = player ?: buildInlinePlayer().also { player = it; applyCaptionStyle() }
-                // ★跳转时摘掉了画面层（inlineView.player = null），回来要重新挂上。
+                // 跳转时摘掉了画面层（inlineView.player = null），回来要重新挂上。
                 //   实例若被保留，此刻它是 READY，不需要 prepare，也就不会转圈。
                 runCatching { attachPreviewTo(p) }
                 if (p.playbackState == androidx.media3.common.Player.STATE_IDLE) {
@@ -1800,7 +1742,6 @@ class MainActivity : Activity() {
                 if (v != null && !ep.isNullOrBlank()) {
                     val key = HistoryStore.keyOf(v.vodId, v.vodName, ep)
                     val store = HistoryStore(this)
-                    // 一次读出片头与本集进度（原来分别解析两遍历史 JSON）
                     val m = store.marks(key, ep)
                     val at = maxOf(m[0], m[2])
                     if (at > 0) runCatching { p.seekTo(at) }

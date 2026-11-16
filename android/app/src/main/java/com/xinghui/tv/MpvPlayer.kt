@@ -24,27 +24,12 @@ import com.xinghui.tv.mpv.MpvCore
 import java.util.Locale
 
 /**
- * 内嵌 mpv 播放器封装。
- *
- * 目的：把 mpv 从「Intent 拉起外部 mpv-android」改成「本进程内 libmpv + 与 EXO 共用的 SurfaceView」，
- * 这样播放页的控制条（暂停/继续、进度、倍速、缩放、上下集）可以直接控它，和 EXO 一致。
- *
- * 用的就是 mpv-android 官方 arm64 构建（libmpv / libplayer / ffmpeg 全套 so），
- * JNI 符号绑死 is.xyz.mpv.MPVLib，所以 MPVLib.kt 的 package 不能改。
+ * 内嵌 mpv 播放器。本进程 libmpv + 与 EXO 共用 SurfaceView，
+ * 用 mpv-android 官方 arm64 构建，JNI 符号绑死 is.xyz.mpv.MPVLib。
  */
 class MpvPlayer(
     private val activity: Activity,
-    /**
-     * 画面层宿主：与 EXO 共用的那一块。
-     *
-     * 两种形态都支持，由布局里的 app:surface_type 决定：
-     *   - SurfaceView（surface_type=surface_view）：走 SurfaceHolder，画面是 window 上挖的一个洞，
-     *     合成层单独一块，窗口重绘就可能牵动它；
-     *   - TextureView（surface_type=texture_view）：走 SurfaceTexture，画面就是普通视图内容，
-     *     跟控制条在同一个图层里合成，窗口怎么重绘都不会出现"画面层空白一帧"。
-     * 后者是纯官方能力（media3 自带该属性、mpv 官方 JNI 也接受 SurfaceTexture 转出来的 Surface），
-     * 不需要任何分叉库。切换只改布局里的一个属性，代码两条路径都保留。
-     */
+    /** 画面层宿主，与 EXO 共用一块。两种形态都支持：SurfaceView 走 SurfaceHolder，TextureView 走 SurfaceTexture。 */
     private val host: android.view.View
 ) : SimpleBasePlayer(android.os.Looper.getMainLooper()), MpvCore.EventObserver {
 
@@ -65,14 +50,8 @@ class MpvPlayer(
             private set
 
         /**
-         * 当前活着的那个实例。
-         *
-         * MPVLib 的句柄是**静态单例**：同进程里第二个 MpvPlayer 一旦 create，
-         * 静态句柄就指到新实例上，旧实例还在渲染、还在出声，但任何 command/property
-         * 都打到新实例（它没 loadfile，是空转状态）—— 表现就是
-         * 「按暂停没反应、左右键不跳、回主页还在播」。
-         * 真机 /debug 里抓到过同一秒两次「内核已释放」，就是两个实例并存。
-         * 所以这里做单实例闸门：新实例创建前，先把旧的释放掉。
+         * 当前活着的实例。MPVLib 句柄是静态单例：第二个实例 create 后，
+         * 命令会打到新实例而旧实例仍在渲染出声，所以新建前必须先释放旧的。
          */
         @Volatile
         private var current: MpvPlayer? = null
@@ -119,13 +98,7 @@ class MpvPlayer(
      * 应用是否在后台（由 PlayActivity 的 onPause/onResume 置位）。
  */
     private var backgrounded = false
-    /**
-     * resume() 在 surface 还没回来时先记账。
-     *
-     * onResume 常常早于 surfaceCreated：那时 vo 还是 null，直接下发 pause=false
-     * 会让 mpv 在「无视频输出」状态下开始播放，部分机型因此触发 END_FILE。
-     * 所以 surface 不在时只记账，等 surfaceCreated 里补发。
-     */
+    /** onResume 常早于 surfaceCreated，此时 vo 仍为 null，先记账等 surfaceCreated 补发。 */
     private var pendingResume = false
     private var desiredSpeed = 1.0f
     private var desiredScale = 0
@@ -138,6 +111,9 @@ class MpvPlayer(
             onSurfaceChanged(holder, format, width, height)
         override fun surfaceDestroyed(holder: SurfaceHolder) = onSurfaceDestroyed(holder)
     } }
+
+    /** 当前挂着的 holder，用于幂等摘除 callback（对应 5.6.0 的 surfaceHolder 字段）。 */
+    private var currentHolder: SurfaceHolder? = null
 
     private val textureWatch: Runnable by lazy { object : Runnable {
         override fun run() {
@@ -182,32 +158,11 @@ class MpvPlayer(
         current = this
         liveCount++
         when (val v = host) {
-            is SurfaceView -> {
-                MpvDebug.log("[mpv] 构造完成，holder 主权交由 VideoHost（本实例不再自注册回调）")
-            }
+            // SurfaceView：面由 media3 的 setVideoSurfaceView 交进来，走 handleSetVideoOutput
+            is SurfaceView -> MpvDebug.log("[mpv] 构造完成，画面走 Player.setVideoSurfaceView")
             is android.view.TextureView -> watchTexture()
             else -> MpvDebug.log("[mpv] 画面层宿主类型不支持：${v.javaClass.simpleName}")
         }
-    }
-
-    /**
-     * 把这块 Surface 的主权交给 VideoHost，由它统一转发 holder 事件。
-     *
-     * 必须在 MpvPlayer 构造之后、play() 之前调用。重复调用是安全的：
-     * VideoHost.takeNative 会覆盖上一次的回调，不会叠加。
-     */
-    fun bindToHost(host: VideoHost) {
-        host.takeNative(
-            attach = { h -> runCatching { onSurfaceCreated(h) } },
-            release = { runCatching { onSurfaceDestroyedForHost() } },
-        )
-        MpvDebug.log("[mpv] holder 主权已交给 VideoHost，owner=NATIVE")
-    }
-
-    private fun onSurfaceDestroyedForHost() {
-        MpvDebug.log("[mpv] VideoHost 转发 surfaceDestroyed inited=$inited")
-        surfaceReady = false
-        if (inited) runCatching { core.detachSurface() }
     }
 
     // ---------------------------------------------------------------- 生命周期
@@ -292,7 +247,7 @@ class MpvPlayer(
             core.setOptionString("osc", "no")
             core.setOptionString("input-default-bindings", "no")
             core.setOptionString("input-vo-keyboard", "no")
-            // ★★ 真正的根因：mpv 默认 ytdl=auto，遇到没有可识别扩展名的 http 直链
+            // 真正的根因：mpv 默认 ytdl=auto，遇到没有可识别扩展名的 http 直链
             //   会先走 ytdl_hook 去调 youtube-dl。安卓上没有 youtube-dl，
             //   于是 [ytdl_hook] youtube-dl failed → [cplayer] finished playback, loading failed，
             //   文件根本没加载成功，VO 自然一个都建不起来（这就是 vo=空 cfg=false）。
@@ -381,7 +336,7 @@ class MpvPlayer(
 
     // ---------------------------------------------------------------- SurfaceHolder.Callback
     //
-    // ★路线 A：画面层只有一套。
+    // 路线 A：画面层只有一套。
     // 这里绑的不再是独立的 TextureView，而是 **PlayerView 自己那块 SurfaceView**（EXO 用的同一块）。
     // 对齐 WebHomeTV 5.6：`PlayerView surface_type="none"` + 内核往同一块 surface 输出，
     // 切内核不再换视图、不再换 window layer，收控制条也不会让父窗口重算挖洞。
@@ -421,13 +376,7 @@ class MpvPlayer(
         }
     }
 
-    /**
-     * TextureView 形态：没有 SurfaceHolder 回调可用。
-     *
-     * media3 的 PlayerView 自己挂着 SurfaceTextureListener（它要负责把 texture 交给 ExoPlayer），
-     * 我们**不能**再注册一个，否则会把它的监听顶掉、EXO 直接没画面。
-     * 所以这里用轮询：可用就绑，掉了就按 surfaceDestroyed 的语义收干净，再等它回来。
-     */
+    /** TextureView 形态只能轮询：PlayerView 已挂了 SurfaceTextureListener，再注册会顶掉它。 */
     private var ownedSurface: Surface? = null
     private fun watchTexture() {
         val tv = host as? android.view.TextureView ?: return
@@ -504,10 +453,10 @@ class MpvPlayer(
         backgrounded = false
         // 清掉已播地址：否则释放后若 surface 再次创建，会把旧地址重新 loadfile
         pendingUrl = ""
-        // 照官方 BaseMPVView.destroy：先摘掉 surface 回调再 destroy，
-        // 否则释放后视图的可见性变化还会回调进来，把已经 destroy 的 libmpv 再 init 一遍
-        // 已不再自注册 holderCallback（主权在 VideoHost），这里无需移除；
-        // 保留一行解释，避免以后又有人加回去。
+        // 先摘掉 surface 回调再 destroy，否则释放后视图的可见性变化还会回调进来，
+        // 把已经 destroy 的 libmpv 再 init 一遍（同 5.6.0 handleRelease 里的 clearVideoOutput）。
+        currentHolder?.let { h -> runCatching { h.removeCallback(holderCallback) } }
+        currentHolder = null
         runCatching { (host as? android.view.TextureView)?.removeCallbacks(textureWatch) }
         runCatching { ownedSurface?.release() }
         ownedSurface = null
@@ -582,7 +531,7 @@ class MpvPlayer(
         pendingStartMs = startMs
         pendingSubs = subs
         pendingStartPaused = startPaused
-        // ★ playlist 不能空：getState 里 STATE_READY/BUFFERING + 空 playlist 会触发
+        // playlist 不能空：getState 里 STATE_READY/BUFFERING + 空 playlist 会触发
         //   media3 "Empty playlist only allowed in STATE_IDLE or STATE_ENDED" 直接崩。
         //   老路径 play(url) 不经过 handleSetMediaItems，这里补一项；
         //   若 handleSetMediaItems 已经设过同一个 uri 就别覆盖（它可能带 metadata）。
@@ -711,15 +660,7 @@ class MpvPlayer(
         }.getOrElse { "读取失败" }
     }
 
-    /**
-     * 渲染自检 + 复位。
-     *
-     * 黑屏有声时 current-vo 是空串：surface 还在、mpv 也在播（声音照走），
-     * 但渲染后端没挂到这块 surface 上，于是没有一帧输出。
-     * 这里不依赖系统重建 surface，直接 detach 再 attach 一遍、把 vo 从 null 拉回 gpu。
-     *
-     * @return true 表示确实做过复位
-     */
+
     fun surfaceReadyNow(): Boolean = surfaceReady
 
     fun setBackground(value: Boolean) {
@@ -974,13 +915,8 @@ class MpvPlayer(
     // 关键前提：media3 1.4.1 起官方 SimpleBasePlayer 提供 handleSetVideoOutput（1.3.1 没有）。
 
     /**
-     * 显式声明真正实现了的命令。
-     *
-     * ★不能用 addAllCommands()：SimpleBasePlayer 对"声明了但没实现"的命令直接抛
-     * IllegalStateException —— 基类默认 handleSetTrackSelectionParameters 就是
-     * "Missing implementation to handle COMMAND_SET_TRACK_SELECTION_PARAMETERS"。
-     * 声明的集合必须与实现一一对应，这是契约，不是能力清单。
-     * （对齐原项目 androidx/media3/mpvplayer/MpvPlayer.java 的写法）
+     * 只声明真正实现了的命令。SimpleBasePlayer 对声明了却未实现的命令直接抛，
+     * 集合必须与实现一一对应。
      */
     private val commands: Player.Commands = Player.Commands.Builder()
         .addAll(
@@ -1016,10 +952,10 @@ class MpvPlayer(
     //   TrackGroup.id = "mpv:{Format.id}"，selected 由 mpv 当前 vid/aid/sid 决定
     //   回写：从 Format.id 抠出 mpvId 直接写属性
     //
-    // ★原生轨道号就藏在 Format.id 里，日常选轨是精确匹配，不需要任何语言/编解码猜；
+    // 原生轨道号就藏在 Format.id 里，日常选轨是精确匹配，不需要任何语言/编解码猜；
     //   只有"持久化偏好恢复"才需要打分兜底。
     //
-    // ★1.11.1 的 State.Builder 没有 setTracks，轨道挂在 MediaItemData 上，
+    // 1.11.1 的 State.Builder 没有 setTracks，轨道挂在 MediaItemData 上，
     //   所以 refreshTracks 之后要让 playlist 缓存失效（playlistForItem = null），
     //   下一次 getState 重建时带上新 tracks。
     private var currentTracks: Tracks = Tracks.EMPTY
@@ -1169,7 +1105,7 @@ class MpvPlayer(
 
     override fun getState(): State {
         val item = currentItem
-        // ★ media3 契约：playlist 为空时 playbackState 只能是 IDLE 或 ENDED，
+        // media3 契约：playlist 为空时 playbackState 只能是 IDLE 或 ENDED，
         //   否则 State.Builder.build() 抛 IllegalArgumentException
         //   "Empty playlist only allowed in STATE_IDLE or STATE_ENDED"。
         //   而 mpv 的 inited / playPending / eofReached 与"有没有媒体项"彼此独立：
@@ -1211,7 +1147,7 @@ class MpvPlayer(
             .setCurrentMediaItemIndex(0)
             .setPlayWhenReady(!paused, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
 
-        // ★位置：真正在播时交给 media3 按时钟外推，暂停 / 缓冲 / 播完才给恒定值。
+        // 位置：真正在播时交给 media3 按时钟外推，暂停 / 缓冲 / 播完才给恒定值。
         //   这样进度条平滑前进而不需要宿主按帧推送 —— media3 给的官方形态，
         //   不是为某台设备做的妥协。
         builder.setContentPositionMs(
@@ -1278,12 +1214,8 @@ class MpvPlayer(
      * media3 1.4.1 的 SimpleBasePlayer 提供这个扩展点（1.3.1 没有）。
      */
     /**
-     * 轨道选择：把 media3 标准参数翻译成 mpv 的 vid / aid / sid。
-     *
-     * 三层语义全部落在 mpv 原生能力上：
-     *   preferredAudioLanguages → alang（mpv 官方就是按语言优先级自动选轨）
-     *   disabledTrackTypes      → aid=no / sid=no
-     *   overrides               → Format.id 抠出原生轨道号，直接写属性
+     * 轨道选择：preferredAudioLanguages → alang，disabledTrackTypes → aid/sid=no，
+     * overrides → 从 Format.id 抠出 mpv 原生轨道号直接写属性。
      */
     override fun handleSetTrackSelectionParameters(
         parameters: TrackSelectionParameters,
@@ -1333,19 +1265,11 @@ class MpvPlayer(
         return Futures.immediateVoidFuture()
     }
 
+    /** 官方扩展点：只挂 callback，真正的 attach 在 surfaceCreated 里（同 5.6.0 setSurfaceHolder）。 */
     override fun handleSetVideoOutput(videoOutput: Any): ListenableFuture<*> {
         when (videoOutput) {
-            is SurfaceView -> {
-                val h = videoOutput.holder
-                if (h.surface?.isValid == true) {
-                    attachSurface(h.surface, h.surfaceFrame.width(), h.surfaceFrame.height(), first = true)
-                }
-            }
-            is SurfaceHolder -> {
-                if (videoOutput.surface?.isValid == true) {
-                    attachSurface(videoOutput.surface, videoOutput.surfaceFrame.width(), videoOutput.surfaceFrame.height(), first = true)
-                }
-            }
+            is SurfaceView -> bindHolder(videoOutput.holder)
+            is SurfaceHolder -> bindHolder(videoOutput)
             is android.view.TextureView -> {
                 // PlayerView 的 surface_type=texture_view 时交进来的是 TextureView。
                 // 官方 Player 契约里这是合法形态之一，必须接；否则一改布局属性就没画面。
@@ -1361,6 +1285,9 @@ class MpvPlayer(
     }
 
     override fun handleClearVideoOutput(videoOutput: Any?): ListenableFuture<*> {
+        // 照 5.6.0 detachSurfaceHolder：先摘 callback，再收输出
+        currentHolder?.let { h -> runCatching { h.removeCallback(holderCallback) } }
+        currentHolder = null
         // 官方 BaseMPVView.surfaceDestroyed 的三步，顺序不能反：
         //   vo=null → force-window=no → detachSurface
         // 先摘面再关输出，mpv 会对着一个已失效的窗口再做一次 swap。
@@ -1368,5 +1295,16 @@ class MpvPlayer(
         runCatching { core.setPropertyString("force-window", "no") }
         runCatching { core.detachSurface() }
         return Futures.immediateVoidFuture()
+    }
+
+    /**
+     * 只记 holder + 挂 callback。addCallback 对已创建的 surface 会立即回调 surfaceCreated，
+     * 所以换内核不需要额外补一刀。先摘旧的避免重复 add。
+     */
+    private fun bindHolder(holder: SurfaceHolder) {
+        currentHolder?.let { old -> runCatching { old.removeCallback(holderCallback) } }
+        currentHolder = holder
+        holder.addCallback(holderCallback)
+        MpvDebug.log("[mpv] bindHolder frame=${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()} valid=${holder.surface?.isValid}")
     }
 }

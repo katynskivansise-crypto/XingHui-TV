@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- ★单窗口宿主：详情层与播放层是同一个 Activity 里的两个 View 层。
-     画面层是两块 SurfaceView（EXO 一块 / mpv 一块），从进详情页那一刻起就存在，直到退出 App 都不销毁。
+     画面层是一块 SurfaceView，从进详情页那一刻起就存在，直到退出 App 都不销毁；
+     EXO 与 mpv 轮流接管这块面（media3 setVideoSurfaceView / clearVideoSurfaceView）。
 
      Z 序（自下而上，SurfaceView 的 surface 天然在窗口 surface 之下，普通 View 一律盖在它上面）：
         videoFrame   画面容器（AspectRatioFrameLayout，resize_mode=fit）
@@ -12,7 +13,7 @@
         全屏预览（详情页里点小窗）= MATCH_PARENT
         播放   = MATCH_PARENT，同时 detailLayer GONE、playLayer VISIBLE
 
-     两块面的停泊规则见 VideoHost.park()：不设 GONE/INVISIBLE，避免 Surface 被销毁。 -->
+     换内核时会黑一下：setRender 重建内部 surface —— 原版行为，不做规避。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/hostRoot"
@@ -58,18 +59,14 @@
                 release. A different player needs a new Surface before its GPU/codec can connect."
                 且 resetVideoSurface 只在换内核时为 true —— 尺寸变化从不重建 surface。 -->
 
-        <!-- 两块独立的输出面：EXO 一块、mpv 一块。同一时刻只有一块在屏内，
-             另一块按 VideoHost.park() 停泊（API>=34 用 INVISIBLE + FOLLOWS_ATTACHMENT，
-             API<34 平移到容器宽度之外），Surface 全程不销毁。
-             两块面各自只被一个引擎挂回调，互不干扰 —— 这是换内核不黑帧的根本。
-             不设 GONE/INVISIBLE：那会立刻销毁 Surface（官方 media3/ui/surface 原文）。 -->
+        <!-- 一块输出面，EXO 与 mpv 轮流接管 —— 与 5.6.0 PlaybackActivity 同构：
+             它只有一个 getExoView()，EXO 与 mpv 都是 media3 Player 的实现，
+             换内核就是 setPlayer(null) → setRender(目标) → setPlayer(新内核)。
+             surface 的生死由 media3 的 setVideoSurfaceView / clearVideoSurfaceView 统一管理，
+             双方不会各自挂一套 SurfaceHolder.Callback 互相踩。
+             换内核时会黑一下：setRender 重建内部 surface，这是原版行为。 -->
         <SurfaceView
             android:id="@+id/videoSurface"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
-        <SurfaceView
-            android:id="@+id/mpvSurface"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
