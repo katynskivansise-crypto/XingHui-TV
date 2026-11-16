@@ -250,7 +250,7 @@ class MpvPlayer(
                 core.addObserver(this)
                 observeAll()
                 inited = true
-                Log.i(TAG, "[mpv] 内嵌内核复用")
+                MpvDebug.log("[mpv] 内嵌内核复用（init 完成）")
                 return
             }
             core.create()
@@ -427,11 +427,12 @@ class MpvPlayer(
             core.addObserver(this)
             observeAll()
             inited = true
-            Log.i(TAG, "[mpv] 内嵌内核已初始化")
+            MpvDebug.log("[mpv] 内嵌内核已初始化 vo=" + (core.getPropertyString("vo") ?: "空"))
         }.onFailure {
             val msg = it.message ?: it.javaClass.simpleName
             initError = msg
             Log.e(TAG, "[mpv] 初始化失败（so 未打进包或 ABI 不匹配）：$msg", it)
+            MpvDebug.log("[mpv] 初始化失败：$msg")
         }
     }
 
@@ -718,7 +719,7 @@ class MpvPlayer(
             val startPaused = pendingStartPaused
             paused = startPaused
             core.setPropertyBoolean("pause", startPaused)
-            Log.i(TAG, "[mpv] 起播 $url")
+            MpvDebug.log("[mpv] 起播 ${url.take(60)} start=${pendingStartMs}ms")
         }.onFailure { Log.e(TAG, "[mpv] 起播失败", it) }
     }
 
@@ -1686,6 +1687,17 @@ class MpvPlayer(
         currentHolder?.let { old -> runCatching { old.removeCallback(holderCallback) } }
         currentHolder = holder
         holder.addCallback(holderCallback)
-        MpvDebug.log("[mpv] bindHolder frame=${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()} valid=${holder.surface?.isValid}")
+        val sf = holder.surface
+        val valid = sf?.isValid == true
+        MpvDebug.log("[mpv] bindHolder frame=${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()} valid=$valid")
+        // 照 5.6.0 bindVideoOutput:3317 —— 拿到 surface 就直接 mpvAttachSurface，不等回调。
+        // 这块 SurfaceView 在进播放页之前就已经 created 了，往一个已经 created 的 holder
+        // 上 addCallback，Android 不会再补发 surfaceCreated。只等回调的话 surfaceReady
+        // 永远是 false，play() 进不了 doPlay，15 秒后 watchdog 把内核 release 掉、退回 EXO ——
+        // 表现就是「mpv 内核卡死、只有声音」。
+        if (valid && !surfaceReady) {
+            if (!inited) initWithOptions()
+            if (inited) onSurfaceCreated(holder)
+        }
     }
 }

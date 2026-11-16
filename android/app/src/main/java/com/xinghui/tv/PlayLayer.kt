@@ -1833,6 +1833,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private val mpvWatchdog = Runnable {
         if (mpvLoaded || activeUrl.isBlank()) return@Runnable
         Log.e("XingHuiTV", "[mpv] 起播超时，回退 EXO：${activeUrl.take(60)}")
+        MpvDebug.log("[mpv] 起播超时 15s 未出文件，回退 EXO（这是 mpv 卡死的直接证据）")
         mpvFallbackExo = true
         runCatching { mpv?.release() }
         mpv = null
