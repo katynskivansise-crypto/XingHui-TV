@@ -88,7 +88,14 @@ class MainActivity : Activity() {
     private var vod: Vod? = null
     private var currentLine: PlayLine? = null
 
-    internal var player: ExoPlayer? = null
+    /**
+     * 详情页小窗的播放器 —— 与播放层共用同一颗实例。
+     *
+     * 原版 VideoActivity 继承 PlaybackActivity，内核由 PlayerSetting 全局决定，
+     * 小窗与全屏是同一个 player；这里对齐成「一颗实例，内核设置说了算」，
+     * 所以类型是 Player（EXO / mpv 都可能），而不是写死 ExoPlayer。
+     */
+    internal var player: androidx.media3.common.Player? = null
     /**
      * 小窗形态的原始 LayoutParams —— 原版的 mFrameParams。
      * 保存的是 XML 里那个对象本身，退出全屏时原样还回去。
@@ -488,7 +495,19 @@ class MainActivity : Activity() {
         disarmPlayTimeout()
         hideInlineProgress()
         // 详情页错误回调（只加 listener，不动画面）
-        runCatching { playLayer?.currentPlayer()?.let { bindDetailListener(it) } }
+        // 宿主手上那颗跟着播放层走：原版就是同一颗实例，退出时原样接回来 —— 不重建、不重载。
+        //   mpv 回小窗同样走这一条，所以这里不能只认 ExoPlayer。
+        runCatching {
+            val p = playLayer?.currentPlayer()
+            if (p != null) {
+                val old = player
+                if (old != null && old !== p) runCatching { old.release() }
+                player = p
+                (p as? MpvPlayer)?.let { wireInlineMpv(it) }
+                bindDetailListener(p)
+                attachPreviewTo(p)
+            }
+        }
         MpvDebug.log("[gate] exit 只缩容器：player/surface 全程未动 playMode=$playMode")
     }
 
@@ -619,7 +638,10 @@ class MainActivity : Activity() {
         // 内嵌播放器之前是裸 build()：没有轨道选择参数，没有解码方式，也没有请求头。
         // 照原版 ExoUtil 补齐 TrackSelector（最高码率 / 字幕语言 / 隧道模式），
         // 解码方式跟播放页共用同一个值。
-        player = buildInlinePlayer()
+        //
+        // mpv 形态按需再建：它一构造就要起原生实例与 GL 上下文，没人点播放时不该付这份开销。
+        //   playInline 里 `player ?: buildInlinePlayer()` 会补上。
+        player = if (PlayerManager.shouldUseMpv(this)) null else buildInlinePlayer()
         // 播放器框按 16:9 收口：之前 height 写死 270dp、宽度随 weight 撑开，
         // 比例约 2.6:1，画面只能居中留大黑边（真机上看着就是「缩放不对」）。
         findDetail<View>(R.id.playerBox)?.let { boxView ->
@@ -685,7 +707,45 @@ class MainActivity : Activity() {
      * 内嵌预览播放器的唯一构建点。
      * 抽出来是为了「进播放页释放、返回重建」这条路径不用把参数再抄一遍。
      */
-    private fun buildInlinePlayer(): androidx.media3.exoplayer.ExoPlayer {
+    /**
+     * 建详情页小窗的播放器。内核跟播放页同一个设置项 —— 选 mpv 就建 mpv，
+     * 这样进全屏时播放层接管的是同一颗实例，不再重新解析 + loadfile。
+     */
+    private fun buildInlinePlayer(): androidx.media3.common.Player {
+        if (PlayerManager.shouldUseMpv(this)) return buildInlineMpv()
+        return buildInlineExo()
+    }
+
+    /** mpv 形态的小窗播放器。 */
+    private fun buildInlineMpv(): MpvPlayer = MpvPlayer(this, videoSurface).also { wireInlineMpv(it) }
+
+    /**
+     * 把小窗那套回调挂到 mpv 实例上。
+     * 播放层接管同一颗实例时会换上它自己那套（要抢焦点、要写历史），
+     * 退出播放层必须换回来，否则小窗里会继续触发播放层的焦点与落盘逻辑。
+     */
+    private fun wireInlineMpv(m: MpvPlayer) {
+        m.onLoaded = {
+            MpvDebug.log("[detail] mpv 已加载 ${inlineUrl.take(40)}")
+            disarmPlayTimeout()
+            hideInlineProgress()
+            findDetail<View>(R.id.detailImage)?.visibility = View.GONE
+        }
+        m.onFailed = { why ->
+            MpvDebug.log("[detail] mpv 播放失败：$why")
+            disarmPlayTimeout()
+            showError("播放地址加载失败")
+            handlePlayFailure(playingIdx.coerceAtLeast(0), auto = false,
+                reason = "mpv 错误 $why", depth = 0)
+        }
+        // 播放层专用的那几项在小窗里一律不挂
+        m.onEndFile = null
+        m.onPauseChanged = null
+        m.onTimePos = null
+        m.onDuration = null
+    }
+
+    private fun buildInlineExo(): androidx.media3.exoplayer.ExoPlayer {
         val p = ExoPlayer.Builder(this)
             .apply {
                 val rf = if (Settings(this@MainActivity).decodeMode == 0)
@@ -1337,11 +1397,19 @@ class MainActivity : Activity() {
                 // 这里必须拿到一颗**非空**播放器再下发。
                 //   却仍然返回 true，于是"成功了但什么都没加载"，没有任何日志，也不进换源。
                 //   这是静默失败，不是容错。
-                val p = player ?: runCatching { buildInlinePlayer() }.getOrNull()?.also {
+                // 对齐 5.6.0 PlayerManager.switchPlayer:1515-1521：换内核就是 release 旧引擎、按新内核重建，
+                //   所以实例类型永远跟着设置走；设置改过之后手上那颗还是旧内核的，这里换掉。
+                val needBuild = when {
+                    player == null -> true
+                    PlayerManager.shouldUseMpv(this) -> player !is MpvPlayer
+                    else -> player !is ExoPlayer
+                }
+                if (needBuild) runCatching { player?.release() }
+                val p = if (needBuild) runCatching { buildInlinePlayer() }.getOrNull()?.also {
                     player = it
                     applyCaptionStyle()
                     bindDetailListener(it)
-                }
+                } else player
                 if (p == null) {
                     handlePlayFailure(idx, auto, "内嵌播放器构建失败（无法下发媒体源）", depth)
                     return@runOnUiThread
@@ -1358,7 +1426,8 @@ class MainActivity : Activity() {
                     //   `PlayerManager.stop():1245` 里是真的 `engine.stop()`。
                     //   同一颗 player 从 READY 直接 `setMediaItem` 时，部分状态下不会重新准备 ——
                     //   表现就是"点了别的集，什么都没发生"（不报错、不出画面、圈一闪就没）。
-                    //   先 stop 回到 IDLE 再换 item，与原版顺序一致。
+                    //   先 stop 回到 IDLE 再换 item，与原版顺序一致（mpv 也一样 stop：
+                    //   PlayerManager.stop:1245 → engine.stop，MpvPlayer.handleStop 置 stopping 吞掉 END_FILE）。
                     p.stop()
                     // mediaId 显式设成同一路 url：播放层靠它判断「小窗已经在播这一路」。
                     p.setMediaItem(MediaItem.Builder().setUri(url).setMediaId(url).build())

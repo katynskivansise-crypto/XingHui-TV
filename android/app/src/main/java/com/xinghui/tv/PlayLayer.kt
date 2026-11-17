@@ -209,11 +209,10 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             item.localConfiguration?.uri?.toString().orEmpty().ifBlank { item.mediaId }
         }.getOrDefault("")
         val hasContent = (src?.mediaItemCount ?: 0) > 0
-        // 内核为 mpv 时不能复用：详情页小窗那一路上宿主 EXO 起的，播放页要交 mpv，
-        //   直接把 EXO 的媒体项当成"已在播"接过去就是黑屏。这种跨内核只能老实加载一次。
-        //   （要让 mpv 用户也做到"零加载"，得让详情页小窗直接跑 mpv —— 那是下一步，不在本包。）
+        // 是否接管宿主那一颗，只看「实例类型是否与当前内核一致」（见 adoptHostPlayback）。
+        //   原版 VideoActivity 继承 PlaybackActivity，内核由 PlayerSetting 全局决定，
+        //   小窗与全屏从头到尾是同一颗 player —— 所以 mpv 用户同样不该出现第二次加载。
         // 判据不命中时也要留一行证据 —— 否则"为什么还要加载一次"只能靠猜。
-        //   这一行把五个条件的实际值全打出来，一眼就能看出卡在哪个上。
         MpvDebug.log(
             "[play] 复用判据 preUrl=${preUrl.take(48)} running=${runningUrl.take(48)} " +
                 "hit=${preUrl.isNotBlank() && runningUrl == preUrl} ready=$hasContent src=${if (src == null) "null" else (if (player === src) "layer" else "host")} " +
@@ -227,11 +226,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         //   点的是「此刻这一集」就进全屏，从不判断"是否已经有画面"。
         //   这里同样不能拿 hasContent 当门槛 —— 小窗那一路可能还在解析中，
         //   把同一颗实例接管过来、等它自己到位，才是"进全屏不重新加载、不回片头"。
-        if (attachOnly && src != null && !playerBroken && !isMpvMode()) {
-            if (player !== src) {
-                player = src
-                runCatching { session.adoptExo(src) }
-            }
+        if (attachOnly && src != null && !playerBroken && adoptHostPlayback(src)) {
             if (hasContent) {
                 MpvDebug.log("[play] attach_only：宿主正在播这一集，只接管界面 url=${preUrl.take(48)}")
                 startPlayback(reuseUrl = if (preUrl.isNotBlank()) preUrl else runningUrl)
@@ -241,13 +236,9 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
             }
             return
         }
-        if (preUrl.isNotBlank() && runningUrl == preUrl && !playerBroken && hasContent && !isMpvMode()) {
-            // 复用前必须把宿主那一颗接进本层：player 字段与 session.exo 都要指向它，
+        if (preUrl.isNotBlank() && runningUrl == preUrl && !playerBroken && hasContent && adoptHostPlayback(src)) {
+            // 复用前必须把宿主那一颗接进本层：player / mpv 字段与会话都要指向它，
             //   否则 startPlayback 之后 onHostResume 的 play() 会落到空引用上（表现就是"进去了不播"）。
-            if (src != null && player !== src) {
-                player = src
-                runCatching { session.adoptExo(src) }
-            }
             MpvDebug.log("[play] 小窗已在播，接管界面不重载 url=${preUrl.take(48)} pos=${currentPosMs()}ms")
             startPlayback(reuseUrl = preUrl)
             return
@@ -1463,7 +1454,7 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
 
     private fun rebuildPlayerInternal(headers: Map<String, String>): ExoPlayer? {
         activeHeaders = headers
-        val existing = host.player
+        val existing = host.player as? ExoPlayer
         if (existing != null) {
             MpvDebug.log("[player] 复用宿主那一颗（headers 已下沉到 MediaSource），不新建")
             // 复用同样要接管：绑定画面层、挂监听、套字幕样式。
@@ -1700,6 +1691,33 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         !mpvFallbackExo && PlayerManager.shouldUseMpv(host)
 
     /**
+     * 原版是「一个内核一颗实例」：VideoActivity 与 PlaybackActivity 共用同一个 player。
+     * 这里把宿主的实例接过来，按类型分两条 —— EXO 交给会话持有，mpv 交给 mpv 字段。
+     * 返回 false 表示这颗实例接不了（类型不认识），调用点据此回落到本层自己解析。
+     */
+    private fun adoptHostPlayback(src: androidx.media3.common.Player?): Boolean {
+        if (src == null) return false
+        // 原版 player 的类型由 PlayerSetting 决定，换内核即 release 重建（PlayerManager.switchPlayer:1515-1521），
+        //   所以宿主的实例必与当前内核同型，这里不需要额外判据。
+        if (isMpvMode()) {
+            val m = src as MpvPlayer
+            if (mpv !== m) {
+                mpv = m
+                mpvLoaded = true
+                wireMpv(m)
+            }
+            videoHost?.let { vh -> runCatching { vh.setPlayer(m) } }
+        } else {
+            val e = src as ExoPlayer
+            if (player !== e) {
+                player = e
+                runCatching { session.adoptExo(e) }
+            }
+        }
+        return true
+    }
+
+    /**
      * 起播前按键意图（两个内核共用）。原版按键先记在界面层再落到内核
      * （onSeekTo → mPlayers.seekTo + showProgress + onPlay），即"意图先成立、内核就绪再执行"。
      * 直接打 player 时，起播前那几秒既无内核也无媒体项，按键会全部打空。
@@ -1712,46 +1730,67 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun contentReady(): Boolean = session.hasContent()
 
     /**
-     * 建（或复用）mpv 原生实例。
+     * 把播放层需要的回调挂到 mpv 实例上。
+     * 新建与被接管两条路径都要挂（接管来的实例本来带的是详情页那套回调）。
+     */
+    private fun wireMpv(p: MpvPlayer) {
+        p.onLoaded = {
+            mpvLoaded = true
+            uiHandler.post {
+                if (barShown()) {
+                    uiHandler.removeCallbacks(autoHide)
+                    uiHandler.postDelayed(autoHide, IMM_HIDE_MS)
+                }
+            }
+            MpvDebug.log("[mpv] 已加载 ${activeUrl.take(60)}")
+            hidePlayProgress()
+            recordHistory()
+            // 起播这一刻焦点最容易掉回根布局：控制条若还开着，立刻把落点拉回条内，
+            // 否则用户下一按方向键就是"空打一发"。
+            uiHandler.post { if (barShown()) ensureBarFocus() }
+        }
+        p.onEndFile = { handleEnded() }
+        p.onPauseChanged = { paused -> setKeepScreenOn(!paused) }
+        p.onFailed = { why ->
+            MpvDebug.log("[mpv] 播放失败：$why")
+            onPlayFail("$why（$flag）")
+        }
+        p.onTimePos = { mpvPos = it }
+        p.onDuration = { mpvDur = it }
+    }
+
+    /**
+     * 建（或接管）mpv 原生实例。
      *
-     * 之前实例只在 startMpv 里建 —— 也就是「地址解析完、文件开始加载」时才存在。
-     * 于是刚进播放页那几秒，`mpv` 还是 null，togglePlayPause / seekByKey 全部
-     * `mpv ?: return` 直接返回：按暂停没反应、按快进没反应，要等起播了才「突然好用」。
-     * 现在进页面就先建好实例（还没文件，pause 属性照样能设、能保持），
-     * startMpv 只负责 play(url)，按键从第一秒起就有效。
+     * 原版 PlayerManager 是全局唯一的：内核由设置决定，详情页小窗与全屏共用同一颗实例，
+     *   进全屏只改容器 LayoutParams。所以先看宿主手上有没现成的一颗 ——
+     *   小窗已经按内核设置建好 mpv 时直接接管，不再新建（新建必然重新 loadfile）。
+     *
+     * 实例也不能等到地址解析完才建：以前只在 startMpv 里建，刚进播放页那几秒 `mpv` 还是 null，
+     *   togglePlayPause / seekByKey 全部 `mpv ?: return` 直接返回 —— 按暂停、按快进全无反应，
+     *   要等起播了才「突然好用」。现在进页面就先备好实例（还没文件，pause 属性照样能设、能保持），
+     *   startMpv 只负责 play(url)，按键从第一秒起就有效。
      */
     private fun ensureMpv(surface: android.view.View): MpvPlayer {
         mpv?.let { old ->
             // 复用旧实例：重新把画面交出去（releaseOwner 时已经松过手）
             videoHost?.let { vh -> runCatching { vh.setPlayer(old) } }
+            // 回写宿主：详情页小窗与播放页共用同一颗（原版 PlayerManager 单例语义）
+            host.player = old
             return old
         }
-        val p = MpvPlayer(host, surface).also { p ->
-            p.onLoaded = {
-                mpvLoaded = true
-                uiHandler.post {
-                    if (barShown()) {
-                        uiHandler.removeCallbacks(autoHide)
-                        uiHandler.postDelayed(autoHide, IMM_HIDE_MS)
-                    }
-                }
-                Log.i("XingHuiTV", "[mpv] 已加载 ${activeUrl.take(60)}")
-                hidePlayProgress()
-                recordHistory()
-                // 起播这一刻焦点最容易掉回根布局：控制条若还开着，立刻把落点拉回条内，
-                // 否则用户下一按方向键就是"空打一发"。
-                uiHandler.post { if (barShown()) ensureBarFocus() }
-            }
-            p.onEndFile = { handleEnded() }
-            p.onPauseChanged = { paused -> setKeepScreenOn(!paused) }
-            p.onFailed = { why ->
-                Log.e("XingHuiTV", "[mpv] 播放失败：$why")
-                onPlayFail("$why（$flag）")
-            }
-            p.onTimePos = { mpvPos = it }
-            p.onDuration = { mpvDur = it }
+        (host.player as? MpvPlayer)?.let { inherited ->
+            MpvDebug.log("[kernel] 接管小窗那一颗 mpv，不新建实例")
+            mpv = inherited
+            mpvLoaded = true
+            wireMpv(inherited)
+            videoHost?.let { vh -> runCatching { vh.setPlayer(inherited) } }
+            return inherited
         }
+        val p = MpvPlayer(host, surface)
+        wireMpv(p)
         mpv = p
+        host.player = p
         videoHost?.let { vh -> runCatching { vh.setPlayer(p) } }
         return p
     }
@@ -2699,7 +2738,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
     private fun togglePlayPause() {
         val wasPlaying = session.isPlaying()
         session.toggle()
-        val nowPaused = !session.isPlaying()
+        // toggle 就是把播放/暂停翻过来，直接用翻转前的状态取反，不要回读 isPlaying。
+        // mpv 的 isPlaying 是异步刷新的：刚下发 pause 的那一帧还返回旧值，
+        // 回读会把日志写成反的（日志里那条「wasPlaying=false 现在暂停=true」就是这么来的），
+        // UI 也会跟着闪一下。真实结果由下面 250ms 后那条回读确认。
+        val nowPaused = wasPlaying
         applyPauseUi(nowPaused)
         MpvDebug.log(
             "[key] toggle kernel=${if (isMpvMode()) "mpv" else "exo"} wasPlaying=$wasPlaying 现在暂停=$nowPaused"
@@ -3232,7 +3275,11 @@ class PlayLayer(private val host: MainActivity, private val onExit: () -> Unit) 
         }
         // 所有没被上面任何分支接住的键，在这里统一留痕。
         //   这条只是为了让"按了没反应"能立刻变成一行具体键码，不再靠猜。
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+        // BACK 不走这里：它只认 ACTION_UP（见上面 dispatchKeyEvent 的 isActionUp && isBackKey），
+        // 按下这一拍本来就该无人接手。之前它落到下面的兜底里打一行「未接」，
+        // 看日志会误判成「返回键首击丢失」，实际是抬起时才处理、按一下就退，完全正常。
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            event.keyCode != KeyEvent.KEYCODE_BACK) {
             MpvDebug.log("[key] 未接 kc=${event.keyCode}(${KeyEvent.keyCodeToString(event.keyCode)})")
         }
         return false

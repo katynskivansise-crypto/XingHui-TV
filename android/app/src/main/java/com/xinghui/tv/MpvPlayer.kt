@@ -87,6 +87,35 @@ class MpvPlayer(
     private var cachedSurfaceW = 0
     private var cachedSurfaceH = 0
 
+    private val sizeHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /** 起播后 1.5 秒抓一次 mpv 自己的真实状态，用来区分「暂停」「等缓冲」「时钟源起不来」。 */
+    private val playDiagRunnable = Runnable {
+        if (!inited) return@Runnable
+        val sb = StringBuilder("[mpv] 起播后1.5s")
+        fun add(k: String, v: Any?) { sb.append(' ').append(k).append('=').append(v) }
+        add("pause", runCatching { core.getPropertyBoolean("pause") }.getOrNull())
+        add("time-pos", runCatching { core.getPropertyDouble("time-pos") }.getOrNull())
+        add("idle", runCatching { core.getPropertyBoolean("idle-active") }.getOrNull())
+        add("coreIdle", runCatching { core.getPropertyBoolean("core-idle") }.getOrNull())
+        add("eof", runCatching { core.getPropertyBoolean("eof-reached") }.getOrNull())
+        add("corePause", runCatching { core.getPropertyBoolean("core-pause") }.getOrNull())
+        add("video-sync", runCatching { core.getPropertyString("video-sync") }.getOrNull())
+        add("ao", runCatching { core.getPropertyString("current-ao") }.getOrNull())
+        add("aoList", runCatching { core.getPropertyString("ao-list") }.getOrNull())
+        add("audioDevice", runCatching { core.getPropertyString("audio-device") }.getOrNull())
+        add("audioDevList", runCatching { core.getPropertyString("audio-device-list") }.getOrNull())
+        add("audioPts", runCatching { core.getPropertyDouble("audio-pts") }.getOrNull())
+        add("avsync", runCatching { core.getPropertyDouble("avsync") }.getOrNull())
+        add("audioParams", runCatching { core.getPropertyString("audio-params") }.getOrNull())
+        add("audioOutParams", runCatching { core.getPropertyString("audio-out-params") }.getOrNull())
+        add("vol", runCatching { core.getPropertyDouble("volume") }.getOrNull())
+        add("cacheTime", runCatching { core.getPropertyDouble("demuxer-cache-time") }.getOrNull())
+        add("pausedForCache", runCatching { core.getPropertyBoolean("paused-for-cache") }.getOrNull())
+        add("aid", runCatching { core.getPropertyString("aid") }.getOrNull())
+        add("vid", runCatching { core.getPropertyString("vid") }.getOrNull())
+        MpvDebug.log(sb.toString())
+    }
+
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
@@ -100,6 +129,12 @@ class MpvPlayer(
     private var pendingSeekMs = 0L
     private var paused = true
     private var eofReached = false
+    /**
+     * 主动 stop 的标记 —— 对齐 5.6.0 MpvPlayer.java:295 `stopping` / stopMpv:3648-3656。
+     *   stop 会让 mpv 发出一条 reason=STOP 的 END_FILE；
+     *   这条不是"异常结束"，在 handleEndFile:2721-2723 里只做复位就返回。
+     */
+    private var stopping = false
     // mpv 在等缓冲时为 true。不观察它的话起播后 playbackState 永远是 READY，
     // 上层拿不到"正在缓冲"，加载圈永远不显示。
     private var pausedForCache = false
@@ -176,7 +211,7 @@ class MpvPlayer(
                 if (!surfaceReady) {
                     val s = ownedSurface?.takeIf { it.isValid } ?: Surface(st).also { ownedSurface = it }
                     MpvDebug.log("[mpv] textureReady ${tv.width}x${tv.height}（TextureView 形态）")
-                    attachSurface(s, tv.width, tv.height)
+                    attachSurface(s, tv.width, tv.height, first = true)
                 }
             } else if (surfaceReady) {
                 MpvDebug.log("[mpv] textureLost（TextureView 被回收）")
@@ -273,9 +308,9 @@ class MpvPlayer(
                 core.setOptionString("gpu-shader-cache-dir", sub.absolutePath)
                 core.setOptionString("icc-cache-dir", sub.absolutePath)
             }
-            // 日志落私有目录，供「异常结束」时回捞渲染/解码失败的具体原因。
-            // 级别取 info：VO 初始化、GPU 上下文、解码器选择这几类有用信息都在 info；
-            // 不取 v/debug —— 那会逐帧写日志，单次播放几十 MB，属于纯开销。
+            // 日志落私有目录，供「异常结束」时回捞渲染/解码失败的具体原因：
+            // VO 建不起来时真正有用的那几行（[vo/gpu] Initializing GPU、Not creating window、
+            // GL_VERSION）都在 info 级；不取 v/debug —— 那会逐帧写日志，单次播放几十 MB。
             // 单文件 2MB 上限兜底，超了就重建。
             runCatching {
                 if (logFile.exists() && logFile.length() > 2L * 1024 * 1024) logFile.delete()
@@ -349,11 +384,16 @@ class MpvPlayer(
             core.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
             // 官方 MPVView.kt：播放位置由宿主自己管（我们记在 HistoryStore），
             // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
-            core.setOptionString("save-position-on-quit", "no")
-            // 音频解码器优先级（5.6.0 MpvAudioDecoderPolicy）：AAC/MP3/AMR 先试安卓硬解，
-            // 硬解不可用时 mpv 会依序回退到列表内下一个、再到列表外的其它解码器
-            // （options.rst 的 --ad 是优先级列表，只有末尾带 "-" 才是抑制回退）。
-            core.setOptionString("ad", "aac_mediacodec,mp3_mediacodec,amrnb_mediacodec,amrwb_mediacodec")
+            // 不设 --ad。5.6.0 的 MpvAudioDecoderPolicy 把这四个 mediacodec 音频解码器作为
+            // 限定列表下发，但 --ad 是「只用这些」而不是「优先这些」：
+            //   不在列表里的解码器根本不会被采用。
+            // 结果 AAC 只有 Android 硬解一条路，而 mediacodec 音频输出的是硬件原生参数，
+            // 设备的 AudioTrack 不接受（ao_audiotrack.c 的
+            // "AudioTrack.getMinBufferSize returned an invalid size"），
+            // audiotrack 建不起来 → opensles 也失败 → mpv 只剩 null 音频输出。
+            // 没有真实音频输出，video-sync=audio（默认）就没有时钟源，
+            // 表现为时间轴停在 0、画面不动、同时没声音 —— 三个症状是同一个原因。
+            // 交回 mpv 默认（ffmpeg 软解），AAC/MP3 这类解起来开销可以忽略。
             // 起播缓冲（5.6.0 applyPreInitOptions:1785-1801）。
             // cache-pause-initial=no 让首帧不等缓冲填满，这一条是秒开的关键。
             core.setOptionString("cache-pause", "yes")
@@ -365,6 +405,7 @@ class MpvPlayer(
             // 只预读 1 秒（mpv 默认 30），换起播速度
             core.setOptionString("demuxer-readahead-secs", "1")
             core.setOptionString("demuxer-hysteresis-secs", "0")
+            core.setOptionString("save-position-on-quit", "no")
             // 官方 MPVView.kt 用 tls-verify=yes + filesDir/cacert.pem。
             // 我们没有这个 ca bundle，留 yes 会让 https 片源在证书链不全时直接失败，
             // 电视盒子场景（片源多变、证书不规范）取 no 更实用；只连片源，不涉及登录凭据。
@@ -438,8 +479,8 @@ class MpvPlayer(
         }.onFailure {
             val msg = it.message ?: it.javaClass.simpleName
             initError = msg
-            MpvDebug.log("[mpv] 初始化失败（so 未打进包或 ABI 不匹配）：$msg")
-            Log.e(TAG, "[mpv] 初始化失败", it)
+            Log.e(TAG, "[mpv] 初始化失败（so 未打进包或 ABI 不匹配）：$msg", it)
+            MpvDebug.log("[mpv] 初始化失败：$msg")
         }
     }
 
@@ -463,7 +504,7 @@ class MpvPlayer(
         MpvDebug.log("[mpv] surfaceCreated(SurfaceView) inited=$inited playPending=$playPending ${w}x$h")
         if (!inited) initWithOptions()
         if (!inited) return
-        bindVideoOutput()
+        bindVideoOutput(first = true)
     }
 
     private fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -471,8 +512,9 @@ class MpvPlayer(
         if (width > 0 && height > 0) { cachedSurfaceW = width; cachedSurfaceH = height }
         MpvDebug.log("[mpv] surfaceChanged ${width}x$height fmt=$format attached=${attachedSurface != null}")
         if (!inited) return
-        bindVideoOutput()
+        bindVideoOutput(first = false)
     }
+
 
     private fun onSurfaceDestroyed(holder: SurfaceHolder) {
         // 照 5.6.0 surfaceDestroyed:3541 —— 面没了就把引用一起清掉
@@ -501,7 +543,7 @@ class MpvPlayer(
         tv.post(textureWatch)
     }
 
-    private fun attachSurface(surface: Surface, width: Int, height: Int) {
+    private fun attachSurface(surface: Surface, width: Int, height: Int, first: Boolean) {
         // 顺序照 5.6.0 bindVideoOutput:3317-3325：先 mpvAttachSurface + applyAndroidSurfaceSize，
         // 最后才 set vo。反过来先设 vo=gpu 再 attach，mpv 会先在没有面的状态下建一次输出。
         //
@@ -523,7 +565,7 @@ class MpvPlayer(
         surfaceReady = true
         cachedSurfaceW = width
         cachedSurfaceH = height
-        MpvDebug.log("[mpv] attachSurface ${width}x$height ok=true")
+        MpvDebug.log("[mpv] attachSurface ${width}x$height first=$first ok=true")
         // 挂好之后的起播协调
         if (playPending && pendingUrl.isNotBlank()) {
             playPending = false
@@ -532,6 +574,14 @@ class MpvPlayer(
             pendingResume = false
             paused = false
             runCatching { core.setPropertyBoolean("pause", false) }
+        } else if (first && pendingUrl.isNotBlank() && !backgrounded) {
+            // 换了一块新 surface，但 mpv 因为 vo 曾被置 null 已经掉到 idle（文件没在播），
+            // 只重开 vo 是黑屏，按最后一次地址重新 loadfile，位置沿用记下来的进度。
+            val wasIdle = runCatching { core.getPropertyBoolean("idle-active") }.getOrNull() ?: false
+            if (wasIdle) {
+                pendingSeekMs = pendingStartMs
+                doPlay(pendingUrl)
+            }
         }
     }
 
@@ -545,7 +595,7 @@ class MpvPlayer(
      * 再拿它和已挂的引用比较。只更新尺寸而不比引用，Surface 一旦被换掉，
      * mpv 会继续往已失效的旧面推帧。
      */
-    private fun bindVideoOutput() {
+    private fun bindVideoOutput(first: Boolean) {
         val holder = currentHolder ?: return
         val sf = holder.surface
         if (!inited) return
@@ -568,7 +618,7 @@ class MpvPlayer(
             attachedVo = null
         }
         MpvDebug.log("[mpv] 换了面 ${w}x$h，重新挂")
-        attachSurface(sf, w, h)
+        attachSurface(sf, w, h, first = first)
     }
 
     /**
@@ -584,11 +634,13 @@ class MpvPlayer(
             is android.view.TextureView -> watchTexture()
             is SurfaceView -> {
                 val h = (host as SurfaceView).holder
+                // callback 可能被 clearVideoOutput 摘过而没加回来（复用路径不重新 setVideoSurfaceView），
+                // 这里按 holder 是否一致判断，不一致就整个重绑一次。
                 if (currentHolder !== h) {
                     MpvDebug.log("[mpv] ensureSurface：holder 已换，重新 bindHolder")
                     bindHolder(h)
                 } else {
-                    bindVideoOutput()
+                    bindVideoOutput(first = false)
                 }
             }
         }
@@ -779,11 +831,15 @@ class MpvPlayer(
             // loadfile 会让 mpv 按选项里的 pause 重新决定一次暂停态，
             // 若先 loadfile 再设 pause，这次设置会被重置吃掉 ——
             // 表现为首帧停在画面上、进度一直 0、音频也不出。
+            // 新的一轮加载开始：上一轮 stop 的标记作废，否则这一轮真失败会被当成"主动停止"吞掉
+            stopping = false
             val startPaused = pendingStartPaused
             paused = startPaused
             core.setPropertyBoolean("pause", startPaused)
             core.command(arrayOf("loadfile", url, "replace"))
             MpvDebug.log("[mpv] 起播 ${url.take(60)} start=${pendingStartMs}ms")
+            sizeHandler.removeCallbacks(playDiagRunnable)
+            sizeHandler.postDelayed(playDiagRunnable, 1500L)
         }.onFailure { MpvDebug.log("[mpv] 起播失败：${it.message ?: it.javaClass.simpleName}") }
     }
 
@@ -991,6 +1047,8 @@ class MpvPlayer(
         when (eventId) {
             MpvCore.MpvEvent.MPV_EVENT_FILE_LOADED -> ui {
                 eofReached = false
+                // 新文件已接管：上一轮 stop 的标记到此为止（对应 5.6.0 START_FILE 里的 stopping=false）
+                stopping = false
                 // 起播前的 speed / scale 可能不生效，文件加载完成后补下发
                 runCatching { core.setPropertyDouble("speed", desiredSpeed.toDouble()) }
                 applyScale(desiredScale)
@@ -1016,6 +1074,13 @@ class MpvPlayer(
             MpvCore.MpvEvent.MPV_EVENT_END_FILE -> {
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     if (!inited || pendingUrl.isBlank()) return@postDelayed
+                    // 主动 stop 引发的 END_FILE 不算失败 —— 对齐 5.6.0 handleEndFile:2721-2723：
+                    //   `if (stopping) { stopping = false; ... }`，不进入下面的异常判定。
+                    if (stopping) {
+                        stopping = false
+                        MpvDebug.log("[mpv] 主动 stop 的 END_FILE，不计异常")
+                        return@postDelayed
+                    }
                     // 后台期间 / surface 已销毁时一律不判异常结束：
                     // 切后台 -> surfaceDestroyed 把 vo 置 null 并 detachSurface，
                     // mpv 会短暂 idle-active=true；这时判「中断」会触发上层静默自动换线路，
@@ -1544,7 +1609,11 @@ class MpvPlayer(
      * 其余（HLS 广告边界、帧率、预载缓存）我们没有对应设施。
      */
     override fun handleStop(): ListenableFuture<*> {
-        if (inited) runCatching { core.command(arrayOf("stop")) }
+        if (inited) {
+            // 先立标记再下发 stop：END_FILE 是异步回来的，标记必须先于它成立
+            stopping = true
+            runCatching { core.command(arrayOf("stop")) }
+        }
         paused = true
         playPending = false
         eofReached = false
@@ -1721,14 +1790,13 @@ class MpvPlayer(
                 val st = videoOutput.surfaceTexture
                 if (st != null) {
                     val s = ownedSurface?.takeIf { it.isValid } ?: Surface(st).also { ownedSurface = it }
-                    attachSurface(s, videoOutput.width, videoOutput.height)
+                    attachSurface(s, videoOutput.width, videoOutput.height, first = true)
                 }
             }
-            // 裸 Surface 分支传 0 尺寸是照 5.6.0 的：setVideoOutput:2982-2985 对 instanceof Surface
+            // 裸 Surface 传 0 尺寸是照 5.6.0 的：setVideoOutput:2982-2985 对 instanceof Surface
             // 不调 updateSurfaceSize，surfaceWidth/Height 保持 0，MpvSurfaceSizePolicy.sizeValue(0,0)
             // 返回 null → 不下发 android-surface-size，由 mpv 按 ANativeWindow_getWidth 自己取窗口尺寸。
-            // 不要改成 surfaceFrame：那会偏离官方这条路径，并且和窗口真实尺寸未必一致。
-            is Surface -> attachSurface(videoOutput, 0, 0)
+            is Surface -> attachSurface(videoOutput, 0, 0, first = true)
         }
         return Futures.immediateVoidFuture()
     }
@@ -1767,7 +1835,7 @@ class MpvPlayer(
         holder.addCallback(holderCallback)
         MpvDebug.log("[mpv] bindHolder frame=${fw}x$fh valid=${holder.surface?.isValid}")
         if (!inited) initWithOptions()
-        if (inited) bindVideoOutput()
+        if (inited) bindVideoOutput(first = true)
     }
 
     /** 照 5.6.0 detachSurfaceHolder:3393 —— 幂等摘 callback。 */
