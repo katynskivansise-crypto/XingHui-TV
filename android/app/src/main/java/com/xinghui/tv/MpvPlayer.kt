@@ -87,11 +87,6 @@ class MpvPlayer(
     private var cachedSurfaceW = 0
     private var cachedSurfaceH = 0
 
-    /** 当前 vo 真正生效的尺寸。只有它变了才需要重建 vo，见 scheduleVoRebuild 的说明。 */
-    private var voSizeW = 0
-    private var voSizeH = 0
-    private var pendingVoW = 0
-    private var pendingVoH = 0
     private val sizeHandler = android.os.Handler(android.os.Looper.getMainLooper())
     /** 起播后 1.5 秒抓一次 mpv 自己的真实状态，用来区分「暂停」「等缓冲」「时钟源起不来」。 */
     private val playDiagRunnable = Runnable {
@@ -106,6 +101,13 @@ class MpvPlayer(
         add("corePause", runCatching { core.getPropertyBoolean("core-pause") }.getOrNull())
         add("video-sync", runCatching { core.getPropertyString("video-sync") }.getOrNull())
         add("ao", runCatching { core.getPropertyString("current-ao") }.getOrNull())
+        add("aoList", runCatching { core.getPropertyString("ao-list") }.getOrNull())
+        add("audioDevice", runCatching { core.getPropertyString("audio-device") }.getOrNull())
+        add("audioDevList", runCatching { core.getPropertyString("audio-device-list") }.getOrNull())
+        add("audioPts", runCatching { core.getPropertyDouble("audio-pts") }.getOrNull())
+        add("avsync", runCatching { core.getPropertyDouble("avsync") }.getOrNull())
+        add("audioParams", runCatching { core.getPropertyString("audio-params") }.getOrNull())
+        add("audioOutParams", runCatching { core.getPropertyString("audio-out-params") }.getOrNull())
         add("vol", runCatching { core.getPropertyDouble("volume") }.getOrNull())
         add("cacheTime", runCatching { core.getPropertyDouble("demuxer-cache-time") }.getOrNull())
         add("pausedForCache", runCatching { core.getPropertyBoolean("paused-for-cache") }.getOrNull())
@@ -114,13 +116,6 @@ class MpvPlayer(
         MpvDebug.log(sb.toString())
     }
 
-    private val voRebuildRunnable = Runnable {
-        val w = pendingVoW
-        val h = pendingVoH
-        pendingVoW = 0
-        pendingVoH = 0
-        if (w > 0 && h > 0 && (w != voSizeW || h != voSizeH)) rebuildVoForSize(w, h)
-    }
     private var pendingUrl = ""
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var pendingSubs: List<String> = emptyList()
@@ -388,8 +383,16 @@ class MpvPlayer(
             core.setOptionString("demuxer-max-back-bytes", "$cacheBytes")
             // 官方 MPVView.kt：播放位置由宿主自己管（我们记在 HistoryStore），
             // 不要让 mpv 自己也写一份，否则退出时会互相覆盖。
-            // 音频硬解优先（MpvAudioDecoderPolicy:7），失败自动回落软解
-            core.setOptionString("ad", "aac_mediacodec,mp3_mediacodec,amrnb_mediacodec,amrwb_mediacodec")
+            // 不设 --ad。5.6.0 的 MpvAudioDecoderPolicy 把这四个 mediacodec 音频解码器作为
+            // 限定列表下发，但 --ad 是「只用这些」而不是「优先这些」：
+            //   不在列表里的解码器根本不会被采用。
+            // 结果 AAC 只有 Android 硬解一条路，而 mediacodec 音频输出的是硬件原生参数，
+            // 设备的 AudioTrack 不接受（ao_audiotrack.c 的
+            // "AudioTrack.getMinBufferSize returned an invalid size"），
+            // audiotrack 建不起来 → opensles 也失败 → mpv 只剩 null 音频输出。
+            // 没有真实音频输出，video-sync=audio（默认）就没有时钟源，
+            // 表现为时间轴停在 0、画面不动、同时没声音 —— 三个症状是同一个原因。
+            // 交回 mpv 默认（ffmpeg 软解），AAC/MP3 这类解起来开销可以忽略。
             // 起播缓冲（5.6.0 applyPreInitOptions:1785-1801）。
             // cache-pause-initial=no 让首帧不等缓冲填满，这一条是秒开的关键。
             core.setOptionString("cache-pause", "yes")
@@ -571,8 +574,6 @@ class MpvPlayer(
         surfaceReady = true
         cachedSurfaceW = width
         cachedSurfaceH = height
-        voSizeW = width
-        voSizeH = height
         MpvDebug.log("[mpv] attachSurface ${width}x$height first=$first ok=true")
         // 挂好之后的起播协调
         if (playPending && pendingUrl.isNotBlank()) {
@@ -596,51 +597,13 @@ class MpvPlayer(
     /**
      * 照 5.6.0 bindVideoOutput:3297 逐条实现。
      *
-     *   引用没变（同一块面，只是尺寸变了）→ 只更新 android-surface-size，最多再补一次 vo；
+     *   引用没变（同一块面，只是尺寸变了）→ 只把新尺寸写进缓存并下发 android-surface-size；
      *   引用变了（系统换了一块 Surface，或首次挂）→ 先拆旧的，再 attach 新的。
      *
      * 这层判断是官方主线要求的：surfaceChanged 里官方第一步就是 `surface = holder.getSurface()`，
      * 然后拿它和 attachedSurface 比引用。只更新尺寸而不比引用，一旦 Surface 换掉，
      * mpv 会继续往已失效的旧面推帧 —— 全屏黑屏或卡死就是这么来的。
      */
-    /**
-     * 尺寸变了，排一次 vo 重建（带 250ms 防抖，避开 surfaceChanged 连发）。
-     *
-     * 为什么必须重建 vo：
-     *   mpv 的 video/out/vo.c:238 update_opts 在 option 变化时只做两件事 ——
-     *   read_opts(vo) 和 vo->driver->control(vo, VOCTRL_VO_OPTS_CHANGED, NULL)。
-     *   而 Android 的 OpenGL context 对这条请求是：
-     *     video/out/opengl/context_android.c:125 android_control(...) { return VO_NOTIMPL; }
-     *   也就是说改 android-surface-size 只会更新 vo->opts 里的值，
-     *   真正干活的 android_reconfig（setBuffersGeometry + ra_gl_ctx_resize）永远不会被调度。
-     *
-     *   android_reconfig 只挂在 ra_ctx_fns.reconfig 上，而 reconfig 只由 vo_reconfig
-     *   → run_reconfig dispatch 触发，那条路径只在「视频参数变化」时走。
-     *
-     *   所以要让新尺寸真正生效，只能重建 vo：vo=null 销毁、vo=gpu 重建，
-     *   新 vo 走 android_init + vo_reconfig，android_reconfig 才会用新的
-     *   android_surface_size 建交换链。这不是绕路，是 mpv 唯一的重配置入口。
-     */
-    private fun scheduleVoRebuild(w: Int, h: Int) {
-        pendingVoW = w
-        pendingVoH = h
-        sizeHandler.removeCallbacks(voRebuildRunnable)
-        sizeHandler.postDelayed(voRebuildRunnable, 250)
-    }
-
-    private fun rebuildVoForSize(w: Int, h: Int) {
-        MpvDebug.log("[mpv] 尺寸 ${voSizeW}x$voSizeH → $w x$h，重建 vo 让 android_reconfig 生效")
-        runCatching { core.setPropertyString("vo", "null") }
-        val ok = runCatching { core.setPropertyString("vo", "gpu") }.isSuccess
-        if (ok) {
-            voSizeW = w
-            voSizeH = h
-            attachedVo = "gpu"
-        }
-        MpvDebug.log("[mpv] vo 重建 ok=$ok 当前 vo=${runCatching { core.getPropertyString("vo") }.getOrNull()}")
-        // 重建期间 mpv 可能自行解暂停，按之前的暂停态纠正
-        if (paused) runCatching { core.setPropertyBoolean("pause", true) }
-    }
 
     private fun bindVideoOutput(first: Boolean) {
         val holder = currentHolder ?: return
@@ -652,7 +615,6 @@ class MpvPlayer(
         val sameVideoSurface = attachedSurface != null && attachedSurface === sf
         if (sameVideoSurface) {
             core.updateSurfaceSize(w, h)
-            if (w != voSizeW || h != voSizeH) scheduleVoRebuild(w, h)
             if (attachedVo != "gpu") {
                 if (runCatching { core.setPropertyString("vo", "gpu") }.isSuccess) attachedVo = "gpu"
             }
@@ -721,11 +683,6 @@ class MpvPlayer(
         // 先摘掉 surface 回调再 destroy，否则释放后视图的可见性变化还会回调进来，
         // 把已经 destroy 的 libmpv 再 init 一遍（同 5.6.0 handleRelease 里的 clearVideoOutput）。
         currentHolder?.let { h -> runCatching { h.removeCallback(holderCallback) } }
-        sizeHandler.removeCallbacks(voRebuildRunnable)
-        pendingVoW = 0
-        pendingVoH = 0
-        voSizeW = 0
-        voSizeH = 0
         currentHolder = null
         runCatching { (host as? android.view.TextureView)?.removeCallbacks(textureWatch) }
         runCatching { ownedSurface?.release() }
@@ -1843,8 +1800,6 @@ class MpvPlayer(
         surfaceReady = false
         cachedSurfaceW = 0
         cachedSurfaceH = 0
-        voSizeW = 0
-        voSizeH = 0
         MpvDebug.log("[mpv] clearVideoOutput 完成（面与尺寸已全部复位）")
         return Futures.immediateVoidFuture()
     }
