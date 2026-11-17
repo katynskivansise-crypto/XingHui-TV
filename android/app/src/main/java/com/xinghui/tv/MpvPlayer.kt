@@ -93,6 +93,27 @@ class MpvPlayer(
     private var pendingVoW = 0
     private var pendingVoH = 0
     private val sizeHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /** 起播后 1.5 秒抓一次 mpv 自己的真实状态，用来区分「暂停」「等缓冲」「时钟源起不来」。 */
+    private val playDiagRunnable = Runnable {
+        if (!inited) return@Runnable
+        val sb = StringBuilder("[mpv] 起播后1.5s")
+        fun add(k: String, v: Any?) { sb.append(' ').append(k).append('=').append(v) }
+        add("pause", runCatching { core.getPropertyBoolean("pause") }.getOrNull())
+        add("time-pos", runCatching { core.getPropertyDouble("time-pos") }.getOrNull())
+        add("idle", runCatching { core.getPropertyBoolean("idle-active") }.getOrNull())
+        add("coreIdle", runCatching { core.getPropertyBoolean("core-idle") }.getOrNull())
+        add("eof", runCatching { core.getPropertyBoolean("eof-reached") }.getOrNull())
+        add("corePause", runCatching { core.getPropertyBoolean("core-pause") }.getOrNull())
+        add("video-sync", runCatching { core.getPropertyString("video-sync") }.getOrNull())
+        add("ao", runCatching { core.getPropertyString("current-ao") }.getOrNull())
+        add("vol", runCatching { core.getPropertyDouble("volume") }.getOrNull())
+        add("cacheTime", runCatching { core.getPropertyDouble("demuxer-cache-time") }.getOrNull())
+        add("pausedForCache", runCatching { core.getPropertyBoolean("paused-for-cache") }.getOrNull())
+        add("aid", runCatching { core.getPropertyString("aid") }.getOrNull())
+        add("vid", runCatching { core.getPropertyString("vid") }.getOrNull())
+        MpvDebug.log(sb.toString())
+    }
+
     private val voRebuildRunnable = Runnable {
         val w = pendingVoW
         val h = pendingVoH
@@ -299,7 +320,7 @@ class MpvPlayer(
                 if (logFile.exists() && logFile.length() > 2L * 1024 * 1024) logFile.delete()
             }
             core.setOptionString("log-file", logFile.absolutePath)
-            core.setOptionString("msg-level", "all=info")
+            core.setOptionString("msg-level", "all=v")
             core.setOptionString("idle", "yes")
             core.setOptionString("vo", "gpu")
             core.setOptionString("gpu-context", "android")
@@ -861,6 +882,8 @@ class MpvPlayer(
             core.setPropertyBoolean("pause", startPaused)
             core.command(arrayOf("loadfile", url, "replace"))
             MpvDebug.log("[mpv] 起播 ${url.take(60)} start=${pendingStartMs}ms")
+            sizeHandler.removeCallbacks(playDiagRunnable)
+            sizeHandler.postDelayed(playDiagRunnable, 1500L)
         }.onFailure { Log.e(TAG, "[mpv] 起播失败", it) }
     }
 
